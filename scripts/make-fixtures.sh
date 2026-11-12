@@ -63,6 +63,8 @@ ff -f lavfi -i "testsrc2=size=480x270:rate=15:duration=3" \
 if command -v sips >/dev/null; then
   echo "HEIC and PDF (sips)"
   sips -s format heic image-photo.jpg --out image-photo.heic >/dev/null
+  # Transparent: the alpha plane is a separate auxiliary image (its own tile grid).
+  sips -s format heic image-alpha.png --out image-alpha.heic >/dev/null
   sips -s format pdf image-photo.jpg --out document.pdf >/dev/null
 else
   echo "  skipped: HEIC and PDF need sips (macOS)"

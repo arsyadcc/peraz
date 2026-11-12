@@ -122,6 +122,16 @@ pub fn parse_probe_json(json: &str, size_bytes: u64) -> Result<MediaInfo, serde_
         track.frame_count = Some(1);
         // Transparency lives in a separate auxiliary image that ffprobe does not expose.
         track.alpha = Alpha::Unknown;
+    } else if let Some(track) = video.as_mut() {
+        // A single HEIF/AVIF picture may have an alpha plane as a dependent grayscale stream
+        // (which may also be a depth or gain map: the decoder tells them apart).
+        let auxiliary_gray = videos().any(|s| {
+            s.disposition.dependent == 1
+                && s.pix_fmt.as_deref().is_some_and(|p| p.starts_with("gray"))
+        });
+        if auxiliary_gray {
+            track.alpha = Alpha::Unknown;
+        }
     }
 
     let audio: Vec<AudioTrack> = raw

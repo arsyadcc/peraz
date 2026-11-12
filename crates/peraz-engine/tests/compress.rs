@@ -1002,3 +1002,79 @@ fn hdr_video_stays_hdr_and_refuses_h264() {
     assert!(message.contains("--codec hevc"), "{message}");
     assert!(!refused.exists());
 }
+
+/// Percentage of fully transparent pixels in the fixture's left edge, where `image-alpha.png` is
+/// transparent outside its central circle.
+fn transparent_left_edge(picture: &image::DynamicImage) -> usize {
+    let rgba = picture.to_rgba8();
+    let edge: Vec<u8> = (0..rgba.height())
+        .map(|y| rgba.get_pixel(2, y)[3])
+        .collect();
+    edge.iter().filter(|a| **a < 16).count() * 100 / edge.len()
+}
+
+#[test]
+fn heic_and_avif_alpha_planes_are_kept() {
+    let Some(env) = setup("heic-alpha") else {
+        return;
+    };
+    let heic = env.fixtures.join("image-alpha.heic");
+    if !heic.is_file() {
+        eprintln!("skipped: the transparent HEIC fixture is only generated on macOS");
+        return;
+    }
+    let reference =
+        transparent_left_edge(&image::open(env.fixtures.join("image-alpha.png")).unwrap());
+    assert!(reference > 50, "{reference}");
+
+    let convert = |input: &Path, format: ImageFormat, name: &str| {
+        let output = env.out.join(name);
+        let mut job = job(input.to_owned(), output.clone(), Quality::High);
+        job.recipe.image.format = format;
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{name}: {:?}",
+            report.outcome
+        );
+        output
+    };
+
+    for (format, name) in [
+        (ImageFormat::Png, "from-heic.png"),
+        (ImageFormat::Webp, "from-heic.webp"),
+    ] {
+        let output = convert(&heic, format, name);
+        let decoded = image::open(&output).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1200, 900), "{name}");
+        let edge = transparent_left_edge(&decoded);
+        assert!(
+            edge.abs_diff(reference) < 10,
+            "{name}: {edge} vs {reference}"
+        );
+    }
+
+    // JPEG has no alpha: transparent pixels are placed on white.
+    let jpeg = image::open(convert(&heic, ImageFormat::Jpeg, "from-heic.jpg"))
+        .unwrap()
+        .to_rgb8();
+    let corner = jpeg.get_pixel(2, 2);
+    assert!(corner.0.iter().all(|c| *c > 240), "{corner:?}");
+
+    // AVIF output keeps an alpha item, and reading it back (AVIF input) keeps the transparency.
+    let avif = convert(&heic, ImageFormat::Avif, "from-heic.avif");
+    let properties = peraz_engine::heif::read_properties(&std::fs::read(&avif).unwrap());
+    assert!(properties.alpha.is_some(), "{properties:?}");
+    let back = image::open(convert(&avif, ImageFormat::Png, "from-avif.png")).unwrap();
+    let edge = transparent_left_edge(&back);
+    assert!(
+        edge.abs_diff(reference) < 10,
+        "AVIF round trip: {edge} vs {reference}"
+    );
+}

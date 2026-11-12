@@ -4,6 +4,8 @@
 //! with `xstack` and cropped to the image size. FFmpeg does not apply the HEIF transformations
 //! or export the color profile with the pixels, so this module reads them from the file's
 //! ISO-BMFF boxes (`pitm`, `ipco`, `ipma`, `colr`, `irot`, `imir`) and applies them itself.
+//! Transparency is a separate auxiliary image (`iref` type `auxl`, `auxC` alpha type), decoded
+//! like the main picture and merged in as its alpha channel.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -18,7 +20,10 @@ use crate::image::Decoded;
 /// Decodes a HEIF/AVIF still image with its orientation applied and its ICC profile.
 pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
     let url = file_url(input)?;
-    let filter = tile_filter(tools, &url)?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let properties = read_properties(&bytes);
+    let (filter, has_alpha) = picture_filter(tools, &url, &properties)?;
     let mut cmd = command(&tools.ffmpeg);
     cmd.args([
         "-hide_banner",
@@ -41,7 +46,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         "-c:v",
         "png",
         "-pix_fmt",
-        "rgb24",
+        if has_alpha { "rgba" } else { "rgb24" },
         "-f",
         "image2pipe",
         "pipe:1",
@@ -58,9 +63,6 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
     let mut image = image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
         .map_err(|e| format!("cannot read the decoded picture: {e}"))?;
 
-    let bytes =
-        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let properties = read_properties(&bytes);
     for transform in &properties.transforms {
         image = transform.apply(image);
     }
@@ -88,7 +90,11 @@ struct Probe {
 #[derive(Deserialize)]
 struct ProbeStream {
     index: u32,
+    /// The HEIF item ID, in hex (`0x7`).
+    id: Option<String>,
     codec_type: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
     #[serde(default)]
     disposition: ProbeDisposition,
 }
@@ -101,10 +107,45 @@ struct ProbeDisposition {
 
 #[derive(Deserialize)]
 struct ProbeGroup {
+    /// The HEIF item ID of the grid, in hex.
+    id: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
     #[serde(default)]
     components: Vec<TileGrid>,
+    /// The group's streams: tiles refer to them by position in this list.
+    #[serde(default)]
+    streams: Vec<GroupStream>,
+}
+
+#[derive(Deserialize)]
+struct GroupStream {
+    index: u32,
+}
+
+impl ProbeGroup {
+    /// The tile grid, with tiles pointing at the file's stream indexes.
+    fn grid(&self) -> Option<TileGrid> {
+        if self.kind.as_deref() != Some("Tile Grid") {
+            return None;
+        }
+        let grid = self.components.first()?;
+        let subcomponents = grid
+            .subcomponents
+            .iter()
+            .map(|tile| {
+                let stream = self.streams.get(usize::try_from(tile.stream_index).ok()?)?;
+                Some(Tile {
+                    stream_index: stream.index,
+                    ..*tile
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!subcomponents.is_empty()).then_some(TileGrid {
+            subcomponents,
+            ..*grid
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,7 +160,7 @@ struct TileGrid {
     subcomponents: Vec<Tile>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 struct Tile {
     stream_index: u32,
     #[serde(rename = "tile_horizontal_offset")]
@@ -128,8 +169,18 @@ struct Tile {
     y: u32,
 }
 
-/// Builds the filter graph that produces the full picture as `[out]`.
-fn tile_filter(tools: &Toolchain, url: &std::ffi::OsStr) -> Result<String, String> {
+/// Parses the `0x7`-style item IDs that `ffprobe` prints.
+fn item_id(id: Option<&String>) -> Option<u32> {
+    u32::from_str_radix(id?.strip_prefix("0x")?, 16).ok()
+}
+
+/// Builds the filter graph that produces the full picture as `[out]`: the primary item, with
+/// its alpha item merged in when there is one. Returns whether the picture has alpha.
+fn picture_filter(
+    tools: &Toolchain,
+    url: &std::ffi::OsStr,
+    properties: &Properties,
+) -> Result<(String, bool), String> {
     let mut cmd = command(&tools.ffprobe);
     cmd.args([
         "-v",
@@ -147,29 +198,67 @@ fn tile_filter(tools: &Toolchain, url: &std::ffi::OsStr) -> Result<String, Strin
     let json = check("ffprobe", output).map_err(|e| e.to_string())?;
     let probe: Probe =
         serde_json::from_str(&json).map_err(|e| format!("unexpected ffprobe output: {e}"))?;
-    let grid = probe
-        .stream_groups
-        .iter()
-        .filter(|g| g.kind.as_deref() == Some("Tile Grid"))
-        .find_map(|g| g.components.first());
-    if let Some(grid) = grid.filter(|g| !g.subcomponents.is_empty()) {
-        return Ok(grid_filter(grid));
-    }
-    let stream = probe
-        .streams
-        .iter()
-        .find(|s| s.codec_type.as_deref() == Some("video") && s.disposition.dependent == 0)
-        .or_else(|| {
-            probe
-                .streams
-                .iter()
-                .find(|s| s.codec_type.as_deref() == Some("video"))
-        })
+    let (color, size) = item_filter(&probe, properties.primary, "color")
+        .or_else(|| fallback_filter(&probe, "color"))
         .ok_or("the file contains no picture")?;
-    Ok(format!("[0:{}]null[out]", stream.index))
+    let alpha = properties
+        .alpha
+        .and_then(|item| item_filter(&probe, Some(item), "alpha"));
+    Ok(match alpha {
+        // The alpha plane may be stored at another size, and with limited-range values.
+        Some((alpha, _)) => (
+            format!(
+                "{color};{alpha};[alpha]scale=w={}:h={}:in_range=auto:out_range=full,format=gray[a];\
+                 [color]format=rgb24[c];[c][a]alphamerge,format=rgba[out]",
+                size.0, size.1
+            ),
+            true,
+        ),
+        None => (format!("{color};[color]null[out]"), false),
+    })
 }
 
-fn grid_filter(grid: &TileGrid) -> String {
+/// The filter that produces `item` (a tile grid or a single picture) as `[label]`, and its size.
+fn item_filter(probe: &Probe, item: Option<u32>, label: &str) -> Option<(String, (u32, u32))> {
+    let item = item?;
+    if let Some(grid) = probe
+        .stream_groups
+        .iter()
+        .find(|g| item_id(g.id.as_ref()) == Some(item))
+        .and_then(ProbeGroup::grid)
+    {
+        return Some((grid_filter(&grid, label), (grid.width, grid.height)));
+    }
+    let stream = probe.streams.iter().find(|s| {
+        s.codec_type.as_deref() == Some("video") && item_id(s.id.as_ref()) == Some(item)
+    })?;
+    Some((
+        format!("[0:{}]null[{label}]", stream.index),
+        (stream.width?, stream.height?),
+    ))
+}
+
+/// When the primary item is unknown: the first tile grid, else the first independent picture.
+fn fallback_filter(probe: &Probe, label: &str) -> Option<(String, (u32, u32))> {
+    if let Some(grid) = probe.stream_groups.iter().find_map(ProbeGroup::grid) {
+        return Some((grid_filter(&grid, label), (grid.width, grid.height)));
+    }
+    let videos = || {
+        probe
+            .streams
+            .iter()
+            .filter(|s| s.codec_type.as_deref() == Some("video"))
+    };
+    let stream = videos()
+        .find(|s| s.disposition.dependent == 0)
+        .or_else(|| videos().next())?;
+    Some((
+        format!("[0:{}]null[{label}]", stream.index),
+        (stream.width.unwrap_or(0), stream.height.unwrap_or(0)),
+    ))
+}
+
+fn grid_filter(grid: &TileGrid, label: &str) -> String {
     let inputs = grid.subcomponents.iter().fold(String::new(), |mut acc, t| {
         let _ = write!(acc, "[0:{}]", t.stream_index);
         acc
@@ -184,10 +273,10 @@ fn grid_filter(grid: &TileGrid) -> String {
         grid.width, grid.height, grid.horizontal_offset, grid.vertical_offset
     );
     if grid.subcomponents.len() == 1 {
-        return format!("{inputs}{crop}[out]");
+        return format!("{inputs}{crop}[{label}]");
     }
     format!(
-        "{inputs}xstack=inputs={}:layout={}:fill=black,{crop}[out]",
+        "{inputs}xstack=inputs={}:layout={}:fill=black,{crop}[{label}]",
         grid.subcomponents.len(),
         layout.join("|")
     )
@@ -221,11 +310,21 @@ impl Transform {
 /// What Peraz needs from a HEIF file's item properties.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Properties {
+    /// The primary item's ID.
+    pub primary: Option<u32>,
+    /// The item holding the primary item's transparency, if any.
+    pub alpha: Option<u32>,
     pub icc: Option<Vec<u8>>,
     pub transforms: Vec<Transform>,
 }
 
-/// Reads the primary item's ICC profile and transformations. Malformed or missing boxes yield
+/// `auxC` types that mark an auxiliary image as an alpha plane (HEVC and AV1 conventions).
+const ALPHA_TYPES: &[&[u8]] = &[
+    b"urn:mpeg:hevc:2015:auxid:1",
+    b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+];
+
+/// Reads the primary item, its alpha item, ICC profile, and transformations. Malformed or missing boxes yield
 /// empty properties: the picture still decodes, just without them.
 pub fn read_properties(file: &[u8]) -> Properties {
     parse_properties(file).unwrap_or_default()
@@ -237,8 +336,10 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     let mut primary = None;
     let mut properties: Vec<Bx> = Vec::new();
     let mut associations: Vec<(u32, Vec<u16>)> = Vec::new();
+    let mut auxiliary: Vec<(u32, u32)> = Vec::new();
     for child in boxes(meta_children) {
         match &child.kind {
+            b"iref" => auxiliary = parse_auxl(child.payload)?,
             b"pitm" => {
                 let version = *child.payload.first()?;
                 primary = Some(if version == 0 {
@@ -260,12 +361,29 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         }
     }
     let primary = primary?;
-    let own: Vec<&Bx> = associations
+    let properties_of = |id: u32| -> Vec<&Bx> {
+        associations
+            .iter()
+            .filter(|(item, _)| *item == id)
+            .flat_map(|(_, indexes)| indexes.iter())
+            .filter_map(|&i| properties.get(usize::from(i).checked_sub(1)?))
+            .collect()
+    };
+    let own = properties_of(primary);
+    // Auxiliary images of the primary item that are alpha planes (not depth maps or gain maps).
+    let alpha = auxiliary
         .iter()
-        .filter(|(item, _)| *item == primary)
-        .flat_map(|(_, indexes)| indexes.iter())
-        .filter_map(|&i| properties.get(usize::from(i).checked_sub(1)?))
-        .collect();
+        .filter(|(_, to)| *to == primary)
+        .map(|(from, _)| *from)
+        .find(|&item| {
+            properties_of(item).iter().any(|b| {
+                &b.kind == b"auxC"
+                    && b.payload.get(4..).is_some_and(|urn| {
+                        let urn = urn.split(|c| *c == 0).next().unwrap_or_default();
+                        ALPHA_TYPES.contains(&urn)
+                    })
+            })
+        });
 
     let icc_of = |b: &Bx| {
         (&b.kind == b"colr")
@@ -291,12 +409,43 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
             _ => None,
         })
         .collect();
-    Some(Properties { icc, transforms })
+    Some(Properties {
+        primary: Some(primary),
+        alpha,
+        icc,
+        transforms,
+    })
 }
 
 fn icc_payload(colr: &[u8]) -> Option<Vec<u8>> {
     let kind = colr.get(0..4)?;
     (kind == b"prof" || kind == b"rICC").then(|| colr[4..].to_vec())
+}
+
+/// `iref`: the (auxiliary item, main item) pairs of its `auxl` references.
+fn parse_auxl(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
+    let wide = *payload.first()? != 0; // version 1: 32-bit item IDs
+    let id = |at: usize| {
+        if wide {
+            be32(payload, at)
+        } else {
+            be16(payload, at).map(u32::from)
+        }
+    };
+    let width = if wide { 4 } else { 2 };
+    let mut pairs = Vec::new();
+    for reference in boxes(payload.get(4..)?) {
+        if &reference.kind != b"auxl" {
+            continue;
+        }
+        let at = offset_in(payload, reference.payload)?;
+        let from = id(at)?;
+        let count = be16(payload, at + width)?;
+        for i in 0..usize::from(count) {
+            pairs.push((from, id(at + width + 2 + i * width)?));
+        }
+    }
+    Some(pairs)
 }
 
 /// `ipma`: for each item, the 1-based indexes of its properties in `ipco`.
@@ -707,6 +856,61 @@ mod tests {
         assert_eq!(shift_iloc(&iloc, 0, u32::MAX as usize), None);
     }
 
+    /// Primary item 1 with an alpha plane (item 2) and an HDR gain map (item 3).
+    fn sample_with_auxiliary(alpha_linked: bool) -> Vec<u8> {
+        let aux_c = |urn: &[u8]| bx(b"auxC", &[&[0, 0, 0, 0][..], urn, &[0]].concat());
+        let ipco = [
+            bx(b"colr", b"profICC"),
+            aux_c(b"urn:mpeg:hevc:2015:auxid:1"),
+            aux_c(b"urn:com:apple:photo:2020:aux:hdrgainmap"),
+        ]
+        .concat();
+        let ipma = [
+            vec![0, 0, 0, 0],
+            3u32.to_be_bytes().to_vec(),
+            vec![0, 1, 1, 1],
+            vec![0, 2, 1, 2],
+            vec![0, 3, 1, 3],
+        ]
+        .concat();
+        let iprp = bx(b"iprp", &[bx(b"ipco", &ipco), bx(b"ipma", &ipma)].concat());
+        let mut references = vec![bx(b"auxl", &[0, 3, 0, 1, 0, 1])];
+        if alpha_linked {
+            references.push(bx(b"auxl", &[0, 2, 0, 1, 0, 1]));
+        }
+        references.push(bx(b"dimg", &[0, 1, 0, 1, 0, 4]));
+        let iref = bx(b"iref", &[vec![0, 0, 0, 0], references.concat()].concat());
+        let pitm = bx(b"pitm", &[0, 0, 0, 0, 0, 1]);
+        let meta = bx(b"meta", &[vec![0, 0, 0, 0], pitm, iref, iprp].concat());
+        [bx(b"ftyp", b"heic"), meta].concat()
+    }
+
+    #[test]
+    fn finds_the_alpha_plane_but_not_other_auxiliary_images() {
+        let properties = read_properties(&sample_with_auxiliary(true));
+        assert_eq!((properties.primary, properties.alpha), (Some(1), Some(2)));
+        let gain_map_only = read_properties(&sample_with_auxiliary(false));
+        assert_eq!(gain_map_only.alpha, None);
+        assert_eq!(read_properties(&sample()).alpha, None);
+    }
+
+    #[test]
+    fn tiles_refer_to_streams_by_position_in_their_group() {
+        // FFprobe numbers a grid's tiles within the group: the alpha grid's tile 0 is stream 2.
+        let group: ProbeGroup = serde_json::from_str(
+            r#"{"id": "0xe", "type": "Tile Grid", "streams": [{"index": 2}, {"index": 3}],
+                "components": [{"width": 900, "height": 400, "subcomponents": [
+                  {"stream_index": 0, "tile_horizontal_offset": 0, "tile_vertical_offset": 0},
+                  {"stream_index": 1, "tile_horizontal_offset": 512, "tile_vertical_offset": 0}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(item_id(group.id.as_ref()), Some(14));
+        assert_eq!(
+            grid_filter(&group.grid().unwrap(), "alpha"),
+            "[0:2][0:3]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=900:400:0:0[alpha]"
+        );
+    }
+
     #[test]
     fn malformed_files_have_no_properties() {
         assert_eq!(read_properties(b""), Properties::default());
@@ -754,7 +958,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            grid_filter(&grid),
+            grid_filter(&grid, "out"),
             "[0:0][0:1]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=1000:600:0:0[out]"
         );
     }

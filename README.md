@@ -160,8 +160,8 @@ clip can always be copied.
 The EXIF orientation is applied and the color profile is kept; other metadata (EXIF, XMP,
 including GPS location) is removed. Transparent images converted to JPEG are placed on white.
 Every output format, AVIF and WebP included, carries the color profile, so wide-gamut photos
-(Display P3) stay wide-gamut.
-HEIC photos become JPEG by default (use `--format` for WebP, AVIF, or PNG). When the format
+(Display P3) stay wide-gamut. HEIC photos become JPEG by default (use `--format` for WebP,
+AVIF, or PNG); transparent HEIC and AVIF pictures keep their transparency. When the format
 changes on purpose, the result is kept even if it is larger, and the report shows the increase.
 
 ### GIFs and animation
