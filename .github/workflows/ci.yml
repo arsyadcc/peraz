@@ -71,5 +71,6 @@ jobs:
       # sips makes the HEIC samples, so only this job tests HEIC end to end.
       - run: ./scripts/make-fixtures.sh
       - run: cargo test --workspace --locked -- --nocapture 2>&1 | tee test.log
+        shell: bash # -o pipefail, so a failing test fails the step despite tee
       - name: no test skipped for a missing sample
         run: "! grep -F 'skipped: ' test.log"
