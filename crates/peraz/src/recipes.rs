@@ -36,9 +36,12 @@ pub struct Recipe {
     pub settings: Settings,
 }
 
+/// The environment variable that sets the configuration folder.
+pub const CONFIG_ENV: &str = "PERAZ_CONFIG_DIR";
+
 /// Peraz's configuration folder.
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("PERAZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
+    if let Some(dir) = std::env::var_os(CONFIG_ENV).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     let home = || {

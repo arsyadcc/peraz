@@ -17,6 +17,9 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
   elvish. In zsh and fish, `--recipe` completes recipe names. The Homebrew formula installs the
   completions.
 - **Interface:** `peraz recipe list --names` prints only the recipe names, one per line.
+- Reference documentation in `docs/`: every command, flag, environment variable, and exit code
+  ([cli.md](docs/cli.md)), every `--json` field ([json.md](docs/json.md)), and the recipe format
+  ([recipes.md](docs/recipes.md)). Tests fail when the interface and the docs disagree.
 - **Interface:** `--json` probe and report output include each video's color description
   (`color`: `primaries`, `transfer`, `matrix`, `range`), and `peraz probe` shows `HDR (PQ)` or
   `HDR (HLG)`.
@@ -30,6 +33,9 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
   message instead of producing washed-out colors.
 - AVIF output keeps the color profile instead of converting the colors to sRGB, so wide-gamut
   pictures (Display P3) stay wide-gamut.
+- **Interface:** `peraz doctor --json` names the FFmpeg version and license `ffmpeg`, like
+  `peraz compress --json`, instead of `build`.
+- **Interface:** `fps` in a recipe accepts 1–50, like `--fps` (it accepted up to 60).
 
 ### Fixed
 

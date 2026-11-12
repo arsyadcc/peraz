@@ -174,7 +174,7 @@ fn parse<T: std::str::FromStr<Err = peraz_core::recipe::UnknownValue>>(
 
 #[derive(Serialize)]
 struct Output<'a> {
-    ffmpeg: Option<&'a BuildInfo>,
+    ffmpeg: &'a BuildInfo,
     /// The recipe used: a name, or the path of a project `peraz.toml`.
     recipe: Option<&'a str>,
     /// Present in --check mode.
@@ -316,7 +316,7 @@ fn finish_run(
     });
     if args.json {
         print_json(Output {
-            ffmpeg: Some(build),
+            ffmpeg: build,
             recipe: recipe_name,
             results: reports,
             summary,

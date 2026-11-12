@@ -18,7 +18,8 @@ pub struct Args {
 struct Report<'a> {
     peraz: &'a str,
     toolchain: &'a Toolchain,
-    build: &'a BuildInfo,
+    /// Version and license of the FFmpeg build (`ffmpeg` in `compress --json` too).
+    ffmpeg: &'a BuildInfo,
     hardware_video_encoders: Vec<HardwareEncoder<'a>>,
     hwaccels: &'a [String],
     encoders: Vec<&'a str>,
@@ -62,7 +63,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     let report = Report {
         peraz: peraz_engine::VERSION,
         toolchain: &tools,
-        build: &build,
+        ffmpeg: &build,
         hardware_video_encoders: caps
             .hardware_video_encoders()
             .map(|(name, api)| HardwareEncoder { name, api })
@@ -84,7 +85,7 @@ fn print_human(report: &Report, caps: &Capabilities) {
         ToolSource::Env => "PERAZ_FFMPEG",
         ToolSource::Path => "PATH",
     };
-    let license = match report.build.license {
+    let license = match report.ffmpeg.license {
         BuildLicense::Lgpl => "LGPL",
         BuildLicense::Gpl => "GPL",
         BuildLicense::Nonfree => "nonfree (not redistributable)",
@@ -97,7 +98,7 @@ fn print_human(report: &Report, caps: &Capabilities) {
     println!("ffprobe  {}", report.toolchain.ffprobe.display());
     println!(
         "build    {} · {license} · {} encoders",
-        report.build.version,
+        report.ffmpeg.version,
         caps.encoders.len()
     );
     println!(

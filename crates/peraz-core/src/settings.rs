@@ -158,11 +158,12 @@ impl Settings {
         if let Some(size) = &self.target_size {
             parse_size(size).map_err(|e| SettingsError(format!("target_size: {e}")))?;
         }
+        // The same range as `--fps`: GIF frames last at least 1/50 s.
         if let Some(fps) = self.fps
-            && !(1..=60).contains(&fps)
+            && !(1..=50).contains(&fps)
         {
             return Err(SettingsError(format!(
-                "fps must be between 1 and 60, not {fps}"
+                "fps must be between 1 and 50, not {fps}"
             )));
         }
         for (key, value) in [

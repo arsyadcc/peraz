@@ -6,6 +6,8 @@
 mod completions;
 mod compress;
 mod doctor;
+#[cfg(test)]
+mod interface_tests;
 mod probe;
 mod recipes;
 mod watch;

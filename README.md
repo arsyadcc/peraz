@@ -257,16 +257,11 @@ Ctrl-C.
 
 ### Scripting: JSON and exit codes
 
-Every `--json` document carries a `schema_version`, which changes only on breaking changes.
-
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Success, including files kept or skipped |
-| `1` | At least one input failed |
-| `2` | Invalid usage |
-| `3` | Environment problem, for example FFmpeg not found |
-| `4` | `--check` found files that could be smaller |
-| `130` | Cancelled with Ctrl-C or SIGTERM; the current file's partial output is removed |
+`--json` prints a document with a `schema_version`, which changes only on breaking changes; every
+field is described in [docs/json.md](docs/json.md). Exit codes: `0` success, `1` an input
+failed, `2` invalid usage, `3` FFmpeg missing or broken, `4` `--check` found files that could be
+smaller, `130` cancelled. The [command-line reference](docs/cli.md) has every command, flag,
+environment variable, and exit code; the [recipe format](docs/recipes.md) has its own page.
 
 ## Requirements
 
