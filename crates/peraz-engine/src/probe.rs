@@ -1,0 +1,323 @@
+//! Probing media with `ffprobe`.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use peraz_core::{Alpha, AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
+use serde::Deserialize;
+
+use crate::EngineError;
+use crate::ffmpeg::{Toolchain, check, command};
+
+/// Probes one file.
+pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
+    let input_error = |source| EngineError::Input {
+        path: path.to_owned(),
+        source,
+    };
+    let metadata = std::fs::metadata(path).map_err(input_error)?;
+    if !metadata.is_file() {
+        return Err(input_error(std::io::Error::other("not a regular file")));
+    }
+    let absolute = std::path::absolute(path).map_err(input_error)?;
+    // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
+    // as protocols: only local files are ever opened.
+    let mut url = std::ffi::OsString::from("file:");
+    url.push(absolute.as_os_str());
+
+    let run = |with_groups: bool| {
+        let mut cmd = command(&tools.ffprobe);
+        cmd.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ]);
+        if with_groups {
+            cmd.arg("-show_stream_groups");
+        }
+        cmd.arg("-i").arg(&url);
+        let output = cmd.output().map_err(|source| EngineError::Spawn {
+            path: tools.ffprobe.clone(),
+            source,
+        })?;
+        check("ffprobe", output)
+    };
+    // Stream groups (needed for HEIC/AVIF tile grids) arrived in FFmpeg 7; older ffprobe
+    // rejects the option, so retry without it.
+    let json = match run(true) {
+        Err(EngineError::ToolFailed { message, .. }) if message.contains("show_stream_groups") => {
+            run(false)?
+        }
+        Err(EngineError::ToolFailed {
+            tool,
+            status,
+            message,
+        }) => {
+            // ffprobe prefixes errors with the input URL; the caller already knows the path.
+            let prefix = format!("{}: ", url.to_string_lossy());
+            let message = message.strip_prefix(&prefix).unwrap_or(&message).to_owned();
+            return Err(EngineError::ToolFailed {
+                tool,
+                status,
+                message,
+            });
+        }
+        other => other?,
+    };
+    parse_probe_json(&json, metadata.len()).map_err(|e| EngineError::BadOutput {
+        tool: "ffprobe",
+        message: e.to_string(),
+    })
+}
+
+/// Converts `ffprobe -print_format json -show_format -show_streams [-show_stream_groups]`
+/// output into [`MediaInfo`]. `size_bytes` is the file size measured by the caller.
+pub fn parse_probe_json(json: &str, size_bytes: u64) -> Result<MediaInfo, serde_json::Error> {
+    let raw: Raw = serde_json::from_str(json)?;
+    let container = raw
+        .format
+        .as_ref()
+        .map(|f| f.format_name.clone())
+        .unwrap_or_default();
+
+    let tile_grid = raw
+        .stream_groups
+        .iter()
+        .find(|g| g.kind.as_deref() == Some("Tile Grid"))
+        .and_then(|g| g.components.first());
+
+    let videos = || {
+        raw.streams
+            .iter()
+            .filter(|s| s.codec_type.as_deref() == Some("video"))
+    };
+    let main_video = videos()
+        .find(|s| s.disposition.attached_pic == 0 && s.disposition.dependent == 0)
+        .or_else(|| videos().find(|s| s.disposition.attached_pic == 0));
+
+    let mut video = main_video.and_then(RawStream::video_track);
+    if let (Some(grid), Some(track)) = (tile_grid, video.as_mut()) {
+        // A tile grid is one picture: report the full size, not one tile.
+        track.width = grid.width.unwrap_or(track.width);
+        track.height = grid.height.unwrap_or(track.height);
+        track.frame_count = Some(1);
+        // Transparency lives in a separate auxiliary image that ffprobe does not expose.
+        track.alpha = Alpha::Unknown;
+    }
+
+    let audio: Vec<AudioTrack> = raw
+        .streams
+        .iter()
+        .filter(|s| s.codec_type.as_deref() == Some("audio"))
+        .map(RawStream::audio_track)
+        .collect();
+
+    let kind = MediaKind::classify(
+        &container,
+        video.as_ref(),
+        !audio.is_empty(),
+        tile_grid.is_some(),
+    );
+    let still = matches!(kind, MediaKind::Image);
+    if still && let Some(track) = video.as_mut() {
+        // ffprobe reports a nominal 25 fps and a bit rate for still images; neither is real.
+        track.frame_rate = None;
+        track.bit_rate = None;
+    }
+
+    let format = raw.format.as_ref();
+    Ok(MediaInfo {
+        kind,
+        container,
+        size_bytes,
+        duration_seconds: if still {
+            None
+        } else {
+            format.and_then(|f| parse_num(f.duration.as_deref()))
+        },
+        bit_rate: if still {
+            None
+        } else {
+            format.and_then(|f| parse_num(f.bit_rate.as_deref()))
+        },
+        video,
+        audio,
+    })
+}
+
+#[derive(Deserialize)]
+struct Raw {
+    #[serde(default)]
+    streams: Vec<RawStream>,
+    format: Option<RawFormat>,
+    #[serde(default)]
+    stream_groups: Vec<RawGroup>,
+}
+
+#[derive(Deserialize)]
+struct RawFormat {
+    format_name: String,
+    duration: Option<String>,
+    bit_rate: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawGroup {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    components: Vec<RawComponent>,
+}
+
+#[derive(Deserialize)]
+struct RawComponent {
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawDisposition {
+    #[serde(default)]
+    attached_pic: u8,
+    #[serde(default)]
+    dependent: u8,
+}
+
+#[derive(Deserialize)]
+struct RawSideData {
+    rotation: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct RawStream {
+    codec_type: Option<String>,
+    codec_name: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    pix_fmt: Option<String>,
+    avg_frame_rate: Option<String>,
+    r_frame_rate: Option<String>,
+    nb_frames: Option<String>,
+    bit_rate: Option<String>,
+    channels: Option<u32>,
+    sample_rate: Option<String>,
+    #[serde(default)]
+    disposition: RawDisposition,
+    #[serde(default)]
+    side_data_list: Vec<RawSideData>,
+    #[serde(default)]
+    tags: HashMap<String, String>,
+}
+
+impl RawStream {
+    fn video_track(&self) -> Option<VideoTrack> {
+        let pixel_format = self.pix_fmt.clone();
+        Some(VideoTrack {
+            codec: self.codec_name.clone().unwrap_or_default(),
+            width: self.width?,
+            height: self.height?,
+            rotation: self.rotation(),
+            frame_rate: self.frame_rate(),
+            frame_count: parse_num(self.nb_frames.as_deref()),
+            // FFmpeg always decodes GIF to `bgra`, whether or not the palette has a transparent
+            // entry, so the pixel format says nothing about GIF transparency.
+            alpha: if self.codec_name.as_deref() == Some("gif") {
+                Alpha::Unknown
+            } else {
+                pixel_format
+                    .as_deref()
+                    .map_or(Alpha::Unknown, Alpha::from_pixel_format)
+            },
+            pixel_format,
+            bit_rate: parse_num(self.bit_rate.as_deref()),
+        })
+    }
+
+    fn audio_track(&self) -> AudioTrack {
+        AudioTrack {
+            codec: self.codec_name.clone().unwrap_or_default(),
+            channels: self.channels.unwrap_or(0),
+            sample_rate: parse_num(self.sample_rate.as_deref()),
+            bit_rate: parse_num(self.bit_rate.as_deref()),
+        }
+    }
+
+    /// The average frame rate for video. GIF's average is computed from the demuxer's packet
+    /// timing and is often wrong (45 frames over 3 s reported as 50/3), so GIF uses the base rate.
+    fn frame_rate(&self) -> Option<Rational> {
+        let avg = self.avg_frame_rate.as_deref().and_then(Rational::parse);
+        let base = self.r_frame_rate.as_deref().and_then(Rational::parse);
+        if self.codec_name.as_deref() == Some("gif") {
+            base.or(avg)
+        } else {
+            avg.or(base)
+        }
+    }
+
+    /// Clockwise display rotation in degrees, normalized to 0/90/180/270.
+    fn rotation(&self) -> u16 {
+        // The display matrix reports counterclockwise degrees; the legacy `rotate` tag is clockwise.
+        let clockwise = self
+            .side_data_list
+            .iter()
+            .find_map(|d| d.rotation)
+            .map(|ccw| -ccw)
+            .or_else(|| self.tags.get("rotate").and_then(|r| r.parse().ok()))
+            .unwrap_or(0.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // value is in 0..4
+        let quarter = ((clockwise / 90.0).round() as i64).rem_euclid(4) as u16;
+        quarter * 90
+    }
+}
+
+/// Parses ffprobe's stringly-typed numbers; `N/A` and garbage become `None`.
+fn parse_num<T: std::str::FromStr>(text: Option<&str>) -> Option<T> {
+    text?.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_is_normalized_clockwise() {
+        let stream = |json: &str| serde_json::from_str::<RawStream>(json).unwrap().rotation();
+        assert_eq!(stream(r#"{"side_data_list":[{"rotation":-90}]}"#), 90);
+        assert_eq!(stream(r#"{"side_data_list":[{"rotation":90}]}"#), 270);
+        assert_eq!(stream(r#"{"side_data_list":[{"rotation":180}]}"#), 180);
+        assert_eq!(stream(r#"{"tags":{"rotate":"90"}}"#), 90);
+        assert_eq!(stream("{}"), 0);
+    }
+
+    #[test]
+    fn audio_only_and_attached_cover_art() {
+        let json = r#"{
+            "streams": [
+                {"codec_type":"audio","codec_name":"mp3","channels":2,"sample_rate":"44100","bit_rate":"320000"},
+                {"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,"disposition":{"attached_pic":1}}
+            ],
+            "format": {"format_name":"mp3","duration":"180.5","bit_rate":"320000"}
+        }"#;
+        let info = parse_probe_json(json, 7_200_000).unwrap();
+        assert_eq!(info.kind, MediaKind::Audio);
+        assert!(info.video.is_none());
+        assert_eq!(info.audio[0].sample_rate, Some(44_100));
+        assert_eq!(info.duration_seconds, Some(180.5));
+    }
+
+    #[test]
+    fn not_applicable_values_become_none() {
+        let json = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":2,"height":2,
+            "nb_frames":"N/A","bit_rate":"N/A","avg_frame_rate":"0/0","r_frame_rate":"24/1"}],
+            "format":{"format_name":"matroska,webm","duration":"N/A"}}"#;
+        let info = parse_probe_json(json, 10).unwrap();
+        let video = info.video.unwrap();
+        assert_eq!(video.frame_count, None);
+        assert_eq!(video.bit_rate, None);
+        assert_eq!(video.frame_rate, Some(Rational { num: 24, den: 1 }));
+        assert_eq!(info.duration_seconds, None);
+    }
+}

@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+authors = ["Arsyad"]
+repository = "https://github.com/arsyadcc/peraz"
+homepage = "https://github.com/arsyadcc/peraz"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+peraz-core = { path = "crates/peraz-core" }
+peraz-engine = { path = "crates/peraz-engine" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ctrlc = { version = "3", features = ["termination"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+imagequant = { version = "4", default-features = false, features = ["threads"] }
+mozjpeg = { version = "0.10", default-features = false, features = ["parallel"] }
+# Error unwinding for mozjpeg (instead of aborting); declared directly because mozjpeg only
+# enables it through its default features, which also require nasm.
+mozjpeg-sys = { version = "2", default-features = false, features = ["parallel", "unwinding"] }
+oxipng = { version = "10", default-features = false, features = ["parallel"] }
+png = "0.18"
+webp = { version = "0.3", default-features = false }
+moxcms = "0.8"
+gif = "0.14"
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+
+# Optimize dependencies (encoders) even in debug builds: tests encode real images and video.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

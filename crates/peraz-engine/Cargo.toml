@@ -1,0 +1,35 @@
+[package]
+name = "peraz-engine"
+description = "Peraz engine adapters: media probing, FFmpeg, images, quality metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+peraz-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+image.workspace = true
+imagequant.workspace = true
+mozjpeg.workspace = true
+mozjpeg-sys.workspace = true
+oxipng.workspace = true
+webp.workspace = true
+moxcms.workspace = true
+gif.workspace = true
+ravif.workspace = true
+png.workspace = true
+
+[features]
+# SIMD JPEG encoding (much faster). Needs `nasm` on x86/x86_64 build machines; enable for releases.
+simd-jpeg = ["mozjpeg/nasm_simd"]
+# Assembly for the AV1 encoder (much faster AVIF). Needs `nasm` on x86/x86_64; enable for releases.
+simd-avif = ["ravif/asm"]
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+doc-valid-idents = [
+    "FFmpeg", "VideoToolbox", "NVENC", "QSV", "AMF", "VAAPI",
+    "OpenH264", "WebP", "AVIF", "JPEG", "PNG", "GIF", "HEIC", "SSIMULACRA2", "VMAF",
+    "PERAZ_FFMPEG", "PATH",
+    "..",
+]
