@@ -15,6 +15,7 @@ license = "GPL-3.0-or-later"
 peraz-core = { path = "crates/peraz-core", version = "=0.1.0-alpha.2" }
 peraz-engine = { path = "crates/peraz-engine", version = "=0.1.0-alpha.2" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

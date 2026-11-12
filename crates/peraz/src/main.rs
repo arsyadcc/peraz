@@ -3,6 +3,7 @@
 //! The JSON output and exit codes are a public, versioned interface: front ends and
 //! users' scripts depend on them. Bump [`SCHEMA_VERSION`] on any breaking change.
 
+mod completions;
 mod compress;
 mod doctor;
 mod probe;
@@ -68,6 +69,8 @@ enum Command {
     /// List and show recipes (named sets of settings for --recipe).
     #[command(subcommand)]
     Recipe(recipes::Command),
+    /// Print a shell completion script: bash, zsh, fish, powershell, or elvish.
+    Completions(completions::Args),
 }
 
 fn main() -> ExitCode {
@@ -79,6 +82,7 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::run(ffmpeg, args),
         Command::Recipe(command) => recipes::run(command),
         Command::Watch(args) => watch::run(ffmpeg, args),
+        Command::Completions(args) => completions::run(args),
     };
     ExitCode::from(code)
 }

@@ -50,6 +50,22 @@ cargo install --locked --path crates/peraz              # from a clone of this r
 
 Cargo only installs alpha versions when asked for one, hence `--version` until Peraz 0.1.0.
 
+### Shell completions
+
+Homebrew installs them for you. Otherwise, `peraz completions <shell>` prints the script for
+bash, zsh, fish, PowerShell, or elvish:
+
+```sh
+peraz completions zsh > "${fpath[1]}/_peraz"                                    # zsh
+peraz completions bash > ~/.local/share/bash-completion/completions/peraz      # bash
+peraz completions fish > ~/.config/fish/completions/peraz.fish                  # fish
+peraz completions powershell >> $PROFILE                                        # PowerShell
+```
+
+Commands, options, and their values (`--quality`, `--format`, …) complete in every shell. In zsh
+and fish, `--recipe` also completes recipe names, your own included, and in zsh `peraz <TAB>`
+offers files as well as commands, since `peraz <files>` is short for `peraz compress <files>`.
+
 ## Quick start
 
 ```sh

@@ -176,6 +176,9 @@ pub enum Command {
         /// Print JSON instead of text.
         #[arg(long)]
         json: bool,
+        /// Print only the names, one per line (used by shell completion).
+        #[arg(long, conflicts_with = "json")]
+        names: bool,
     },
     /// Show a recipe's settings as TOML (ready to copy into your own recipe).
     Show {
@@ -196,8 +199,15 @@ struct List<'a> {
 
 pub fn run(command: &Command) -> u8 {
     match command {
-        Command::List { json } => {
+        Command::List { json, names } => {
             let (recipes, errors) = all();
+            if *names {
+                for recipe in &recipes {
+                    println!("{}", recipe.name);
+                }
+                // Completion runs this quietly: a broken user recipe is reported elsewhere.
+                return exit::SUCCESS;
+            }
             if *json {
                 print_json(List {
                     recipes_dir: recipes_dir(),

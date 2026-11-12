@@ -1,0 +1,34 @@
+# The Homebrew formula that dist generates has no hook for shell completions, so after each
+# successful release (once dist has pushed the new formula) this adds the line that installs them.
+name: Homebrew completions
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  completions:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: arsyadcc/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Install completions from the formula
+        run: |
+          formula=Formula/peraz.rb
+          if grep -q generate_completions_from_executable "$formula"; then
+            echo "The formula already installs completions."
+            exit 0
+          fi
+          # `peraz completions bash|zsh|fish` prints each script.
+          sed -i 's|^    install_binary_aliases!$|    install_binary_aliases!\n\n    generate_completions_from_executable(bin/"peraz", "completions")|' "$formula"
+          grep -q generate_completions_from_executable "$formula"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "peraz: install shell completions"
+          git push
