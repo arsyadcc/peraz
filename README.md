@@ -1,11 +1,33 @@
 # Peraz
 
 A cross-platform media compressor (macOS, Windows, Linux) for creators and developers:
-video, images, and GIFs, with results you can trust.
+video, images, GIFs, PDFs, and e-books, with results you can trust.
 
-> Status: **Phase 1, core engine**. Not usable yet.
+> Status: **alpha**. Expect rough edges; the `--json` output and exit codes are already versioned.
 
-## Usage (so far)
+## Install
+
+**Homebrew** (macOS and Linux), which also installs FFmpeg:
+
+```sh
+brew install arsyadcc/tap/peraz
+```
+
+**Shell installer** (macOS and Linux) and **PowerShell installer** (Windows): download the
+installer for your platform from the [latest release](https://github.com/arsyadcc/peraz/releases/latest).
+These install `peraz` only; install FFmpeg yourself (for example with your package manager) and
+check with `peraz doctor`.
+
+**From source** (Rust 1.99 or newer):
+
+```sh
+cargo install --locked --path crates/peraz-cli
+```
+
+Release builds use SIMD for JPEG and AVIF encoding (about 1.6x and 2x faster than a plain build);
+build from source with `--features simd` to get the same, which needs `nasm` on x86 machines.
+
+## Usage
 
 ```sh
 peraz compress clip.mov                         # → clip-peraz.mp4 (H.264, balanced quality)

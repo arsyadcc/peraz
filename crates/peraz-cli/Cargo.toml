@@ -1,12 +1,13 @@
 [package]
 name = "peraz-cli"
-description = "Peraz CLI: compress video, images, and GIFs from the terminal."
+description = "Compress video, images, GIFs, PDFs, and e-books from the terminal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -20,6 +21,14 @@ clap.workspace = true
 ctrlc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[features]
+# SIMD JPEG and AVIF encoding for release builds (needs `nasm` on x86/x86_64 build machines).
+simd = ["peraz-engine/simd-jpeg", "peraz-engine/simd-avif"]
+
+[package.metadata.dist]
+# The workspace is not published to crates.io yet, but the CLI is released with dist.
+dist = true
 
 [lints]
 workspace = true
