@@ -56,19 +56,16 @@ impl VideoEncoder {
 
     /// The rate-control arguments for a quality level.
     ///
-    /// Starting points from encoder documentation, to be calibrated with VMAF measurements on our
-    /// own samples:
-    /// - x264 CRF: 0–51, default 23, about 18 is visually lossless, +6 roughly halves the bit rate.
-    /// - x265 CRF: same scale shifted; default 28 is comparable to x264's 23.
-    /// - VideoToolbox `-q:v`: 1–100, higher is better (constant quality, Apple Silicon).
+    /// Calibrated with `scripts/calibrate-video.py`: each preset aims at a mean VMAF (model
+    /// vmaf_v0.6.1) over a sample set of natural footage, screen recordings, and motion graphics,
+    /// with no clip more than 3 points below it. Targets: highest 97, high 95, balanced 93,
+    /// small 89, smallest 84. Each value is the most economical one that met its target.
     fn quality_args(self, quality: Quality) -> Vec<String> {
         let level = quality as usize; // Highest = 0 … Smallest = 4
         let (flag, value) = match self {
-            Self::Libx264 => ("-crf", [18, 20, 23, 26, 29][level]),
-            Self::Libx265 => ("-crf", [22, 24, 27, 30, 33][level]),
-            Self::H264VideoToolbox | Self::HevcVideoToolbox => {
-                ("-q:v", [80, 70, 60, 50, 40][level])
-            }
+            Self::Libx264 | Self::Libx265 => ("-crf", [16, 22, 24, 28, 30][level]),
+            Self::H264VideoToolbox => ("-q:v", [85, 75, 70, 60, 55][level]),
+            Self::HevcVideoToolbox => ("-q:v", [85, 75, 70, 65, 60][level]),
         };
         vec![flag.to_owned(), value.to_string()]
     }
@@ -1264,7 +1261,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.args.join(" "),
-            "-map 0:v:0 -map 0:a:0 -map_metadata 0 -c:v libx264 -crf 23 -pix_fmt yuv420p \
+            "-map 0:v:0 -map 0:a:0 -map_metadata 0 -c:v libx264 -crf 24 -pix_fmt yuv420p \
              -c:a:0 aac -b:a:0 128k -movflags +faststart -f mp4"
         );
     }
@@ -1284,7 +1281,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.args.join(" "),
-            "-map 0:v:0 -map_metadata 0 -vf scale=1280:720:flags=lanczos -c:v libx265 -crf 30 \
+            "-map 0:v:0 -map_metadata 0 -vf scale=1280:720:flags=lanczos -c:v libx265 -crf 28 \
              -tag:v hvc1 -pix_fmt yuv420p -an -movflags +faststart -f mp4"
         );
     }
@@ -1294,7 +1291,7 @@ mod tests {
         let only_vt = |name: &str| name.ends_with("videotoolbox");
         let plan = plan_video(&video_info(1280, 720, vec![]), &Recipe::default(), only_vt).unwrap();
         assert_eq!(plan.encoder, VideoEncoder::H264VideoToolbox);
-        assert!(plan.args.join(" ").contains("-q:v 60"));
+        assert!(plan.args.join(" ").contains("-q:v 70"));
 
         let err = plan_video(&video_info(1280, 720, vec![]), &Recipe::default(), |_| {
             false

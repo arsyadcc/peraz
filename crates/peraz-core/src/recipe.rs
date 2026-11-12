@@ -27,7 +27,8 @@ pub enum VideoCodec {
     /// Plays everywhere.
     #[default]
     H264,
-    /// About 30–50% smaller than H.264 at the same quality; less universal playback.
+    /// Often smaller than H.264 at the same quality (most clearly on screen recordings and
+    /// camera footage); plays on fewer devices.
     Hevc,
 }
 
