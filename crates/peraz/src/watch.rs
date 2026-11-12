@@ -273,8 +273,18 @@ fn is_numbered_output(path: &Path, stems: &HashSet<String>) -> bool {
     let Some(stem) = path.file_stem().map(|s| s.to_string_lossy()) else {
         return false;
     };
+    // Names at the file system's limit were shortened: `<start of name>-<number>.<ext>`.
+    let shortened = path
+        .file_name()
+        .is_some_and(|n| n.len() + 4 > peraz_core::report::MAX_NAME_BYTES);
     stem.rsplit_once('-').is_some_and(|(base, number)| {
-        !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && stems.contains(base)
+        !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
+            && (stems.contains(base)
+                || (shortened
+                    && stems
+                        .iter()
+                        .any(|s| s.len() > base.len() && s.starts_with(base))))
     })
 }
 
@@ -304,6 +314,7 @@ fn mirrored_dir(out_dir: &Path, folders: &[PathBuf], input: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peraz_core::OutputTarget;
 
     #[test]
     fn files_are_ready_once_they_stop_changing() {
@@ -363,6 +374,14 @@ mod tests {
         assert!(!is_numbered_output(Path::new("a/clip-final.mp4"), &stems));
         assert!(!is_numbered_output(Path::new("a/clip-.mp4"), &stems));
         assert!(!is_numbered_output(Path::new("a/2024-05.png"), &stems));
+        // A name shortened to fit the file system still counts as an output of its input.
+        let long_stem = "x".repeat(260);
+        let long_stems: HashSet<String> = [long_stem.clone()].into();
+        let input = Path::new("a").join(format!("{long_stem}.jpg"));
+        let output = OutputTarget::NextToInput.resolve(&input, "jpg", 1);
+        assert!(is_numbered_output(&output, &long_stems));
+        let short = format!("a/{}-1.jpg", &long_stem[..100]);
+        assert!(!is_numbered_output(Path::new(&short), &long_stems));
         assert!(is_media(Path::new("Shot.PNG")) && is_media(Path::new("book.epub")));
         assert!(!is_media(Path::new("notes.txt")));
     }

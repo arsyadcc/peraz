@@ -276,18 +276,48 @@ pub(crate) fn check(tool: &'static str, output: Output) -> Result<String, Engine
         });
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let message = stderr
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("no error message")
-        .trim()
-        .to_owned();
+    let message = error_line(&stderr);
     Err(EngineError::ToolFailed {
         tool,
         status: output.status,
         message,
     })
+}
+
+/// The line of FFmpeg's error output that says what went wrong: the last one that is not a
+/// generic follow-up, without FFmpeg's `[component @ 0x…]` prefixes.
+fn error_line(stderr: &str) -> String {
+    /// Lines FFmpeg prints after the real error, which say nothing about it.
+    const GENERIC: &[&str] = &[
+        "Conversion failed!",
+        "Terminating thread with return code",
+        "Nothing was written into output file",
+        "Error number",
+        "Exiting normally",
+    ];
+    let clean = |line: &str| {
+        let mut rest = line.trim();
+        while let Some(after) = rest
+            .strip_prefix('[')
+            .and_then(|r| r.split_once("] "))
+            .map(|(_, after)| after.trim_start())
+        {
+            rest = after;
+        }
+        rest.to_owned()
+    };
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(clean)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines
+        .iter()
+        .rev()
+        .find(|line| !GENERIC.iter().any(|g| line.contains(g)))
+        .or_else(|| lines.last())
+        .cloned()
+        .unwrap_or_else(|| "no error message".to_owned())
 }
 
 fn existing_tool(path: &Path, tool: &'static str, origin: &str) -> Result<PathBuf, EngineError> {
@@ -323,6 +353,24 @@ fn exe_name(tool: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_line_skips_prefixes_and_generic_follow_ups() {
+        let stderr = "[vist#0:1/hevc @ 0x7a5] [dec:hevc @ 0x7a5] Invalid NAL unit size (8 > 4).\n\
+                      [vist#0:1/hevc @ 0x7a5] [dec:hevc @ 0x7a5] Terminating thread with return \
+                      code -1145393733 (Error number -1145393733 occurred)\n\
+                      Conversion failed!\n";
+        assert_eq!(super::error_line(stderr), "Invalid NAL unit size (8 > 4).");
+        assert_eq!(
+            super::error_line("[out#0/mp4 @ 0x1] Error closing file: No space left on device\n"),
+            "Error closing file: No space left on device"
+        );
+        assert_eq!(
+            super::error_line("Conversion failed!\n"),
+            "Conversion failed!"
+        );
+        assert_eq!(super::error_line(""), "no error message");
+    }
+
     use super::*;
 
     const ENCODERS: &str = "Encoders:

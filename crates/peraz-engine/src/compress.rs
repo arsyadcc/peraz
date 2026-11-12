@@ -68,6 +68,9 @@ pub fn compress_in(
     } else {
         run(batch, tools, caps, job, progress, cancel, &mut report)
     };
+    if !matches!(report.outcome, Outcome::Compressed { .. }) {
+        batch.release(&job.input);
+    }
     report.elapsed_seconds = started.elapsed().as_secs_f64();
     report
 }
@@ -89,6 +92,12 @@ fn run(
     };
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
+    // Decoders fill a cut-off JPEG or GIF with gray or drop frames instead of failing.
+    if matches!(info.kind, MediaKind::Image | MediaKind::Animation)
+        && let Some(problem) = crate::image::incomplete(&job.input)
+    {
+        return failed(problem);
+    }
 
     // Still images and documents are in-process work; everything else runs FFmpeg encodes.
     let still_image = matches!(
@@ -213,7 +222,7 @@ fn make_image(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &encoded.bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", partial.display()));
+        return failed(format!("cannot write {}: {e}", output.display()));
     }
     progress(1.0);
     finish(&partial, &output, info.size_bytes, plan.converts_format)
@@ -271,7 +280,7 @@ fn make_document(
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);
         return Outcome::Failed {
-            message: format!("cannot write {}: {e}", partial.display()),
+            message: format!("cannot write {}: {e}", output.display()),
         };
     }
     progress(1.0);
@@ -732,7 +741,7 @@ fn choose_output(batch: &Batch, job: &Job, extension: &str) -> Result<PathBuf, O
     check_output_folder(&first)?;
     for number in 1..=MAX_OUTPUT_NUMBER {
         let candidate = job.output.resolve(&job.input, extension, number);
-        if !candidate.exists() && batch.claim(&candidate) {
+        if !candidate.exists() && batch.claim(&candidate, &job.input) {
             return Ok(candidate);
         }
     }
@@ -771,7 +780,7 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
             "the output path is the input file; choose a different output".to_owned(),
         ));
     }
-    if !batch.claim(output) {
+    if !batch.claim(output, &job.input) {
         return Err(fail(format!(
             "{} is already the output of another file in this batch; rename one input or use --output",
             output.display()
@@ -798,11 +807,22 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
 
 /// A hidden sibling of the output, so a crash never leaves a half-written file under the final name.
 fn partial_path(output: &Path) -> PathBuf {
+    const SUFFIX: &str = ".peraz-partial";
     let name = output
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    output.with_file_name(format!(".{name}.peraz-partial"))
+    let partial = format!(".{name}{SUFFIX}");
+    if partial.len() <= peraz_core::report::MAX_NAME_BYTES {
+        return output.with_file_name(partial);
+    }
+    // Too long for the file system: a shortened name, kept unique by a hash of the full one.
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&name, &mut hasher);
+    let hash = format!("~{:016x}", std::hash::Hasher::finish(&hasher));
+    let room = peraz_core::report::MAX_NAME_BYTES - 1 - hash.len() - SUFFIX.len();
+    let short = peraz_core::report::truncate_bytes(&name, room);
+    output.with_file_name(format!(".{short}{hash}{SUFFIX}"))
 }
 
 fn file_url(path: &Path) -> Result<OsString, String> {
@@ -942,5 +962,14 @@ mod tests {
             partial_path(Path::new("/a/b/clip-1.mp4")),
             PathBuf::from("/a/b/.clip-1.mp4.peraz-partial")
         );
+        // A name near the 255-byte limit gets a shorter partial name, still unique.
+        let long = |n: u32| PathBuf::from(format!("/a/{}-{n}.jpg", "x".repeat(240)));
+        let (one, two) = (partial_path(&long(1)), partial_path(&long(2)));
+        for partial in [&one, &two] {
+            let name = partial.file_name().unwrap().to_str().unwrap();
+            assert!(name.len() <= 255, "{}", name.len());
+            assert!(name.starts_with('.') && name.ends_with(".peraz-partial"));
+        }
+        assert_ne!(one, two);
     }
 }

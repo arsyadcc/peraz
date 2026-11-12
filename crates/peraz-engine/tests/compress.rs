@@ -1078,3 +1078,145 @@ fn heic_and_avif_alpha_planes_are_kept() {
         "AVIF round trip: {edge} vs {reference}"
     );
 }
+
+/// Runs FFmpeg with `args`, for samples made inside a test.
+fn ffmpeg(env: &Env, args: &[&str]) {
+    let status = std::process::Command::new(&env.tools.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg {args:?}");
+}
+
+fn run_job(env: &Env, job: &Job) -> Outcome {
+    compress(&env.tools, &env.caps, job, &mut no_progress, &NOT_CANCELLED).outcome
+}
+
+#[test]
+fn still_gifs_become_png_and_keep_their_transparency() {
+    let Some(env) = setup("still-gif") else {
+        return;
+    };
+    // One frame, with a transparent color (alpha below 128 becomes transparent).
+    let gif = env.out.join("still.gif");
+    ffmpeg(
+        &env,
+        &[
+            "-i",
+            env.fixtures.join("image-alpha.png").to_str().unwrap(),
+            "-vf",
+            "split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128",
+            "-frames:v",
+            "1",
+            gif.to_str().unwrap(),
+        ],
+    );
+    let info = probe(&env.tools, &gif).unwrap();
+    assert_eq!(info.kind, MediaKind::Image);
+
+    let output = env.out.join("still-1.png");
+    let mut keep = job(gif.clone(), output.clone(), Quality::Balanced);
+    keep.output = OutputTarget::Folder(env.out.clone());
+    let outcome = run_job(&env, &keep);
+    let Outcome::Compressed {
+        output: written, ..
+    } = &outcome
+    else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(written, &output);
+    let decoded = image::open(&output).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (1200, 900));
+    assert!(transparent_left_edge(&decoded) > 50, "transparency kept");
+
+    // Asked for explicitly, other formats work too.
+    for (format, ext) in [(ImageFormat::Webp, "webp"), (ImageFormat::Jpeg, "jpg")] {
+        let mut converted = job(
+            gif.clone(),
+            env.out.join(format!("still.{ext}")),
+            Quality::Balanced,
+        );
+        converted.recipe.image.format = format;
+        let outcome = run_job(&env, &converted);
+        assert!(
+            matches!(outcome, Outcome::Compressed { .. }),
+            "{ext}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn cut_off_files_fail_and_free_their_output_name() {
+    let Some(env) = setup("cut-off") else {
+        return;
+    };
+    let photo = std::fs::read(env.fixtures.join("image-photo.jpg")).unwrap();
+    let gif = std::fs::read(env.fixtures.join("animation.gif")).unwrap();
+    let cut_jpeg = env.out.join("shot.jpg");
+    std::fs::write(&cut_jpeg, &photo[..photo.len() / 2]).unwrap();
+    let cut_gif = env.out.join("loop.gif");
+    std::fs::write(&cut_gif, &gif[..gif.len() / 2]).unwrap();
+    for input in [&cut_jpeg, &cut_gif] {
+        let mut cut = job(input.clone(), PathBuf::new(), Quality::Balanced);
+        cut.output = OutputTarget::Folder(env.out.join("results"));
+        std::fs::create_dir_all(env.out.join("results")).unwrap();
+        let Outcome::Failed { message } = run_job(&env, &cut) else {
+            panic!("{} was compressed", input.display())
+        };
+        assert!(message.contains("is incomplete"), "{message}");
+    }
+
+    // In a batch, a failed job gives its name back: the next file with that name gets `-1`.
+    let batch = peraz_engine::batch::Batch::new(1, 1);
+    let whole = env.out.join("whole");
+    std::fs::create_dir_all(&whole).unwrap();
+    // A cut-off PNG passes probing and fails while decoding, after its output name was taken.
+    let png = std::fs::read(env.fixtures.join("image-alpha.png")).unwrap();
+    std::fs::write(whole.join("shot.png"), &png[..3000]).unwrap();
+    std::fs::copy(env.fixtures.join("image-photo.jpg"), whole.join("shot.jpg")).unwrap();
+    let mut outcomes = Vec::new();
+    for name in ["shot.png", "shot.jpg"] {
+        let mut one = job(whole.join(name), PathBuf::new(), Quality::Balanced);
+        one.output = OutputTarget::Folder(env.out.join("results"));
+        one.recipe.image.format = ImageFormat::Jpeg;
+        outcomes.push(
+            peraz_engine::compress::compress_in(
+                &batch,
+                &env.tools,
+                &env.caps,
+                &one,
+                &mut no_progress,
+                &NOT_CANCELLED,
+            )
+            .outcome,
+        );
+    }
+    let Outcome::Failed { message } = &outcomes[0] else {
+        panic!("{:?}", outcomes[0])
+    };
+    assert!(message.contains("cannot decode"), "{message}");
+    let Outcome::Compressed { output, .. } = &outcomes[1] else {
+        panic!("{:?}", outcomes[1])
+    };
+    assert_eq!(output.file_name().unwrap(), "shot-1.jpg");
+}
+
+#[test]
+fn names_at_the_file_system_limit_still_work() {
+    let Some(env) = setup("long-name") else {
+        return;
+    };
+    // 251 bytes plus `.jpg`: the longest name most file systems allow.
+    let input = env.out.join(format!("{}.jpg", "n".repeat(251)));
+    std::fs::copy(env.fixtures.join("image-photo.jpg"), &input).unwrap();
+    let mut long = job(input, PathBuf::new(), Quality::Balanced);
+    long.output = OutputTarget::NextToInput;
+    let outcome = run_job(&env, &long);
+    let Outcome::Compressed { output, .. } = &outcome else {
+        panic!("{outcome:?}")
+    };
+    let name = output.file_name().unwrap().to_str().unwrap();
+    assert!(name.len() <= 255 && name.ends_with("-1.jpg"), "{name}");
+    assert!(output.is_file());
+}

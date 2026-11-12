@@ -102,7 +102,7 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE", conflicts_with = "out_dir")]
     output: Option<PathBuf>,
 
-    /// Write outputs into this folder instead of next to each input.
+    /// Write outputs into this folder instead of next to each input (made if it does not exist).
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
 
@@ -200,11 +200,16 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         eprintln!("error: --output works with a single input; use --out-dir for several files");
         return exit::USAGE;
     }
-    if let Some(dir) = &args.out_dir
-        && !dir.is_dir()
-    {
-        eprintln!("error: --out-dir {} is not a folder", dir.display());
-        return exit::USAGE;
+    if let Some(dir) = &args.out_dir {
+        if dir.exists() && !dir.is_dir() {
+            eprintln!("error: --out-dir {} is a file, not a folder", dir.display());
+            return exit::USAGE;
+        }
+        // A folder that does not exist yet is made, like `mkdir -p`.
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create --out-dir {}: {e}", dir.display());
+            return exit::USAGE;
+        }
     }
     let (recipe, recipe_name) = match recipe(&args.settings) {
         Ok(found) => found,

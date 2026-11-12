@@ -22,12 +22,16 @@ pub enum EngineError {
     },
 
     /// A tool ran and reported failure.
-    #[error("{tool} failed ({status}): {message}")]
+    #[error("{tool}: {message}")]
     ToolFailed {
         tool: &'static str,
         status: ExitStatus,
         message: String,
     },
+
+    /// `ffprobe` could not read the file: it is damaged, empty, or not a media file.
+    #[error("not a media file Peraz can read ({message})")]
+    NotMedia { message: String },
 
     /// A tool produced output Peraz does not understand.
     #[error("unexpected output from {tool}: {message}")]

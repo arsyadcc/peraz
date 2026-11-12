@@ -59,7 +59,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | Flag | Value | Description |
 | --- | --- | --- |
 | `-o`, `--output` | file | The output file (a single input only). |
-| `--out-dir` | folder | Write outputs into this folder instead of next to each input. |
+| `--out-dir` | folder | Write outputs into this folder instead of next to each input; it is made if it does not exist. |
 | `-f`, `--force` | | With `--output`: replace that file if it exists. |
 | `--check` | | Write nothing; exit with code 4 when a file could be made at least `--check-threshold` percent smaller. |
 | `--check-threshold` | 1–99 | With `--check`: the smallest saving, in percent, that counts. Default 10. |

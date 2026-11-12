@@ -67,19 +67,11 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
         Err(EngineError::ToolFailed { message, .. }) if message.contains("show_stream_groups") => {
             run(false)?
         }
-        Err(EngineError::ToolFailed {
-            tool,
-            status,
-            message,
-        }) => {
+        Err(EngineError::ToolFailed { message, .. }) => {
             // ffprobe prefixes errors with the input URL; the caller already knows the path.
             let prefix = format!("{}: ", url.to_string_lossy());
             let message = message.strip_prefix(&prefix).unwrap_or(&message).to_owned();
-            return Err(EngineError::ToolFailed {
-                tool,
-                status,
-                message,
-            });
+            return Err(EngineError::NotMedia { message });
         }
         other => other?,
     };

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use image::DynamicImage;
+use peraz_core::Alpha;
 use serde::Deserialize;
 
 use crate::ffmpeg::{Toolchain, check, command};
@@ -58,7 +59,10 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         .map_err(|e| format!("could not run {}: {e}", tools.ffmpeg.display()))?;
     if !output.status.success() {
         let failed = check("ffmpeg", output).unwrap_err();
-        return Err(format!("cannot decode {}: {failed}", input.display()));
+        return Err(format!(
+            "cannot decode {}: the picture data is damaged, incomplete, or not supported ({failed})",
+            input.display()
+        ));
     }
     let mut image = image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
         .map_err(|e| format!("cannot read the decoded picture: {e}"))?;
@@ -95,6 +99,7 @@ struct ProbeStream {
     codec_type: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
+    pix_fmt: Option<String>,
     #[serde(default)]
     disposition: ProbeDisposition,
 }
@@ -204,18 +209,24 @@ fn picture_filter(
     let alpha = properties
         .alpha
         .and_then(|item| item_filter(&probe, Some(item), "alpha"));
-    Ok(match alpha {
+    if let Some((alpha, _)) = alpha {
         // The alpha plane may be stored at another size, and with limited-range values.
-        Some((alpha, _)) => (
+        return Ok((
             format!(
                 "{color};{alpha};[alpha]scale=w={}:h={}:in_range=auto:out_range=full,format=gray[a];\
                  [color]format=rgb24[c];[c][a]alphamerge,format=rgba[out]",
                 size.0, size.1
             ),
             true,
-        ),
-        None => (format!("{color};[color]null[out]"), false),
-    })
+        ));
+    }
+    // Pictures that carry alpha themselves (a GIF's transparent color, AVIF with yuva).
+    let own_alpha = probe.streams.iter().any(|s| {
+        s.pix_fmt
+            .as_deref()
+            .is_some_and(|p| Alpha::from_pixel_format(p) != Alpha::Absent && !p.starts_with("gray"))
+    });
+    Ok((format!("{color};[color]null[out]"), own_alpha))
 }
 
 /// The filter that produces `item` (a tile grid or a single picture) as `[label]`, and its size.

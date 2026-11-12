@@ -28,7 +28,10 @@ impl OutputTarget {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            format!("{stem}-{number}.{extension}")
+            let suffix = format!("-{number}.{extension}");
+            // File systems allow 255 bytes per name: shorten a long stem to make room.
+            let stem = truncate_bytes(&stem, MAX_NAME_BYTES.saturating_sub(suffix.len()));
+            format!("{stem}{suffix}")
         };
         match self {
             Self::NextToInput => input.with_file_name(name()),
@@ -41,6 +44,21 @@ impl OutputTarget {
     pub fn is_numbered(&self) -> bool {
         !matches!(self, Self::File(_))
     }
+}
+
+/// The longest file name, in bytes, that common file systems accept.
+pub const MAX_NAME_BYTES: usize = 255;
+
+/// `text` cut to at most `max` bytes, on a character boundary.
+pub fn truncate_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// One file to compress.
@@ -151,6 +169,20 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_names_are_shortened_to_fit_the_file_system() {
+        // 251 bytes of stem: `-1.jpg` would make the name 257 bytes.
+        let stem = "é".repeat(125) + "x";
+        let output = OutputTarget::NextToInput.resolve(Path::new(&format!("{stem}.jpg")), "jpg", 1);
+        let name = output.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= MAX_NAME_BYTES, "{}", name.len());
+        assert!(name.ends_with("-1.jpg"));
+        assert!(stem.starts_with(name.trim_end_matches("-1.jpg")));
+        // Cut on a character boundary, never inside `é`.
+        assert_eq!(truncate_bytes("éé", 3), "é");
+        assert_eq!(truncate_bytes("short", 10), "short");
+    }
 
     #[test]
     fn output_names_follow_the_plan_extension() {

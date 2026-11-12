@@ -585,8 +585,9 @@ pub enum ImageDecoder {
 
 /// Image codecs (FFmpeg names) decoded in process.
 const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "webp", "bmp", "tiff"];
-/// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills.
-const FFMPEG_IMAGES: &[&str] = &["hevc", "av1"];
+/// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills, and GIFs with
+/// a single frame (animated GIFs take the GIF pipeline).
+const FFMPEG_IMAGES: &[&str] = &["hevc", "av1", "gif"];
 
 /// The format an input image is stored in, when Peraz can also write it.
 fn source_format(codec: &str) -> Option<ImageFormat> {
@@ -619,6 +620,8 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     let format = match (recipe.image.format, codec) {
         // Peraz cannot write HEIC; JPEG opens everywhere, which is why people convert HEIC.
         (ImageFormat::Keep, "hevc") => ImageFormat::Jpeg,
+        // A still GIF is a graphic: PNG keeps it lossless, with its transparency.
+        (ImageFormat::Keep, "gif") => ImageFormat::Png,
         (ImageFormat::Keep, _) if source.is_some() => source.unwrap_or_default(),
         (ImageFormat::Keep, other) => {
             return Err(PlanError::UnsupportedImage {
@@ -672,7 +675,9 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         flatten_alpha: format == ImageFormat::Jpeg && picture.alpha != Alpha::Absent,
         extension,
         decoder,
-        converts_format: source != Some(format),
+        // A still GIF becomes PNG only when that is smaller (it is not a format asked for).
+        converts_format: source != Some(format)
+            && !(codec == "gif" && recipe.image.format == ImageFormat::Keep),
     })
 }
 
@@ -1481,11 +1486,21 @@ mod tests {
 
     #[test]
     fn unsupported_images_explain_themselves() {
+        // A still GIF is decoded by FFmpeg and becomes PNG, kept only when smaller.
         let gif = plan_image(
             &image_info("gif", "gif", Alpha::Unknown),
             &Recipe::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (gif.decoder, gif.extension, gif.converts_format),
+            (ImageDecoder::Ffmpeg, "png", false)
         );
-        assert!(matches!(gif, Err(PlanError::UnsupportedImage { .. })));
+        let other = plan_image(
+            &image_info("cdxl", "cdxl", Alpha::Absent),
+            &Recipe::default(),
+        );
+        assert!(matches!(other, Err(PlanError::UnsupportedImage { .. })));
         let bmp = plan_image(
             &image_info("bmp", "bmp_pipe", Alpha::Absent),
             &Recipe::default(),

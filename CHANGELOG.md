@@ -36,11 +36,22 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
 - **Interface:** `peraz doctor --json` names the FFmpeg version and license `ffmpeg`, like
   `peraz compress --json`, instead of `build`.
 - **Interface:** `fps` in a recipe accepts 1–50, like `--fps` (it accepted up to 60).
+- `--out-dir` makes the folder when it does not exist.
+- Error messages are clearer: a file FFprobe cannot read is "not a media file Peraz can read",
+  FFmpeg's own errors are shown without its internal prefixes, and write errors name the output
+  file instead of a temporary one.
 
 ### Fixed
 
 - Transparent HEIC and AVIF pictures keep their transparency (it was dropped).
 - HEIC files whose picture is not the first tile grid in the file decode correctly.
+- Still (single-frame) GIFs are compressed instead of skipped: to PNG by default, with their
+  transparency, kept only when smaller.
+- JPEGs and GIFs that were cut off (while copying or downloading) fail with a clear message
+  instead of being "compressed" with the missing part filled with gray.
+- File names near the 255-byte limit work: the result's name is shortened to fit.
+- In a batch, a file that fails no longer takes an output number, so the next file with the same
+  name gets `-1` instead of `-2`.
 
 ## [0.1.0-alpha.2] - 2026-11-12
 

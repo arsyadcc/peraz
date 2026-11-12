@@ -5,7 +5,7 @@
 //! one slot per core. A batch also records every output path it hands out, so two inputs can
 //! never write the same file at the same time.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
@@ -25,7 +25,8 @@ pub enum Lane {
 pub struct Batch {
     encode: Slots,
     image: Slots,
-    claimed: Mutex<HashSet<PathBuf>>,
+    /// Reserved output paths, with the input whose job reserved each.
+    claimed: Mutex<HashMap<PathBuf, PathBuf>>,
 }
 
 impl Batch {
@@ -74,12 +75,25 @@ impl Batch {
         }
     }
 
-    /// Reserves `output` for one job. Returns false when another job of this batch has it.
-    pub fn claim(&self, output: &Path) -> bool {
+    /// Reserves `output` for the job of `input`. Returns false when another job of this batch
+    /// has it.
+    pub fn claim(&self, output: &Path, input: &Path) -> bool {
+        let mut claimed = self.claimed.lock().unwrap_or_else(PoisonError::into_inner);
+        let output = normalize(output);
+        if claimed.contains_key(&output) {
+            return false;
+        }
+        claimed.insert(output, input.to_path_buf());
+        true
+    }
+
+    /// Gives up the reservations of the job of `input` that wrote nothing, so a later job can
+    /// take those names (no gaps in the numbering after a failure).
+    pub fn release(&self, input: &Path) {
         self.claimed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(normalize(output))
+            .retain(|output, owner| owner != input || output.exists());
     }
 }
 
@@ -197,12 +211,17 @@ mod tests {
     #[test]
     fn outputs_are_claimed_once() {
         let batch = Batch::unlimited();
-        assert!(batch.claim(Path::new("out/a-1.webp")));
-        assert!(!batch.claim(Path::new("out/a-1.webp")));
+        let (a, b) = (Path::new("a.png"), Path::new("b.png"));
+        assert!(batch.claim(Path::new("out/a-1.webp"), a));
+        assert!(!batch.claim(Path::new("out/a-1.webp"), b));
         assert!(
-            !batch.claim(Path::new("out/../out/./a-1.webp")),
+            !batch.claim(Path::new("out/../out/./a-1.webp"), b),
             "same file, other spelling"
         );
-        assert!(batch.claim(Path::new("out/b-1.webp")));
+        assert!(batch.claim(Path::new("out/b-1.webp"), b));
+        // A job that wrote nothing gives its names back; others keep theirs.
+        batch.release(a);
+        assert!(batch.claim(Path::new("out/a-1.webp"), b));
+        assert!(!batch.claim(Path::new("out/b-1.webp"), a));
     }
 }

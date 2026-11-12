@@ -99,16 +99,20 @@ fn encode_image_inner(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage
 
 /// Decodes a JPEG/PNG/WebP/BMP/TIFF image with its EXIF orientation applied and its ICC profile.
 pub fn decode_native(input: &Path) -> Result<Decoded, String> {
-    let reader = ImageReader::open(input)
-        .map_err(|e| format!("cannot read {}: {e}", input.display()))?
-        .with_guessed_format()
-        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    decode_reader(reader, &input.display().to_string())
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    decode_native_bytes(&bytes, &input.display().to_string())
 }
 
 /// Like [`decode_native`], for an image held in memory (e.g. inside an EPUB). `name` is used in
 /// error messages.
 pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> {
+    if !jpeg_is_complete(bytes) {
+        return Err(format!(
+            "{name} is incomplete: the file ends before the picture does (it may have been cut \
+             off while copying or downloading)"
+        ));
+    }
     let reader = ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("cannot read {name}: {e}"))?;
@@ -126,6 +130,48 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
     Ok(Decoded { image, icc })
+}
+
+/// Why `path` is a cut-off JPEG or GIF, or `None` when it is complete (or another format).
+pub fn incomplete(path: &Path) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 6];
+    file.read_exact(&mut head).ok()?;
+    let complete = if head.starts_with(b"GIF8") {
+        // A GIF ends with its trailer byte `;` (sometimes followed by zero padding).
+        let mut tail = Vec::new();
+        let len = file.seek(SeekFrom::End(0)).ok()?;
+        file.seek(SeekFrom::Start(len.saturating_sub(64))).ok()?;
+        file.read_to_end(&mut tail).ok()?;
+        tail.iter().rev().find(|b| **b != 0) == Some(&b';')
+    } else if head.starts_with(&[0xFF, 0xD8]) {
+        jpeg_is_complete(&std::fs::read(path).ok()?)
+    } else {
+        true
+    };
+    (!complete).then(|| {
+        format!(
+            "{} is incomplete: the file ends before the picture does (it may have been cut \
+             off while copying or downloading)",
+            path.display()
+        )
+    })
+}
+
+/// False for a JPEG that was cut off: its last scan (`FFDA`) has no end marker (`FFD9`) after
+/// it. Decoders fill the missing part with gray instead of failing, so this is checked first.
+/// Marker bytes cannot occur inside the compressed data (`FF` is escaped there), so an embedded
+/// thumbnail's markers come earlier and do not count. Other formats are always "complete" here.
+fn jpeg_is_complete(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return true;
+    }
+    let last_scan = bytes.windows(2).rposition(|w| w == [0xFF, 0xDA]);
+    let Some(scan) = last_scan else {
+        return false;
+    };
+    bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
 /// Composites transparent pixels onto white, for formats without alpha.
@@ -476,6 +522,42 @@ fn push_chunk(out: &mut Vec<u8>, fourcc: [u8; 4], payload: &[u8]) {
 #[allow(clippy::cast_possible_truncation)] // small synthetic images
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_off_jpegs_are_refused() {
+        let picture = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, 90])
+        }));
+        let jpeg = encode_jpeg_plain(&picture, 80).unwrap();
+        assert!(jpeg_is_complete(&jpeg));
+        assert!(decode_native_bytes(&jpeg, "whole.jpg").is_ok());
+        // Bytes after the end marker (some cameras add them) are fine.
+        assert!(jpeg_is_complete(&[jpeg.as_slice(), b"trailer"].concat()));
+        let cut = &jpeg[..jpeg.len() * 2 / 3];
+        assert!(!jpeg_is_complete(cut));
+        let error = decode_native_bytes(cut, "cut.jpg").unwrap_err();
+        assert!(error.contains("cut.jpg is incomplete"), "{error}");
+        // Only JPEGs are checked here.
+        assert!(jpeg_is_complete(b"\x89PNG"));
+
+        // A camera JPEG carries a thumbnail (a whole JPEG, with its own scan and end marker)
+        // inside its EXIF segment: that must not make a cut-off photo look complete.
+        let thumbnail = encode_jpeg_plain(&picture.thumbnail(8, 8), 60).unwrap();
+        let app1_len = u16::try_from(thumbnail.len() + 8).unwrap().to_be_bytes();
+        let with_thumbnail = [
+            &jpeg[..2],
+            &[0xFF, 0xE1][..],
+            &app1_len,
+            b"Exif\0\0",
+            &thumbnail,
+            &jpeg[2..],
+        ]
+        .concat();
+        assert!(jpeg_is_complete(&with_thumbnail));
+        assert!(decode_native_bytes(&with_thumbnail, "camera.jpg").is_ok());
+        let cut = &with_thumbnail[..with_thumbnail.len() - 200];
+        assert!(!jpeg_is_complete(cut));
+    }
 
     #[test]
     fn flattening_blends_onto_white() {
