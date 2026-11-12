@@ -2,13 +2,15 @@
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use peraz_core::units::format_bytes;
 use peraz_core::{
     EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Job, KeepReason, Outcome, OutputTarget,
     Plan, Quality, Recipe, Report, VideoCodec, VideoOutput, VideoPlan, VideoRecipe,
 };
+use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::BuildInfo;
 use serde::Serialize;
 
@@ -77,6 +79,11 @@ pub struct Args {
     /// Replace existing output files.
     #[arg(short, long)]
     force: bool,
+
+    /// How many files to work on at once (default: one per logical core; encodes are further
+    /// limited to one per 8 cores). 1 processes files one by one with live progress.
+    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    jobs: Option<u32>,
 
     /// Print JSON instead of text.
     #[arg(long)]
@@ -215,39 +222,49 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
 
     let recipe = recipe(args);
     let target = output_target(args);
-    let show_progress = !args.json && std::io::stderr().is_terminal();
     let cancel = install_cancel_handler();
-
-    let mut reports = Vec::with_capacity(args.files.len());
-    for input in &args.files {
-        // After cancellation every remaining file still gets a report (status `cancelled`), so
-        // callers learn the fate of each input; the engine returns immediately for these.
-        let job = Job {
-            input: input.clone(),
-            output: target.clone(),
-            recipe: recipe.clone(),
-            overwrite: args.force,
-        };
-        let mut last_percent = None;
-        let mut progress = |fraction: f64| {
-            if show_progress {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..=100
-                let percent = (fraction * 100.0).floor() as u8;
-                if last_percent != Some(percent) {
-                    last_percent = Some(percent);
-                    eprint!("\r{} {percent:>3}%", input.display());
-                }
-            }
-        };
-        let report = peraz_engine::compress::compress(&tools, &caps, &job, &mut progress, cancel);
-        if show_progress && last_percent.is_some() {
-            eprint!("\r\x1b[2K");
-        }
-        if !args.json {
-            print_human(&report);
-        }
-        reports.push(report);
-    }
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let workers = args
+        .jobs
+        .map_or(cores, |n| n as usize)
+        .min(args.files.len())
+        .max(1);
+    let batch = if workers == 1 {
+        Batch::new(1, 1)
+    } else {
+        Batch::for_this_machine()
+    };
+    let job_for = |input: &PathBuf| Job {
+        input: input.clone(),
+        output: target.clone(),
+        recipe: recipe.clone(),
+        overwrite: args.force,
+    };
+    // After cancellation every remaining file still gets a report (status `cancelled`), so
+    // callers learn the fate of each input; the engine returns immediately for these.
+    let reports = if workers == 1 {
+        run_sequential(&args.files, args.json, |input, progress| {
+            peraz_engine::compress::compress_in(
+                &batch,
+                &tools,
+                &caps,
+                &job_for(input),
+                progress,
+                cancel,
+            )
+        })
+    } else {
+        run_parallel(&args.files, workers, args.json, |input| {
+            peraz_engine::compress::compress_in(
+                &batch,
+                &tools,
+                &caps,
+                &job_for(input),
+                &mut |_| {},
+                cancel,
+            )
+        })
+    };
 
     let summary = summarize(&reports);
     let (failed, cancelled) = (summary.failed, summary.cancelled > 0);
@@ -301,6 +318,78 @@ fn output_target(args: &Args) -> OutputTarget {
         (None, Some(dir)) => OutputTarget::Folder(dir.clone()),
         (None, None) => OutputTarget::NextToInput,
     }
+}
+
+/// One file at a time, with a live percentage on the terminal.
+fn run_sequential(
+    files: &[PathBuf],
+    json: bool,
+    compress: impl Fn(&PathBuf, &mut dyn FnMut(f64)) -> Report,
+) -> Vec<Report> {
+    let show_progress = !json && std::io::stderr().is_terminal();
+    let mut reports = Vec::with_capacity(files.len());
+    for input in files {
+        let mut last_percent = None;
+        let mut progress = |fraction: f64| {
+            if show_progress {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..=100
+                let percent = (fraction * 100.0).floor() as u8;
+                if last_percent != Some(percent) {
+                    last_percent = Some(percent);
+                    eprint!("\r{} {percent:>3}%", input.display());
+                }
+            }
+        };
+        let report = compress(input, &mut progress);
+        if show_progress && last_percent.is_some() {
+            eprint!("\r\x1b[2K");
+        }
+        if !json {
+            print_human(&report);
+        }
+        reports.push(report);
+    }
+    reports
+}
+
+/// Several files at once on `workers` threads. Text results print as they finish, prefixed
+/// with a counter; the returned reports keep the input order.
+fn run_parallel(
+    files: &[PathBuf],
+    workers: usize,
+    json: bool,
+    compress: impl Fn(&PathBuf) -> Report + Sync,
+) -> Vec<Report> {
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let print = Mutex::new(());
+    let slots: Vec<Mutex<Option<Report>>> = files.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(input) = files.get(index) else { break };
+                    let report = compress(input);
+                    if !json {
+                        let _guard = print.lock().unwrap_or_else(PoisonError::into_inner);
+                        let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
+                        print!("[{finished}/{}] ", files.len());
+                        print_human(&report);
+                    }
+                    *slots[index].lock().unwrap_or_else(PoisonError::into_inner) = Some(report);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .expect("every file was processed")
+        })
+        .collect()
 }
 
 /// First Ctrl-C (or SIGTERM): stop the current file cleanly and skip the rest.

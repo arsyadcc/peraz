@@ -590,3 +590,58 @@ fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
     assert_eq!(info.kind, MediaKind::Video);
     assert_eq!(info.video.unwrap().codec, "h264");
 }
+
+#[test]
+fn a_batch_never_writes_one_output_twice() {
+    let Some(env) = setup("batch") else { return };
+    let batch = peraz_engine::batch::Batch::new(1, 4);
+    let make = |input: &str| {
+        let mut job = job(env.fixtures.join(input), PathBuf::new(), Quality::Balanced);
+        job.output = OutputTarget::Folder(env.out.clone());
+        job.recipe.image.format = ImageFormat::Webp;
+        job
+    };
+    // Both inputs are named `image-photo.*`, so both want `image-photo-peraz.webp`.
+    let (first, second) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            peraz_engine::compress::compress_in(
+                &batch,
+                &env.tools,
+                &env.caps,
+                &make("image-photo.jpg"),
+                &mut no_progress,
+                &NOT_CANCELLED,
+            )
+        });
+        let b = scope.spawn(|| {
+            let heic = if env.fixtures.join("image-photo.heic").is_file() {
+                "image-photo.heic"
+            } else {
+                "image-photo.jpg"
+            };
+            peraz_engine::compress::compress_in(
+                &batch,
+                &env.tools,
+                &env.caps,
+                &make(heic),
+                &mut no_progress,
+                &NOT_CANCELLED,
+            )
+        });
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let outcomes = [&first.outcome, &second.outcome];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Compressed { .. }))
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    let failure = outcomes.iter().find_map(|o| match o {
+        Outcome::Failed { message } => Some(message.clone()),
+        _ => None,
+    });
+    assert!(failure.unwrap().contains("another file in this batch"));
+}

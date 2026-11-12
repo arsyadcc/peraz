@@ -21,9 +21,15 @@ peraz compress -q small reaction.gif               # smaller GIF, same timing
 peraz compress --format webp clip.mp4              # animated WebP (or avif: smallest)
 peraz compress --format mp4 reaction.gif           # GIF → MP4, often 70-95% smaller
 peraz compress --json --out-dir out/ media/*     # machine-readable report
+peraz compress --jobs 1 *.mov                      # one at a time, with live progress
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
 ```
+
+Batches run in parallel: still images use up to one job per logical core, while video and
+animation encodes (which already use many cores each) run one per 8 cores. Two inputs that would
+write the same output file are caught before either one writes. `--jobs N` sets the number of
+files worked on at once.
 
 With `--target-size`, the video and audio bit rates are computed from the target, software
 encoders run two passes, and the result is measured: if it is over, the final pass runs again
