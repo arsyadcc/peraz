@@ -144,6 +144,7 @@ smaller, `130` cancelled with Ctrl-C or SIGTERM
 cargo build                       # toolchain pinned in rust-toolchain.toml
 cargo test --workspace            # integration tests run when ./fixtures exists
 cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check                  # dependency licenses, advisories, sources (deny.toml)
 ./scripts/make-fixtures.sh        # test samples into ./fixtures (needs ffmpeg and zip)
 ```
 

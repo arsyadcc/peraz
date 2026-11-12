@@ -15,6 +15,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo fmt --all -- --check
 
+  deny:
+    name: dependencies (licenses, advisories, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
