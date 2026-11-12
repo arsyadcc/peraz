@@ -5,6 +5,7 @@ use std::path::Path;
 use peraz_engine::ffmpeg::{BuildInfo, BuildLicense, Capabilities, ToolSource, Toolchain};
 use serde::Serialize;
 
+use crate::compress::WITHOUT_FFMPEG;
 use crate::{exit, locate, print_json};
 
 #[derive(Debug, clap::Args)]
@@ -48,7 +49,10 @@ const NOTABLE_SOFTWARE_ENCODERS: &[(&str, &str)] = &[
 pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     let tools = match locate(ffmpeg) {
         Ok(tools) => tools,
-        Err(code) => return code,
+        Err(code) => {
+            eprintln!("Without FFmpeg, Peraz compresses only {WITHOUT_FFMPEG}.");
+            return code;
+        }
     };
     let (build, caps) = match tools
         .build_info()

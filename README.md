@@ -40,7 +40,8 @@ formula in full like this trusts it. If you added the tap with `brew tap arsyadc
 
 **Installers:** the [latest release](https://github.com/arsyadcc/peraz/releases/latest) has a shell
 installer for macOS and Linux and a PowerShell installer for Windows. These install `peraz` only:
-install FFmpeg with your package manager, then check with `peraz doctor`.
+images, PDFs, and EPUBs work right away; for videos, GIFs, HEIC, and AVIF, install FFmpeg with
+your package manager, then check with `peraz doctor`.
 
 **With Cargo** (Rust 1.99 or newer), from [crates.io](https://crates.io/crates/peraz):
 
@@ -270,6 +271,8 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
 - `ffmpeg` and `ffprobe` (Homebrew installs them with Peraz). Peraz uses `--ffmpeg <path>`,
   `PERAZ_FFMPEG`, or `ffmpeg` on `PATH`, in that order. `peraz doctor` shows which one it found
   and what it can encode.
+- Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs;
+  videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 
 ## Building from source
 

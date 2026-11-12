@@ -7,6 +7,15 @@ people and scripts. From 0.1.0 on, renaming or removing any of them is a breakin
 `peraz <files>` is short for `peraz compress <files>`: when the first argument is not a command,
 `compress` is implied.
 
+## Without FFmpeg
+
+Peraz runs FFmpeg for videos, animations, GIFs, HEIC, and AVIF. JPEG, PNG, WebP, BMP, and TIFF
+images, PDFs, and EPUBs are handled in process, so `peraz compress` works on them when FFmpeg is
+not installed: the results are the same as with FFmpeg, and `--json` prints `"ffmpeg": null`. If
+any input needs FFmpeg, the run stops before any work with exit code `3` and names that file.
+An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
+`peraz probe`, `peraz doctor`, and `peraz watch` need FFmpeg.
+
 ## Commands
 
 | Command | What it does |
@@ -106,7 +115,7 @@ that is not smaller than the input is not kept, unless the format was changed on
 | `0` | Success, including files kept or skipped. |
 | `1` | At least one input failed. |
 | `2` | Invalid usage. |
-| `3` | Environment problem, for example FFmpeg not found. |
+| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)). |
 | `4` | `--check` found files that could be smaller. |
 | `130` | Cancelled with Ctrl-C or SIGTERM; the current file's partial output is removed. |
 

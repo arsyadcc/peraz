@@ -12,10 +12,10 @@ use peraz_core::{
     Recipe, Report, TrimPlan, VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
-use peraz_engine::ffmpeg::BuildInfo;
+use peraz_engine::ffmpeg::{BuildInfo, Capabilities, FFMPEG_ENV, Toolchain};
 use serde::Serialize;
 
-use crate::{exit, locate, print_json, recipes};
+use crate::{exit, print_json, recipes};
 
 /// Flags that describe how files are compressed; shared by `compress` and `watch`.
 #[derive(Debug, clap::Args)]
@@ -174,7 +174,8 @@ fn parse<T: std::str::FromStr<Err = peraz_core::recipe::UnknownValue>>(
 
 #[derive(Serialize)]
 struct Output<'a> {
-    ffmpeg: &'a BuildInfo,
+    /// `None` (null) when FFmpeg was not found and every input could be compressed without it.
+    ffmpeg: Option<&'a BuildInfo>,
     /// The recipe used: a name, or the path of a project `peraz.toml`.
     recipe: Option<&'a str>,
     /// Present in --check mode.
@@ -218,19 +219,13 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             return exit::USAGE;
         }
     };
-    let tools = match locate(ffmpeg) {
+    let tools = match find_ffmpeg(ffmpeg, &args.files) {
         Ok(tools) => tools,
         Err(code) => return code,
     };
-    let (build, caps) = match tools
-        .build_info()
-        .and_then(|b| Ok((b, tools.capabilities()?)))
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return exit::ENVIRONMENT;
-        }
+    let (build, caps) = match inspect(tools.as_ref()) {
+        Ok(found) => found,
+        Err(code) => return code,
     };
 
     let target = output_target(args);
@@ -274,7 +269,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         run_sequential(&args.files, args.json || args.check, |input, progress| {
             peraz_engine::compress::compress_in(
                 &batch,
-                &tools,
+                tools.as_ref(),
                 &caps,
                 &job_for(input),
                 progress,
@@ -285,7 +280,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         run_parallel(&args.files, workers, args.json || args.check, |input| {
             peraz_engine::compress::compress_in(
                 &batch,
-                &tools,
+                tools.as_ref(),
                 &caps,
                 &job_for(input),
                 &mut |_| {},
@@ -296,17 +291,62 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
 
     finish_run(
         args,
-        &build,
+        build.as_ref(),
         recipe_name.as_deref(),
         &reports,
         check_dir.as_deref(),
     )
 }
 
+/// The FFmpeg build and its encoders; without FFmpeg, none.
+fn inspect(tools: Option<&Toolchain>) -> Result<(Option<BuildInfo>, Capabilities), u8> {
+    let Some(tools) = tools else {
+        return Ok((None, Capabilities::default()));
+    };
+    tools
+        .build_info()
+        .and_then(|build| Ok((Some(build), tools.capabilities()?)))
+        .map_err(|e| {
+            eprintln!("error: {e}");
+            exit::ENVIRONMENT
+        })
+}
+
+/// What Peraz compresses without FFmpeg (everything it decodes and encodes in process).
+pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs";
+
+/// Finds FFmpeg. Without one, the run goes on only when FFmpeg was not chosen explicitly (with
+/// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz reads itself; otherwise it stops
+/// before any work with the environment exit code.
+fn find_ffmpeg(ffmpeg: Option<&Path>, files: &[PathBuf]) -> Result<Option<Toolchain>, u8> {
+    let error = match Toolchain::locate(ffmpeg) {
+        Ok(tools) => return Ok(Some(tools)),
+        Err(e) => e,
+    };
+    let explicit = ffmpeg.is_some() || std::env::var_os(FFMPEG_ENV).is_some_and(|v| !v.is_empty());
+    if explicit {
+        eprintln!("error: {error}");
+        return Err(exit::ENVIRONMENT);
+    }
+    // An unreadable input is reported per file, like with FFmpeg.
+    let needs_ffmpeg = files
+        .iter()
+        .find(|file| matches!(peraz_engine::probe::probe_without_ffmpeg(file), Ok(None)));
+    let Some(file) = needs_ffmpeg else {
+        return Ok(None);
+    };
+    eprintln!("error: {error}");
+    eprintln!(
+        "{} needs FFmpeg. Without it, Peraz compresses only {WITHOUT_FFMPEG}.",
+        file.display()
+    );
+    Err(exit::ENVIRONMENT)
+}
+
 /// Prints the results and picks the exit code.
 fn finish_run(
     args: &Args,
-    build: &BuildInfo,
+    build: Option<&BuildInfo>,
     recipe_name: Option<&str>,
     reports: &[Report],
     check_dir: Option<&Path>,

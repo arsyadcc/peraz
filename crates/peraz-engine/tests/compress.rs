@@ -79,7 +79,7 @@ fn compresses_video_and_writes_only_the_final_file() {
     );
     let mut last = 0.0;
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut |f| last = f,
@@ -107,7 +107,7 @@ fn keeps_the_original_when_compression_does_not_help() {
     // Re-encode an already compressed file at the highest quality: it cannot get smaller.
     let first = env.out.join("small.mp4");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(
             env.fixtures.join("video-720p-noaudio.mp4"),
@@ -125,7 +125,7 @@ fn keeps_the_original_when_compression_does_not_help() {
 
     let second = env.out.join("again.mp4");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(first, second.clone(), Quality::Highest),
         &mut no_progress,
@@ -148,7 +148,7 @@ fn refuses_to_overwrite_existing_files() {
     let existing = env.out.join("exists.mp4");
     std::fs::write(&existing, b"keep me").unwrap();
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(
             env.fixtures.join("video-720p-noaudio.mp4"),
@@ -174,7 +174,7 @@ fn cancelling_stops_ffmpeg_and_leaves_nothing_behind() {
     let cancel = AtomicBool::new(false);
     // Cancel as soon as encoding reports progress.
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut |_| cancel.store(true, Ordering::SeqCst),
@@ -187,7 +187,7 @@ fn cancelling_stops_ffmpeg_and_leaves_nothing_behind() {
         "no output or partial file"
     );
 
-    let report = compress(&env.tools, &env.caps, &job, &mut no_progress, &cancel);
+    let report = compress(Some(&env.tools), &env.caps, &job, &mut no_progress, &cancel);
     assert_eq!(
         report.outcome,
         Outcome::Cancelled,
@@ -200,7 +200,7 @@ fn compresses_jpeg_with_mozjpeg() {
     let Some(env) = setup("jpeg") else { return };
     let output = env.out.join("photo.jpg");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(
             env.fixtures.join("image-photo.jpg"),
@@ -230,7 +230,7 @@ fn quantizes_png_and_keeps_transparency() {
     let Some(env) = setup("png") else { return };
     let output = env.out.join("alpha.png");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(
             env.fixtures.join("image-alpha.png"),
@@ -266,7 +266,7 @@ fn converts_transparent_png_to_jpeg_on_white_and_resizes() {
     job.recipe.image.format = ImageFormat::Jpeg;
     job.recipe.image.max_width = Some(600);
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut no_progress,
@@ -299,7 +299,7 @@ fn converts_to_webp_and_avif() {
         );
         job.recipe.image.format = format;
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -331,7 +331,7 @@ fn converts_heic_to_jpeg_with_full_tile_grid() {
     }
     let output = env.out.join("photo.jpg");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(input, output.clone(), Quality::Balanced),
         &mut no_progress,
@@ -429,7 +429,7 @@ fn applies_every_exif_orientation_to_the_pixels() {
         let name = format!("image-orientation{n}.jpg");
         let output = env.out.join(&name);
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job(env.fixtures.join(&name), output.clone(), Quality::Balanced),
             &mut no_progress,
@@ -452,7 +452,7 @@ fn applies_every_exif_orientation_to_the_pixels() {
     );
     job.recipe.image.max_width = Some(400);
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut no_progress,
@@ -547,7 +547,7 @@ fn avif_keeps_the_color_profile_instead_of_converting_to_srgb() {
         let mut job = job(input, output.clone(), Quality::High);
         job.recipe.image.format = ImageFormat::Avif;
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -590,7 +590,7 @@ fn makes_a_gif_from_a_video_range() {
     job.recipe.clip.duration_ms = Some(3_000);
     let mut last = 0.0;
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut |f| last = f,
@@ -619,7 +619,7 @@ fn recompresses_a_gif_and_keeps_its_timing() {
     let Some(env) = setup("gifgif") else { return };
     let output = env.out.join("smaller.gif");
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job(
             env.fixtures.join("animation.gif"),
@@ -657,7 +657,7 @@ fn fits_a_size_target_and_never_exceeds_it() {
     );
     job.recipe.video.target_bytes = Some(2_000_000);
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut no_progress,
@@ -692,7 +692,7 @@ fn fits_a_size_target_and_never_exceeds_it() {
     job.output = OutputTarget::File(env.out.join("keep.mp4"));
     job.recipe.video.target_bytes = Some(50_000_000);
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut no_progress,
@@ -730,7 +730,7 @@ fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
         job.recipe.video.output = format;
         job.recipe.clip.duration_ms = Some(2_000);
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -756,7 +756,7 @@ fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
     );
     job.recipe.video.output = VideoOutput::Mp4;
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &job,
         &mut no_progress,
@@ -787,7 +787,7 @@ fn a_batch_numbers_outputs_that_would_share_a_name() {
         let a = scope.spawn(|| {
             peraz_engine::compress::compress_in(
                 &batch,
-                &env.tools,
+                Some(&env.tools),
                 &env.caps,
                 &make("image-photo.jpg"),
                 &mut no_progress,
@@ -802,7 +802,7 @@ fn a_batch_numbers_outputs_that_would_share_a_name() {
             };
             peraz_engine::compress::compress_in(
                 &batch,
-                &env.tools,
+                Some(&env.tools),
                 &env.caps,
                 &make(heic),
                 &mut no_progress,
@@ -836,7 +836,7 @@ fn compressing_again_takes_the_next_number_and_replaces_nothing() {
     let mut names = Vec::new();
     for _ in 0..2 {
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -868,7 +868,7 @@ fn compresses_pictures_inside_epub_and_pdf() {
         assert_eq!(probe(&env.tools, &input).unwrap().kind, kind);
         let output = env.out.join(name);
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job(input, output.clone(), Quality::Balanced),
             &mut no_progress,
@@ -904,7 +904,7 @@ fn trims_by_copying_streams_when_possible() {
             duration_ms: Some(3_000),
         };
         compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -968,7 +968,7 @@ fn hdr_video_stays_hdr_and_refuses_h264() {
     let mut hevc = job(input.clone(), output.clone(), Quality::Small);
     hevc.recipe.video.encoder = peraz_core::EncoderPreference::Software;
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &hevc,
         &mut no_progress,
@@ -990,7 +990,7 @@ fn hdr_video_stays_hdr_and_refuses_h264() {
     let mut h264 = job(input, refused.clone(), Quality::Small);
     h264.recipe.video.codec = Some(peraz_core::VideoCodec::H264);
     let report = compress(
-        &env.tools,
+        Some(&env.tools),
         &env.caps,
         &h264,
         &mut no_progress,
@@ -1032,7 +1032,7 @@ fn heic_and_avif_alpha_planes_are_kept() {
         let mut job = job(input.to_owned(), output.clone(), Quality::High);
         job.recipe.image.format = format;
         let report = compress(
-            &env.tools,
+            Some(&env.tools),
             &env.caps,
             &job,
             &mut no_progress,
@@ -1090,7 +1090,14 @@ fn ffmpeg(env: &Env, args: &[&str]) {
 }
 
 fn run_job(env: &Env, job: &Job) -> Outcome {
-    compress(&env.tools, &env.caps, job, &mut no_progress, &NOT_CANCELLED).outcome
+    compress(
+        Some(&env.tools),
+        &env.caps,
+        job,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    )
+    .outcome
 }
 
 #[test]
@@ -1183,7 +1190,7 @@ fn cut_off_files_fail_and_free_their_output_name() {
         outcomes.push(
             peraz_engine::compress::compress_in(
                 &batch,
-                &env.tools,
+                Some(&env.tools),
                 &env.caps,
                 &one,
                 &mut no_progress,
@@ -1219,4 +1226,44 @@ fn names_at_the_file_system_limit_still_work() {
     let name = output.file_name().unwrap().to_str().unwrap();
     assert!(name.len() <= 255 && name.ends_with("-1.jpg"), "{name}");
     assert!(output.is_file());
+}
+
+#[test]
+fn compresses_images_without_ffmpeg_and_refuses_the_rest() {
+    // Needs neither FFmpeg nor the fixtures: the inputs are made here.
+    let dir = std::env::temp_dir().join(format!("peraz-without-ffmpeg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("photo.png");
+    image::RgbImage::from_fn(256, 256, |x, y| image::Rgb([byte(x), byte(y), byte(x ^ y)]))
+        .save(&photo)
+        .unwrap();
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "plain text, not media").unwrap();
+    let caps = Capabilities::default();
+
+    let jpeg = dir.join("photo-1.jpg");
+    let mut to_jpeg = job(photo, jpeg.clone(), Quality::Balanced);
+    to_jpeg.recipe.image.format = ImageFormat::Jpeg;
+    let report = compress(None, &caps, &to_jpeg, &mut no_progress, &NOT_CANCELLED);
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(report.kind, Some(MediaKind::Image));
+    assert_eq!(&std::fs::read(&jpeg).unwrap()[..2], b"\xFF\xD8");
+
+    let unknown = job(notes, dir.join("notes-1.txt"), Quality::Balanced);
+    let report = compress(None, &caps, &unknown, &mut no_progress, &NOT_CANCELLED);
+    match report.outcome {
+        Outcome::Failed { message } => assert!(message.contains("needs FFmpeg"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The low 8 bits, for making test pictures.
+fn byte(value: u32) -> u8 {
+    u8::try_from(value % 256).unwrap()
 }

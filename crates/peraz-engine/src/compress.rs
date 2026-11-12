@@ -20,7 +20,11 @@ use crate::batch::{Batch, Lane};
 use crate::ffmpeg::{Capabilities, Toolchain, command};
 use crate::gif::{GifError, encode_gif};
 use crate::image::{decode_native, encode_image};
-use crate::probe::probe;
+use crate::probe::{probe, probe_without_ffmpeg};
+
+/// Why a file cannot be compressed when FFmpeg is missing.
+const NEEDS_FFMPEG: &str = "this file needs FFmpeg, which was not found. Install FFmpeg, or \
+                            point Peraz to it with --ffmpeg or PERAZ_FFMPEG";
 
 /// Progress callback: receives the fraction done, from 0.0 to 1.0.
 pub type Progress<'a> = &'a mut dyn FnMut(f64);
@@ -30,8 +34,11 @@ pub type Progress<'a> = &'a mut dyn FnMut(f64);
 ///
 /// Setting `cancel` (e.g. from a Ctrl-C handler) stops FFmpeg, removes the partial file, and
 /// returns [`Outcome::Cancelled`].
+///
+/// Without `tools` (no FFmpeg), only PDFs, EPUBs, and still JPEG, PNG, WebP, BMP, and TIFF
+/// images can be compressed; other files fail with a message saying they need FFmpeg.
 pub fn compress(
-    tools: &Toolchain,
+    tools: Option<&Toolchain>,
     caps: &Capabilities,
     job: &Job,
     progress: Progress,
@@ -44,7 +51,7 @@ pub fn compress(
 /// and reserves the output path so no other job of the batch can write it.
 pub fn compress_in(
     batch: &Batch,
-    tools: &Toolchain,
+    tools: Option<&Toolchain>,
     caps: &Capabilities,
     job: &Job,
     progress: Progress,
@@ -77,7 +84,7 @@ pub fn compress_in(
 
 fn run(
     batch: &Batch,
-    tools: &Toolchain,
+    tools: Option<&Toolchain>,
     caps: &Capabilities,
     job: &Job,
     progress: Progress,
@@ -86,9 +93,9 @@ fn run(
 ) -> Outcome {
     let failed = |message: String| Outcome::Failed { message };
 
-    let info = match probe(tools, &job.input) {
+    let info = match probe_input(tools, &job.input) {
         Ok(info) => info,
-        Err(e) => return failed(e.to_string()),
+        Err(message) => return failed(message),
     };
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
@@ -111,6 +118,18 @@ fn run(
     };
     let Some(_permit) = batch.acquire(lane, cancel) else {
         return Outcome::Cancelled;
+    };
+
+    match info.kind {
+        MediaKind::Image => return make_image(batch, tools, job, &info, progress, cancel, report),
+        MediaKind::Pdf | MediaKind::Epub => {
+            return make_document(batch, job, &info, progress, cancel, report);
+        }
+        _ => {}
+    }
+    // Everything below runs FFmpeg.
+    let Some(tools) = tools else {
+        return failed(NEEDS_FFMPEG.to_owned());
     };
 
     let output_kind = job.recipe.video.output;
@@ -172,20 +191,29 @@ fn run(
                 info.kind == MediaKind::Animation,
             )
         }
-        MediaKind::Image => make_image(batch, tools, job, &info, progress, cancel, report),
-        MediaKind::Pdf | MediaKind::Epub => {
-            make_document(batch, job, &info, progress, cancel, report)
-        }
         other => Outcome::Skipped {
             message: format!("{} compression is not available yet", kind_name(other)),
         },
     }
 }
 
+/// Probes with FFmpeg, or without it for the files Peraz reads itself.
+fn probe_input(tools: Option<&Toolchain>, input: &Path) -> Result<MediaInfo, String> {
+    let probed = match tools {
+        Some(tools) => probe(tools, input).map(Some),
+        None => probe_without_ffmpeg(input),
+    };
+    match probed {
+        Ok(Some(info)) => Ok(info),
+        Ok(None) => Err(NEEDS_FFMPEG.to_owned()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_image(
     batch: &Batch,
-    tools: &Toolchain,
+    tools: Option<&Toolchain>,
     job: &Job,
     info: &MediaInfo,
     progress: Progress,
@@ -209,7 +237,10 @@ fn make_image(
     };
     let decoded = match plan.decoder {
         ImageDecoder::Native => decode_native(&job.input),
-        ImageDecoder::Ffmpeg => crate::heif::decode(tools, &job.input),
+        ImageDecoder::Ffmpeg => match tools {
+            Some(tools) => crate::heif::decode(tools, &job.input),
+            None => Err(NEEDS_FFMPEG.to_owned()),
+        },
     };
     let encoded = match decoded.and_then(|d| encode_image(d, &plan)) {
         Ok(encoded) => encoded,

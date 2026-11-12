@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use peraz_core::{Alpha, ColorInfo, MediaInfo, MediaKind, Rational};
 use peraz_engine::ffmpeg::Toolchain;
-use peraz_engine::probe::{parse_probe_json, probe};
+use peraz_engine::probe::{parse_probe_json, probe, probe_without_ffmpeg};
 
 fn golden(name: &str) -> MediaInfo {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -203,4 +203,133 @@ fn live_probe_treats_protocol_like_names_as_local_files() {
     let result = probe(&tools, &tricky);
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(result.unwrap().kind, MediaKind::Video);
+}
+
+/// A fresh, empty folder for one test.
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("peraz-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn without_ffmpeg_reads_still_images_and_documents() {
+    let dir = temp_dir("probe-without-ffmpeg");
+    let opaque =
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([byte(x * 4), byte(y * 5), 90]));
+    let clear = image::RgbaImage::from_pixel(64, 48, image::Rgba([10, 20, 30, 128]));
+    let files = [
+        ("photo.jpg", "mjpeg", false),
+        ("photo.png", "png", false),
+        ("photo.webp", "webp", false),
+        ("photo.bmp", "bmp", false),
+        ("photo.tiff", "tiff", false),
+        ("clear.png", "png", true),
+    ];
+    for (name, codec, transparent) in files {
+        let path = dir.join(name);
+        if transparent {
+            clear.save(&path).unwrap();
+        } else {
+            opaque.save(&path).unwrap();
+        }
+        let info = probe_without_ffmpeg(&path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(info.kind, MediaKind::Image, "{name}");
+        assert_eq!(info.size_bytes, std::fs::metadata(&path).unwrap().len());
+        let video = info.video.unwrap();
+        assert_eq!(
+            (video.codec.as_str(), video.width, video.height),
+            (codec, 64, 48),
+            "{name}"
+        );
+        if codec == "png" {
+            let alpha = if transparent {
+                Alpha::Present
+            } else {
+                Alpha::Absent
+            };
+            assert_eq!(video.alpha, alpha, "{name}");
+        }
+    }
+
+    let pdf = dir.join("doc.pdf");
+    std::fs::write(&pdf, b"%PDF-1.7\n").unwrap();
+    assert_eq!(
+        probe_without_ffmpeg(&pdf).unwrap().unwrap().kind,
+        MediaKind::Pdf
+    );
+    assert!(probe_without_ffmpeg(&dir.join("missing.png")).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn without_ffmpeg_leaves_other_files_to_ffmpeg() {
+    let dir = temp_dir("probe-needs-ffmpeg");
+    // An animated PNG: an `acTL` chunk right after the header.
+    let mut png = Vec::new();
+    image::RgbImage::new(8, 8)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let ihdr_end = 8 + 4 + 4 + 13 + 4;
+    let mut actl = vec![0, 0, 0, 8];
+    actl.extend_from_slice(b"acTL");
+    actl.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    png.splice(ihdr_end..ihdr_end, actl);
+    // An animated WebP: a `VP8X` chunk with the animation flag.
+    let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02".to_vec();
+    webp.resize(64, 0);
+    let files: [(&str, &[u8]); 4] = [
+        ("animated.png", &png),
+        ("animated.webp", &webp),
+        ("still.gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;"),
+        ("notes.txt", b"plain text, not media"),
+    ];
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        assert!(probe_without_ffmpeg(&path).unwrap().is_none(), "{name}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn live_without_ffmpeg_agrees_with_ffprobe() {
+    let Some((tools, fixtures)) = live_setup() else {
+        return;
+    };
+    for name in ["image-photo.jpg", "image-alpha.png", "image-opaque.png"] {
+        let path = fixtures.join(name);
+        let ours = probe_without_ffmpeg(&path).unwrap().unwrap();
+        let theirs = probe(&tools, &path).unwrap();
+        assert_eq!(ours.kind, theirs.kind, "{name}");
+        let (ours, theirs) = (ours.video.unwrap(), theirs.video.unwrap());
+        assert_eq!(
+            (&ours.codec, ours.width, ours.height),
+            (&theirs.codec, theirs.width, theirs.height),
+            "{name}"
+        );
+        if theirs.alpha != Alpha::Unknown {
+            assert_eq!(ours.alpha, theirs.alpha, "{name}");
+        }
+    }
+    for name in [
+        "video-720p-noaudio.mp4",
+        "animation.gif",
+        "image-photo.heic",
+    ] {
+        assert!(
+            probe_without_ffmpeg(&fixtures.join(name))
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+    }
+}
+
+/// The low 8 bits, for making test pictures.
+fn byte(value: u32) -> u8 {
+    u8::try_from(value % 256).unwrap()
 }

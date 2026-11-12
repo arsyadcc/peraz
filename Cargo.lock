@@ -1121,6 +1121,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "ctrlc",
+ "image",
  "peraz-core",
  "peraz-engine",
  "serde",

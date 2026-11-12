@@ -149,7 +149,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             let reports = run_parallel(&files, workers.min(files.len()), true, |input| {
                 peraz_engine::compress::compress_in(
                     &batch,
-                    &tools,
+                    Some(&tools),
                     &caps,
                     &job_for(input),
                     &mut |_| {},

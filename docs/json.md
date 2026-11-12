@@ -29,7 +29,7 @@ One document for the whole run.
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | The JSON schema version: 1. |
-| `ffmpeg` | object | The FFmpeg build used. |
+| `ffmpeg` | object or null | The FFmpeg build used; `null` when FFmpeg was not found and every input could be compressed without it ([Without FFmpeg](cli.md#without-ffmpeg)). |
 | `ffmpeg.version` | string | FFmpeg's version, e.g. `7.1.1`. |
 | `ffmpeg.license` | string | One of `lgpl`, `gpl`, `nonfree`. |
 | `recipe` | string or null | The recipe used: its name, or the path of a project `peraz.toml`. |

@@ -25,6 +25,10 @@ ctrlc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# Makes test images, so the tests without FFmpeg need no fixtures.
+image.workspace = true
+
 [features]
 # SIMD JPEG and AVIF encoding for release builds (needs `nasm` on x86/x86_64 build machines).
 simd = ["peraz-engine/simd-jpeg", "peraz-engine/simd-avif"]

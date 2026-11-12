@@ -11,6 +11,18 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
 
 ## [Unreleased]
 
+### Added
+
+- Without FFmpeg, `peraz compress` still compresses JPEG, PNG, WebP, BMP, and TIFF images, PDFs,
+  and EPUBs, with the same results. If any input needs FFmpeg (videos, GIFs, HEIC, AVIF), the
+  run stops before any work with exit code 3 and names that file. `peraz doctor` says what works
+  without FFmpeg.
+
+### Changed
+
+- **Interface:** in `peraz compress --json`, `ffmpeg` is `null` when FFmpeg was not found and
+  every input could be compressed without it.
+
 ## [0.1.0-alpha.3] - 2026-11-12
 
 ### Added

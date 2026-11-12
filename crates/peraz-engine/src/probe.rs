@@ -1,4 +1,4 @@
-//! Probing media with `ffprobe`.
+//! Probing media with `ffprobe`, or in process for the files Peraz reads itself.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,25 +15,9 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
         path: path.to_owned(),
         source,
     };
-    let metadata = std::fs::metadata(path).map_err(input_error)?;
-    if !metadata.is_file() {
-        return Err(input_error(std::io::Error::other("not a regular file")));
-    }
+    let size = regular_file_size(path)?;
     if let Some(kind) = sniff_document(path).map_err(input_error)? {
-        return Ok(MediaInfo {
-            kind,
-            container: if kind == MediaKind::Pdf {
-                "pdf"
-            } else {
-                "epub"
-            }
-            .to_owned(),
-            size_bytes: metadata.len(),
-            duration_seconds: None,
-            bit_rate: None,
-            video: None,
-            audio: Vec::new(),
-        });
+        return Ok(document_info(kind, size));
     }
     let absolute = std::path::absolute(path).map_err(input_error)?;
     // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
@@ -75,7 +59,7 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
         }
         other => other?,
     };
-    parse_probe_json(&json, metadata.len()).map_err(|e| EngineError::BadOutput {
+    parse_probe_json(&json, size).map_err(|e| EngineError::BadOutput {
         tool: "ffprobe",
         message: e.to_string(),
     })
@@ -312,22 +296,159 @@ impl RawStream {
 }
 
 /// Parses ffprobe's stringly-typed numbers; `N/A` and garbage become `None`.
+/// Probes one file without FFmpeg. Works for PDFs, EPUBs, and the still images Peraz decodes
+/// itself (JPEG, PNG, WebP, BMP, TIFF); `Ok(None)` means the file needs FFmpeg (videos,
+/// animations, GIFs, HEIC, AVIF, and anything unrecognized).
+pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineError> {
+    let input_error = |source| EngineError::Input {
+        path: path.to_owned(),
+        source,
+    };
+    let size = regular_file_size(path)?;
+    if let Some(kind) = sniff_document(path).map_err(input_error)? {
+        return Ok(Some(document_info(kind, size)));
+    }
+    let Some((codec, container)) = sniff_still_image(path).map_err(input_error)? else {
+        return Ok(None);
+    };
+    let not_media = |e: image::ImageError| EngineError::NotMedia {
+        message: e.to_string(),
+    };
+    let decoder = image::ImageReader::open(path)
+        .map_err(input_error)?
+        .with_guessed_format()
+        .map_err(input_error)?
+        .into_decoder()
+        .map_err(not_media)?;
+    let (width, height) = image::ImageDecoder::dimensions(&decoder);
+    let alpha = if image::ImageDecoder::color_type(&decoder).has_alpha() {
+        Alpha::Present
+    } else {
+        Alpha::Absent
+    };
+    Ok(Some(MediaInfo {
+        kind: MediaKind::Image,
+        container: container.to_owned(),
+        size_bytes: size,
+        duration_seconds: None,
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: codec.to_owned(),
+            width,
+            height,
+            // EXIF orientation is applied when decoding.
+            rotation: 0,
+            frame_rate: None,
+            frame_count: Some(1),
+            pixel_format: None,
+            color: ColorInfo::default(),
+            alpha,
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    }))
+}
+
+/// The size of `path`, which must be a regular file.
+fn regular_file_size(path: &Path) -> Result<u64, EngineError> {
+    let input_error = |source| EngineError::Input {
+        path: path.to_owned(),
+        source,
+    };
+    let metadata = std::fs::metadata(path).map_err(input_error)?;
+    if !metadata.is_file() {
+        return Err(input_error(std::io::Error::other("not a regular file")));
+    }
+    Ok(metadata.len())
+}
+
+fn document_info(kind: MediaKind, size_bytes: u64) -> MediaInfo {
+    MediaInfo {
+        kind,
+        container: if kind == MediaKind::Pdf {
+            "pdf"
+        } else {
+            "epub"
+        }
+        .to_owned(),
+        size_bytes,
+        duration_seconds: None,
+        bit_rate: None,
+        video: None,
+        audio: Vec::new(),
+    }
+}
+
+/// Recognizes still JPEG, PNG, WebP, BMP, and TIFF images from their bytes, as FFmpeg's codec
+/// and demuxer names. Animated PNG and WebP files are left to FFmpeg.
+fn sniff_still_image(path: &Path) -> std::io::Result<Option<(&'static str, &'static str)>> {
+    use std::io::{Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let mut head = [0u8; 32];
+    let filled = read_up_to(&mut file, &mut head)?;
+    let head = &head[..filled];
+    let found = if head.starts_with(b"\xFF\xD8\xFF") {
+        Some(("mjpeg", "jpeg_pipe"))
+    } else if head.starts_with(b"\x89PNG\r\n\x1A\n") {
+        // An animated PNG has an `acTL` chunk before its first `IDAT`.
+        file.seek(SeekFrom::Start(8))?;
+        let mut animated = false;
+        loop {
+            let mut chunk = [0u8; 8];
+            if read_up_to(&mut file, &mut chunk)? < chunk.len() {
+                break;
+            }
+            match &chunk[4..] {
+                b"acTL" => {
+                    animated = true;
+                    break;
+                }
+                b"IDAT" | b"IEND" => break,
+                _ => {
+                    let length = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    // Skip the data and its CRC.
+                    file.seek(SeekFrom::Current(i64::from(length) + 4))?;
+                }
+            }
+        }
+        (!animated).then_some(("png", "png_pipe"))
+    } else if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        // Extended WebP: flags after the `VP8X` chunk header, bit 1 marks an animation.
+        let animated =
+            head.get(12..16) == Some(b"VP8X") && head.get(20).is_some_and(|f| f & 0x02 != 0);
+        (!animated).then_some(("webp", "webp_pipe"))
+    } else if head.starts_with(b"BM") {
+        Some(("bmp", "bmp_pipe"))
+    } else if head.starts_with(b"II*\0") || head.starts_with(b"MM\0*") {
+        Some(("tiff", "tiff_pipe"))
+    } else {
+        None
+    };
+    Ok(found)
+}
+
+/// Reads until `buf` is full or the file ends; returns how many bytes were read.
+fn read_up_to(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read as _;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
+}
+
 fn parse_num<T: std::str::FromStr>(text: Option<&str>) -> Option<T> {
     text?.trim().parse().ok()
 }
 
 /// Recognizes PDF and EPUB files from their first bytes (ffprobe reads neither).
 fn sniff_document(path: &Path) -> std::io::Result<Option<MediaKind>> {
-    use std::io::Read as _;
     let mut head = [0u8; 64];
     let mut file = std::fs::File::open(path)?;
-    let mut filled = 0;
-    while filled < head.len() {
-        match file.read(&mut head[filled..])? {
-            0 => break,
-            n => filled += n,
-        }
-    }
+    let filled = read_up_to(&mut file, &mut head)?;
     Ok(classify_head(&head[..filled]))
 }
 
