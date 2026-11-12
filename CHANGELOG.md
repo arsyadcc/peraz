@@ -11,6 +11,8 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-12
+
 ### Added
 
 - `peraz completions <shell>` prints a completion script for bash, zsh, fish, PowerShell, or
@@ -101,6 +103,7 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/arsyadcc/peraz/releases/tag/v0.1.0-alpha.1
