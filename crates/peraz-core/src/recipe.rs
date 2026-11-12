@@ -55,6 +55,8 @@ pub struct VideoRecipe {
     pub remove_audio: bool,
     /// Container/format of the output.
     pub output: VideoOutput,
+    /// Fit the output in this many bytes (SI). Replaces the quality level for video.
+    pub target_bytes: Option<u64>,
 }
 
 /// What a video becomes.

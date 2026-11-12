@@ -11,6 +11,7 @@ video, images, and GIFs, with results you can trust.
 peraz compress clip.mov                         # → clip-peraz.mp4 (H.264, balanced quality)
 peraz compress -q small --codec hevc *.mp4      # smaller files
 peraz compress --encoder hardware --max-width 1280 --no-audio clip.mov
+peraz compress --target-size 25MB long-video.mov      # fits, verified (two-pass with x264/x265)
 peraz compress photo.jpg screenshot.png          # mozjpeg / pngquant-style palette + oxipng
 peraz compress --format jpeg --max-width 2000 *.png
 peraz compress --format webp *.png *.jpg           # or --format avif (smallest, slower)
@@ -21,6 +22,11 @@ peraz compress --json --out-dir out/ media/*     # machine-readable report
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
 ```
+
+With `--target-size`, the video and audio bit rates are computed from the target, software
+encoders run two passes, and the result is measured: if it is over, the final pass runs again
+at a lower bit rate. A file over the target is never kept. When the bit rate is too low for the
+resolution, the video is scaled down (unless you set `--max-width`/`--max-height`).
 
 Peraz never keeps a worse result: if the compressed file is not smaller, it is discarded and the
 report says why. Existing files are never overwritten without `--force`, and a half-written file

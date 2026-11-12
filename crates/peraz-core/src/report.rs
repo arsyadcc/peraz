@@ -53,6 +53,8 @@ pub struct Job {
 pub enum KeepReason {
     /// The compressed file was not smaller than the input, so it was discarded.
     NotSmaller { compressed_bytes: u64 },
+    /// The input already fits the requested size target.
+    AlreadyWithinTarget { target_bytes: u64 },
 }
 
 /// The result of a job.

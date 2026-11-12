@@ -11,8 +11,8 @@ pub mod units;
 
 pub use media::{Alpha, AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
 pub use plan::{
-    GifPlan, ImageDecoder, ImageEncoding, ImagePlan, PlanError, VideoPlan, plan_gif, plan_image,
-    plan_video,
+    GifPlan, ImageDecoder, ImageEncoding, ImagePlan, Pass, PlanError, RateControl, SizeTarget,
+    VideoPlan, plan_gif, plan_image, plan_video,
 };
 pub use recipe::{
     EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,

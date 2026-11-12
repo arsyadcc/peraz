@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use peraz_core::units::format_bytes;
 use peraz_core::{
     EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Job, KeepReason, Outcome, OutputTarget,
-    Quality, Recipe, Report, VideoCodec, VideoOutput, VideoRecipe,
+    Plan, Quality, Recipe, Report, VideoCodec, VideoOutput, VideoPlan, VideoRecipe,
 };
 use peraz_engine::ffmpeg::BuildInfo;
 use serde::Serialize;
@@ -56,6 +56,11 @@ pub struct Args {
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
     duration: Option<u64>,
 
+    /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
+    /// Replaces --quality for videos; the result is verified and never larger than the target.
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    target_size: Option<u64>,
+
     /// Remove all audio tracks.
     #[arg(long)]
     no_audio: bool,
@@ -96,6 +101,38 @@ fn parse_format(s: &str) -> Result<OutputFormat, String> {
                 )
             }),
     }
+}
+
+/// Parses an SI size (`25MB`, `8 MB`, `500kB`, `1.5GB`, `900000B`) into bytes.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let text = s.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("`{s}` is not a size like 25MB"))?;
+    let scale = match unit.trim().to_ascii_lowercase().as_str() {
+        "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" | "m" => 1e6,
+        "gb" | "g" => 1e9,
+        "kib" | "mib" | "gib" => {
+            return Err(format!(
+                "`{s}` uses binary units; Peraz uses SI units (kB, MB, GB)"
+            ));
+        }
+        "" => return Err(format!("`{s}` needs a unit: B, kB, MB, or GB")),
+        other => return Err(format!("unknown size unit `{other}`; use B, kB, MB, or GB")),
+    };
+    let bytes = value * scale;
+    if !bytes.is_finite() || bytes < 1.0 {
+        return Err(format!("`{s}` is not a usable size"));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // checked positive and finite
+    Ok(bytes.floor() as u64)
 }
 
 /// Parses seconds (`12`, `12.5`) into milliseconds.
@@ -227,6 +264,7 @@ fn recipe(args: &Args) -> Recipe {
             max_width: args.max_width,
             max_height: args.max_height,
             remove_audio: args.no_audio,
+            target_bytes: args.target_size,
             output: if args.format == OutputFormat::Gif {
                 VideoOutput::Gif
             } else {
@@ -312,8 +350,19 @@ fn print_human(report: &Report) {
             let before = report.input_bytes.unwrap_or(0);
             let encoder = report.encoder.as_deref().unwrap_or("");
             println!("{input} → {}", output.display());
+            let target = match &report.plan {
+                Some(Plan::Video(VideoPlan {
+                    target: Some(t), ..
+                })) => format!(
+                    " · target {} met in {} {}",
+                    format_bytes(t.target_bytes),
+                    t.attempts,
+                    if t.attempts == 1 { "try" } else { "tries" }
+                ),
+                _ => String::new(),
+            };
             println!(
-                "  {} → {} ({}) · {encoder} · {:.1} s",
+                "  {} → {} ({}) · {encoder}{target} · {:.1} s",
                 format_bytes(before),
                 format_bytes(*output_bytes),
                 percent_saved(before, *output_bytes),
@@ -326,6 +375,14 @@ fn print_human(report: &Report) {
                 "  kept the original: the compressed version was not smaller ({} vs {}); try a smaller quality level",
                 format_bytes(*compressed_bytes),
                 format_bytes(report.input_bytes.unwrap_or(0))
+            );
+        }
+        Outcome::KeptOriginal(KeepReason::AlreadyWithinTarget { target_bytes }) => {
+            println!("{input}");
+            println!(
+                "  kept the original: it is already {} (target {})",
+                format_bytes(report.input_bytes.unwrap_or(0)),
+                format_bytes(*target_bytes)
             );
         }
         Outcome::Skipped { message } => println!("{input}\n  skipped: {message}"),
@@ -366,6 +423,12 @@ mod tests {
         );
         assert!(parse_format("mov").unwrap_err().contains("gif"));
         assert_eq!(parse_seconds("12.5"), Ok(12_500));
+        assert_eq!(parse_size("25MB"), Ok(25_000_000));
+        assert_eq!(parse_size("8 mb"), Ok(8_000_000));
+        assert_eq!(parse_size("1.5GB"), Ok(1_500_000_000));
+        assert_eq!(parse_size("500kB"), Ok(500_000));
+        assert!(parse_size("25MiB").unwrap_err().contains("SI"));
+        assert!(parse_size("25").unwrap_err().contains("unit"));
         assert_eq!(parse_seconds("0"), Ok(0));
         assert!(parse_seconds("-1").is_err());
         assert!(parse_seconds("soon").is_err());

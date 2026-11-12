@@ -9,9 +9,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use peraz_core::units::format_bytes;
 use peraz_core::{
-    ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Plan, PlanError, Report,
-    VideoOutput, plan_gif, plan_image, plan_video,
+    ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan, PlanError,
+    RateControl, Report, SizeTarget, VideoOutput, plan_gif, plan_image, plan_video,
 };
 
 use crate::ffmpeg::{Capabilities, Toolchain, command};
@@ -89,10 +90,19 @@ fn run(
             if let Err(message) = check_output_path(job, &output) {
                 return failed(message);
             }
+            if plan.target.is_some() {
+                return encode_to_target(
+                    tools, job, &info, plan, &output, progress, cancel, report,
+                );
+            }
             let partial = partial_path(&output);
             let duration = info.duration_seconds.unwrap_or(0.0);
+            let sink = Sink {
+                file: Some(&partial),
+                workdir: None,
+            };
             if let Err(error) = encode(
-                tools, &job.input, &partial, &plan.args, duration, progress, cancel,
+                tools, &job.input, &sink, &plan.args, duration, progress, cancel,
             ) {
                 let _ = std::fs::remove_file(&partial);
                 return match error {
@@ -188,6 +198,161 @@ fn make_gif(
     finish(&partial, &output, info.size_bytes, plan.converts_format)
 }
 
+/// Most encodes a size target may take: the first try plus corrections.
+const MAX_TARGET_ATTEMPTS: u32 = 4;
+
+/// Encodes a video to fit a file size: an analysis pass for software encoders, then final
+/// passes until the measured size fits, lowering the bit rate by the measured overshoot.
+#[allow(clippy::too_many_arguments)]
+fn encode_to_target(
+    tools: &Toolchain,
+    job: &Job,
+    info: &MediaInfo,
+    mut plan: peraz_core::VideoPlan,
+    output: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let Some(mut target) = plan.target.clone() else {
+        return Outcome::Failed {
+            message: "internal error: no size target".to_owned(),
+        };
+    };
+    if info.size_bytes <= target.target_bytes {
+        return Outcome::KeptOriginal(KeepReason::AlreadyWithinTarget {
+            target_bytes: target.target_bytes,
+        });
+    }
+    let duration = info.duration_seconds.unwrap_or(0.0);
+    let workdir = std::env::temp_dir().join(format!(
+        "peraz-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    if let Err(e) = std::fs::create_dir_all(&workdir) {
+        return Outcome::Failed {
+            message: format!("cannot create a work folder: {e}"),
+        };
+    }
+    let outcome = run_target_passes(
+        tools,
+        job,
+        &mut plan,
+        &mut target,
+        output,
+        &workdir,
+        duration,
+        progress,
+        cancel,
+    );
+    let _ = std::fs::remove_dir_all(&workdir);
+    plan.target = Some(target);
+    report.plan = Some(Plan::Video(plan));
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_target_passes(
+    tools: &Toolchain,
+    job: &Job,
+    plan: &mut peraz_core::VideoPlan,
+    target: &mut SizeTarget,
+    output: &Path,
+    workdir: &Path,
+    duration: f64,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Outcome {
+    let as_outcome = |error: EncodeError| match error {
+        EncodeError::Cancelled => Outcome::Cancelled,
+        EncodeError::Failed(message) => Outcome::Failed { message },
+    };
+    let log = "peraz-pass".to_owned();
+    let mut bit_rate = target.video_bit_rate;
+    let analysis_share = if target.two_pass { 0.3 } else { 0.0 };
+    if target.two_pass {
+        let args = plan.ffmpeg_args(
+            RateControl::Bitrate(bit_rate),
+            &Pass::First { log: log.clone() },
+        );
+        let sink = Sink {
+            file: None,
+            workdir: Some(workdir),
+        };
+        let mut sub = |f: f64| progress(f * analysis_share);
+        if let Err(e) = encode(tools, &job.input, &sink, &args, duration, &mut sub, cancel) {
+            return as_outcome(e);
+        }
+    }
+    let partial = partial_path(output);
+    let mut smallest: Option<u64> = None;
+    for attempt in 1..=MAX_TARGET_ATTEMPTS {
+        let pass = if target.two_pass {
+            Pass::Second { log: log.clone() }
+        } else {
+            Pass::Single
+        };
+        let args = plan.ffmpeg_args(RateControl::Bitrate(bit_rate), &pass);
+        let sink = Sink {
+            file: Some(&partial),
+            workdir: Some(workdir),
+        };
+        let mut sub = |f: f64| progress(analysis_share + f * (1.0 - analysis_share));
+        if let Err(e) = encode(tools, &job.input, &sink, &args, duration, &mut sub, cancel) {
+            let _ = std::fs::remove_file(&partial);
+            return as_outcome(e);
+        }
+        target.attempts = attempt;
+        target.video_bit_rate = bit_rate;
+        plan.args = args;
+        let size = match std::fs::metadata(&partial) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                return Outcome::Failed {
+                    message: format!("cannot read the encoded file: {e}"),
+                };
+            }
+        };
+        if size <= target.target_bytes {
+            return finish(&partial, output, u64::MAX, false);
+        }
+        smallest = Some(smallest.map_or(size, |s| s.min(size)));
+        // Lower the video bit rate by the measured overshoot, with a little extra margin.
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let audio_bytes = (target.audio_bit_rate as f64 * duration / 8.0) as u64;
+        let wanted_video = target.target_bytes.saturating_mul(97) / 100;
+        let wanted_video = wanted_video.saturating_sub(audio_bytes);
+        let actual_video = size.saturating_sub(audio_bytes).max(1);
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let corrected =
+            (bit_rate as f64 * (wanted_video as f64 / actual_video as f64).min(0.97)) as u64;
+        bit_rate = corrected;
+        if bit_rate < 20_000 {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&partial);
+    Outcome::Failed {
+        message: format!(
+            "could not fit under {} after {} attempts (smallest was {}); try a lower --max-width or --no-audio",
+            format_bytes(target.target_bytes),
+            target.attempts,
+            format_bytes(smallest.unwrap_or(0))
+        ),
+    }
+}
+
 /// Keeps the encoded file only when it is smaller than the input ("never worse"), unless the
 /// format changed on purpose (`converted`), where a larger file is still the requested result.
 fn finish(partial: &Path, output: &Path, input_bytes: u64, converted: bool) -> Outcome {
@@ -279,10 +444,18 @@ impl From<String> for EncodeError {
     }
 }
 
+/// Where an encode writes.
+struct Sink<'a> {
+    /// The output file, or `None` for an analysis pass that writes nothing.
+    file: Option<&'a Path>,
+    /// FFmpeg's working directory (holds two-pass statistics), or `None` for the current one.
+    workdir: Option<&'a Path>,
+}
+
 fn encode(
     tools: &Toolchain,
     input: &Path,
-    output: &Path,
+    sink: &Sink,
     plan_args: &[String],
     duration_seconds: f64,
     progress: Progress,
@@ -292,10 +465,15 @@ fn encode(
     cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-y", "-i"])
         .arg(file_url(input)?)
         .args(plan_args)
-        .args(["-progress", "pipe:1", "-nostats"])
-        .arg(file_url(output)?)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .args(["-progress", "pipe:1", "-nostats"]);
+    match sink.file {
+        Some(file) => cmd.arg(file_url(file)?),
+        None => cmd.arg("-"),
+    };
+    if let Some(dir) = sink.workdir {
+        cmd.current_dir(dir);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not run {}: {e}", tools.ffmpeg.display()))?;

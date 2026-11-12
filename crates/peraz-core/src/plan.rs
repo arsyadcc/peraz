@@ -102,7 +102,10 @@ pub struct VideoPlan {
     pub scale_to: Option<(u32, u32)>,
     pub pixel_format: &'static str,
     pub audio: AudioPlan,
-    /// FFmpeg arguments between the input and the output, for transparency in reports.
+    /// Present when the video must fit a file size.
+    pub target: Option<SizeTarget>,
+    /// FFmpeg arguments between the input and the output (single pass, or the final pass of a
+    /// size-targeted encode), for transparency in reports.
     pub args: Vec<String>,
 }
 
@@ -119,6 +122,13 @@ pub enum PlanError {
     },
     /// The file is not a still image.
     NotImage { kind: MediaKind },
+    /// A size target needs the duration, which this file does not report.
+    UnknownDuration,
+    /// The target is too small for this video's length.
+    TargetTooSmall {
+        target_bytes: u64,
+        minimum_bytes: u64,
+    },
     /// The file cannot become an animated GIF.
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
@@ -135,6 +145,18 @@ impl std::fmt::Display for PlanError {
                 tried.join(", ")
             ),
             Self::NotImage { kind } => write!(f, "not a still image (detected: {kind:?})"),
+            Self::UnknownDuration => {
+                write!(f, "cannot aim for a file size: the duration is unknown")
+            }
+            Self::TargetTooSmall {
+                target_bytes,
+                minimum_bytes,
+            } => write!(
+                f,
+                "{} is too small for this video; it needs at least {} (or use --no-audio, or trim it)",
+                crate::units::format_bytes(*target_bytes),
+                crate::units::format_bytes(*minimum_bytes)
+            ),
             Self::NotAnimation { kind } => {
                 write!(f, "cannot make a GIF from this file (detected: {kind:?})")
             }
@@ -171,72 +193,300 @@ pub fn plan_video(
             tried: candidates.iter().map(|e| e.ffmpeg_name()).collect(),
         })?;
 
-    let scale_to = fit_within(
-        video.display_size(),
-        recipe.video.max_width,
-        recipe.video.max_height,
-    );
     let pixel_format = pixel_format(encoder, video);
-    let audio = if recipe.video.remove_audio || info.audio.is_empty() {
-        AudioPlan::None
-    } else {
-        AudioPlan::Tracks {
-            tracks: info
-                .audio
-                .iter()
-                .map(|t| audio_action(t, recipe.quality))
-                .collect(),
+    let (scale_to, audio, rate, target) = match recipe.video.target_bytes {
+        None => {
+            let scale_to = fit_within(
+                video.display_size(),
+                recipe.video.max_width,
+                recipe.video.max_height,
+            );
+            let audio = if recipe.video.remove_audio || info.audio.is_empty() {
+                AudioPlan::None
+            } else {
+                AudioPlan::Tracks {
+                    tracks: info
+                        .audio
+                        .iter()
+                        .map(|t| audio_action(t, recipe.quality))
+                        .collect(),
+                }
+            };
+            (scale_to, audio, RateControl::Quality(recipe.quality), None)
+        }
+        Some(target_bytes) => {
+            let budget = size_budget(info, recipe, encoder, target_bytes)?;
+            let target = SizeTarget {
+                target_bytes,
+                video_bit_rate: budget.video_bit_rate,
+                audio_bit_rate: budget.audio_bit_rate,
+                two_pass: !encoder.is_hardware(),
+                attempts: 0,
+            };
+            (
+                budget.scale_to,
+                budget.audio,
+                RateControl::Bitrate(budget.video_bit_rate),
+                Some(target),
+            )
         }
     };
-
-    let mut args: Vec<String> = vec!["-map".into(), "0:v:0".into()];
-    if let AudioPlan::Tracks { tracks } = &audio {
-        for i in 0..tracks.len() {
-            args.extend(["-map".into(), format!("0:a:{i}")]);
-        }
-    }
-    args.extend(["-map_metadata".into(), "0".into()]);
-    if let Some((w, h)) = scale_to {
-        args.extend(["-vf".into(), format!("scale={w}:{h}:flags=lanczos")]);
-    }
-    args.extend(["-c:v".into(), encoder.ffmpeg_name().into()]);
-    args.extend(encoder.quality_args(recipe.quality));
-    if encoder.codec() == VideoCodec::Hevc {
-        // Apple players only accept HEVC in MP4 with the `hvc1` tag.
-        args.extend(["-tag:v".into(), "hvc1".into()]);
-    }
-    args.extend(["-pix_fmt".into(), pixel_format.into()]);
-    match &audio {
-        AudioPlan::None => args.push("-an".into()),
-        AudioPlan::Tracks { tracks } => {
-            for (i, action) in tracks.iter().enumerate() {
-                match action {
-                    AudioAction::Copy => args.extend([format!("-c:a:{i}"), "copy".into()]),
-                    AudioAction::Aac { bit_rate } => args.extend([
-                        format!("-c:a:{i}"),
-                        "aac".into(),
-                        format!("-b:a:{i}"),
-                        format!("{}k", bit_rate / 1000),
-                    ]),
-                }
-            }
-        }
-    }
-    // Put the index first so playback can start before the whole file is downloaded.
-    args.extend([
-        "-movflags".into(),
-        "+faststart".into(),
-        "-f".into(),
-        "mp4".into(),
-    ]);
-
-    Ok(VideoPlan {
+    let mut plan = VideoPlan {
         encoder,
         scale_to,
         pixel_format,
         audio,
-        args,
+        target,
+        args: Vec::new(),
+    };
+    plan.args = plan.ffmpeg_args(rate, &Pass::Single);
+    Ok(plan)
+}
+
+/// How the encoder decides how many bits to spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateControl {
+    /// Constant quality (CRF / `-q:v`) for a quality level.
+    Quality(Quality),
+    /// Average video bit rate in bits per second, for a target file size.
+    Bitrate(u64),
+}
+
+/// Which pass of an encode the arguments are for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pass {
+    /// A normal, single-pass encode.
+    Single,
+    /// The analysis pass of a two-pass encode: video only, no output file. `log` is the stats
+    /// file name, relative to FFmpeg's working directory.
+    First { log: String },
+    /// The final pass of a two-pass encode, reading the stats from `log`.
+    Second { log: String },
+}
+
+/// The size a video must fit in, and how the bits are split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SizeTarget {
+    pub target_bytes: u64,
+    /// Video bit rate of the final attempt, in bits per second.
+    pub video_bit_rate: u64,
+    /// Total audio bit rate, in bits per second.
+    pub audio_bit_rate: u64,
+    /// Software encoders analyze the whole video first for the best quality at this size.
+    pub two_pass: bool,
+    /// Encodes it took to fit under the target (filled in by the engine).
+    pub attempts: u32,
+}
+
+impl VideoPlan {
+    /// FFmpeg arguments between the input and the output for one pass.
+    pub fn ffmpeg_args(&self, rate: RateControl, pass: &Pass) -> Vec<String> {
+        let analysis = matches!(pass, Pass::First { .. });
+        let mut args: Vec<String> = vec!["-map".into(), "0:v:0".into()];
+        if let (AudioPlan::Tracks { tracks }, false) = (&self.audio, analysis) {
+            for i in 0..tracks.len() {
+                args.extend(["-map".into(), format!("0:a:{i}")]);
+            }
+        }
+        args.extend(["-map_metadata".into(), "0".into()]);
+        if let Some((w, h)) = self.scale_to {
+            args.extend(["-vf".into(), format!("scale={w}:{h}:flags=lanczos")]);
+        }
+        args.extend(["-c:v".into(), self.encoder.ffmpeg_name().into()]);
+        match rate {
+            RateControl::Quality(quality) => args.extend(self.encoder.quality_args(quality)),
+            RateControl::Bitrate(bps) => {
+                args.extend(["-b:v".into(), format!("{}k", bps.div_ceil(1000))]);
+            }
+        }
+        match (pass, self.encoder) {
+            (Pass::Single, _) => {}
+            (Pass::First { log }, VideoEncoder::Libx265) => {
+                args.extend(["-x265-params".into(), format!("pass=1:stats={log}")]);
+            }
+            (Pass::Second { log }, VideoEncoder::Libx265) => {
+                args.extend(["-x265-params".into(), format!("pass=2:stats={log}")]);
+            }
+            (Pass::First { log }, _) => args.extend([
+                "-pass".into(),
+                "1".into(),
+                "-passlogfile".into(),
+                log.clone(),
+            ]),
+            (Pass::Second { log }, _) => args.extend([
+                "-pass".into(),
+                "2".into(),
+                "-passlogfile".into(),
+                log.clone(),
+            ]),
+        }
+        if self.encoder.codec() == VideoCodec::Hevc {
+            // Apple players only accept HEVC in MP4 with the `hvc1` tag.
+            args.extend(["-tag:v".into(), "hvc1".into()]);
+        }
+        args.extend(["-pix_fmt".into(), self.pixel_format.into()]);
+        if analysis {
+            args.extend(["-an".into(), "-f".into(), "null".into()]);
+            return args;
+        }
+        match &self.audio {
+            AudioPlan::None => args.push("-an".into()),
+            AudioPlan::Tracks { tracks } => {
+                for (i, action) in tracks.iter().enumerate() {
+                    match action {
+                        AudioAction::Copy => args.extend([format!("-c:a:{i}"), "copy".into()]),
+                        AudioAction::Aac { bit_rate } => args.extend([
+                            format!("-c:a:{i}"),
+                            "aac".into(),
+                            format!("-b:a:{i}"),
+                            format!("{}k", bit_rate / 1000),
+                        ]),
+                    }
+                }
+            }
+        }
+        // Put the index first so playback can start before the whole file is downloaded.
+        args.extend([
+            "-movflags".into(),
+            "+faststart".into(),
+            "-f".into(),
+            "mp4".into(),
+        ]);
+        args
+    }
+}
+
+/// How a size target is spent.
+struct Budget {
+    video_bit_rate: u64,
+    audio_bit_rate: u64,
+    audio: AudioPlan,
+    scale_to: Option<(u32, u32)>,
+}
+
+/// Lowest video bit rate Peraz will plan, in bits per second: below this nothing is watchable.
+const MIN_VIDEO_BIT_RATE: u64 = 40_000;
+
+/// Splits a size target into audio and video bit rates and picks a resolution that the video
+/// bit rate can carry.
+fn size_budget(
+    info: &MediaInfo,
+    recipe: &Recipe,
+    encoder: VideoEncoder,
+    target_bytes: u64,
+) -> Result<Budget, PlanError> {
+    let duration = info
+        .duration_seconds
+        .filter(|d| *d > 0.0)
+        .ok_or(PlanError::UnknownDuration)?;
+    // Keep 3% for the container (MP4 index, headers) and encoder rate-control variance.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let total = ((target_bytes as f64 * 8.0 * 0.97) / duration) as u64;
+
+    let mut audio_bit_rate = 0;
+    let audio = if recipe.video.remove_audio || info.audio.is_empty() {
+        AudioPlan::None
+    } else {
+        // About a tenth of the budget, between 48 and 128 kb/s per stereo track.
+        let per_track = (total / 10).clamp(48_000, 128_000);
+        let tracks: Vec<AudioAction> = info
+            .audio
+            .iter()
+            .map(|t| {
+                let wanted = match t.channels {
+                    0..=2 => per_track,
+                    channels => per_track * u64::from(channels) / 2,
+                };
+                match t.bit_rate {
+                    Some(rate) if MP4_AUDIO.contains(&t.codec.as_str()) && rate <= wanted => {
+                        audio_bit_rate += rate;
+                        AudioAction::Copy
+                    }
+                    _ => {
+                        audio_bit_rate += wanted;
+                        AudioAction::Aac { bit_rate: wanted }
+                    }
+                }
+            })
+            .collect();
+        AudioPlan::Tracks { tracks }
+    };
+    let video_bit_rate = total.saturating_sub(audio_bit_rate);
+    if video_bit_rate < MIN_VIDEO_BIT_RATE {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let minimum_bytes =
+            ((MIN_VIDEO_BIT_RATE + audio_bit_rate) as f64 * duration / 8.0 / 0.97).ceil() as u64;
+        return Err(PlanError::TargetTooSmall {
+            target_bytes,
+            minimum_bytes,
+        });
+    }
+
+    let video = info
+        .video
+        .as_ref()
+        .ok_or(PlanError::NotVideo { kind: info.kind })?;
+    let user_box = recipe.video.max_width.is_some() || recipe.video.max_height.is_some();
+    let scale_to = if user_box {
+        fit_within(
+            video.display_size(),
+            recipe.video.max_width,
+            recipe.video.max_height,
+        )
+    } else {
+        let fps = video.frame_rate.map_or(30.0, Rational::as_f64);
+        resolution_for_bit_rate(video.display_size(), fps, video_bit_rate, encoder.codec())
+    };
+    Ok(Budget {
+        video_bit_rate,
+        audio_bit_rate,
+        audio,
+        scale_to,
     })
+}
+
+/// Picks the largest standard resolution (by the shorter side) whose bits per pixel stay above a
+/// watchable floor at `bit_rate`. Returns `None` when the source size already works.
+///
+/// Floors are starting points from common encoding guidance: about 0.04 bits per pixel per frame
+/// for H.264 and 0.03 for HEVC keep typical footage free of heavy blocking.
+pub fn resolution_for_bit_rate(
+    (width, height): (u32, u32),
+    fps: f64,
+    bit_rate: u64,
+    codec: VideoCodec,
+) -> Option<(u32, u32)> {
+    const RUNGS: [u32; 8] = [2160, 1440, 1080, 720, 540, 480, 360, 240];
+    let floor = match codec {
+        VideoCodec::H264 => 0.04,
+        VideoCodec::Hevc => 0.03,
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let bpp = |w: u32, h: u32| bit_rate as f64 / (f64::from(w) * f64::from(h) * fps.max(1.0));
+    if bpp(width, height) >= floor {
+        return None;
+    }
+    let short = width.min(height);
+    let mut chosen = None;
+    for rung in RUNGS.into_iter().filter(|r| *r < short) {
+        let factor = f64::from(rung) / f64::from(short);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let size = |v: u32| (((f64::from(v) * factor).round() as u32) & !1).max(2);
+        let (w, h) = (size(width), size(height));
+        chosen = Some((w, h));
+        if bpp(w, h) >= floor {
+            break;
+        }
+    }
+    chosen
 }
 
 /// How a still image is encoded.
@@ -835,6 +1085,153 @@ mod tests {
             Err(PlanError::NotAnimation {
                 kind: MediaKind::Video
             })
+        );
+    }
+
+    #[test]
+    fn size_target_splits_bits_and_keeps_small_audio() {
+        // 10 s, 25 MB: 19.4 Mb/s total after the 3% allowance.
+        let mut recipe = Recipe::default();
+        recipe.video.target_bytes = Some(25_000_000);
+        let plan = plan_video(
+            &video_info(1920, 1080, vec![aac(96_000)]),
+            &recipe,
+            everything,
+        )
+        .unwrap();
+        let target = plan.target.as_ref().unwrap();
+        assert_eq!(
+            target.audio_bit_rate, 96_000,
+            "small AAC is copied and counted"
+        );
+        assert_eq!(target.video_bit_rate, 19_400_000 - 96_000);
+        assert!(target.two_pass);
+        assert_eq!(plan.scale_to, None, "plenty of bits for 1080p");
+        assert!(
+            plan.args.join(" ").contains("-b:v 19304k"),
+            "{}",
+            plan.args.join(" ")
+        );
+    }
+
+    #[test]
+    fn tight_targets_scale_down_and_impossible_ones_explain() {
+        let mut recipe = Recipe::default();
+        recipe.video.target_bytes = Some(1_000_000); // 10 s in 1 MB: 776 kb/s in total, a tenth for audio
+        let plan = plan_video(
+            &video_info(1920, 1080, vec![aac(128_000)]),
+            &recipe,
+            everything,
+        )
+        .unwrap();
+        let (w, h) = plan.scale_to.unwrap();
+        assert!(
+            h < 1080 && w * 9 == h * 16,
+            "scaled down keeping 16:9, got {w}x{h}"
+        );
+        assert_eq!(
+            plan.audio,
+            AudioPlan::Tracks {
+                tracks: vec![AudioAction::Aac { bit_rate: 77_600 }]
+            }
+        );
+
+        recipe.video.max_width = Some(1920); // the user's box wins over automatic scaling
+        let plan = plan_video(&video_info(1920, 1080, vec![]), &recipe, everything).unwrap();
+        assert_eq!(plan.scale_to, None);
+
+        recipe.video.target_bytes = Some(40_000);
+        let err = plan_video(
+            &video_info(1920, 1080, vec![aac(128_000)]),
+            &recipe,
+            everything,
+        )
+        .unwrap_err();
+        let PlanError::TargetTooSmall { minimum_bytes, .. } = err else {
+            panic!("{err:?}")
+        };
+        assert!(minimum_bytes > 40_000);
+
+        let mut no_duration = video_info(1920, 1080, vec![]);
+        no_duration.duration_seconds = None;
+        recipe.video.target_bytes = Some(5_000_000);
+        assert_eq!(
+            plan_video(&no_duration, &recipe, everything),
+            Err(PlanError::UnknownDuration)
+        );
+    }
+
+    #[test]
+    fn two_pass_arguments() {
+        let mut recipe = Recipe::default();
+        recipe.video.target_bytes = Some(5_000_000);
+        let plan = plan_video(
+            &video_info(1280, 720, vec![aac(128_000)]),
+            &recipe,
+            everything,
+        )
+        .unwrap();
+        let first = plan
+            .ffmpeg_args(
+                RateControl::Bitrate(2_000_000),
+                &Pass::First { log: "p".into() },
+            )
+            .join(" ");
+        assert_eq!(
+            first,
+            "-map 0:v:0 -map_metadata 0 -c:v libx264 -b:v 2000k -pass 1 -passlogfile p -pix_fmt yuv420p -an -f null"
+        );
+        let second = plan
+            .ffmpeg_args(
+                RateControl::Bitrate(1_500_000),
+                &Pass::Second { log: "p".into() },
+            )
+            .join(" ");
+        assert!(
+            second.contains("-map 0:a:0")
+                && second.contains("-b:v 1500k -pass 2 -passlogfile p")
+                && second.ends_with("-f mp4")
+        );
+
+        recipe.video.codec = VideoCodec::Hevc;
+        let plan = plan_video(&video_info(1280, 720, vec![]), &recipe, everything).unwrap();
+        let first = plan
+            .ffmpeg_args(
+                RateControl::Bitrate(1_000_000),
+                &Pass::First { log: "p".into() },
+            )
+            .join(" ");
+        assert!(first.contains("-x265-params pass=1:stats=p"), "{first}");
+
+        recipe.video.encoder = EncoderPreference::Hardware;
+        let plan = plan_video(&video_info(1280, 720, vec![]), &recipe, everything).unwrap();
+        assert!(
+            !plan.target.unwrap().two_pass,
+            "hardware encoders run one pass"
+        );
+    }
+
+    #[test]
+    fn resolution_ladder() {
+        // Plenty of bits: keep the size.
+        assert_eq!(
+            resolution_for_bit_rate((1920, 1080), 30.0, 5_000_000, VideoCodec::H264),
+            None
+        );
+        // 1 Mb/s at 30 fps for H.264: 720p is under the floor, 540p fits.
+        assert_eq!(
+            resolution_for_bit_rate((1920, 1080), 30.0, 1_000_000, VideoCodec::H264),
+            Some((960, 540))
+        );
+        // Portrait keeps its orientation.
+        assert_eq!(
+            resolution_for_bit_rate((1080, 1920), 30.0, 1_000_000, VideoCodec::H264),
+            Some((540, 960))
+        );
+        // Nothing fits: the smallest rung.
+        assert_eq!(
+            resolution_for_bit_rate((1920, 1080), 30.0, 10_000, VideoCodec::H264),
+            Some((426, 240))
         );
     }
 

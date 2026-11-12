@@ -464,3 +464,63 @@ fn recompresses_a_gif_and_keeps_its_timing() {
         "still 3 s long, got {centiseconds} cs"
     );
 }
+
+#[test]
+fn fits_a_size_target_and_never_exceeds_it() {
+    let Some(env) = setup("target") else { return };
+    let output = env.out.join("fit.mp4");
+    let mut job = job(
+        env.fixtures.join("video-1080p-audio.mp4"),
+        output.clone(),
+        Quality::Balanced,
+    );
+    job.recipe.video.target_bytes = Some(2_000_000);
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &job,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    let Outcome::Compressed { output_bytes, .. } = report.outcome else {
+        panic!("unexpected outcome: {:?}", report.outcome)
+    };
+    assert!(
+        output_bytes <= 2_000_000,
+        "{output_bytes} bytes is over the target"
+    );
+    assert!(
+        output_bytes > 1_600_000,
+        "{output_bytes} bytes wastes too much of the budget"
+    );
+    let Some(peraz_core::Plan::Video(plan)) = &report.plan else {
+        panic!("no video plan")
+    };
+    let target = plan.target.as_ref().unwrap();
+    assert!(target.two_pass && target.attempts >= 1);
+    assert_eq!(
+        probe(&env.tools, &output).unwrap().audio.len(),
+        1,
+        "audio kept"
+    );
+    let leftovers = std::fs::read_dir(&env.out).unwrap().count();
+    assert_eq!(leftovers, 1, "no partial or pass-log files left behind");
+
+    // Already small enough: the original is kept.
+    let mut job = job.clone();
+    job.output = OutputTarget::File(env.out.join("keep.mp4"));
+    job.recipe.video.target_bytes = Some(50_000_000);
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &job,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert_eq!(
+        report.outcome,
+        Outcome::KeptOriginal(KeepReason::AlreadyWithinTarget {
+            target_bytes: 50_000_000
+        })
+    );
+}
