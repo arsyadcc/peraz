@@ -170,13 +170,18 @@ fn printed_json_matches_the_docs() {
         check(&docs, &show, "Recipe", &[]);
     }
 
-    let (doctor, code) = run(&["doctor", "--json"], &config);
+    // Without FFmpeg, doctor exits with code 3 and prints no JSON.
+    let has_ffmpeg = Command::new(env!("CARGO_BIN_EXE_peraz"))
+        .arg("doctor")
+        .output()
+        .is_ok_and(|o| o.status.success());
     let fixtures = root().join("fixtures");
-    if code != 0 || !fixtures.join("image-photo.jpg").is_file() {
+    if !has_ffmpeg || !fixtures.join("image-photo.jpg").is_file() {
         eprintln!("skipped: compress, probe, and doctor need FFmpeg and the fixtures");
         let _ = std::fs::remove_dir_all(&temp);
         return;
     }
+    let (doctor, _) = run(&["doctor", "--json"], &config);
     check(&docs, &doctor, "`peraz doctor --json`", &[]);
 
     let (probe, _) = run(
