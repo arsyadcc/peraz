@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use peraz_core::units::format_bytes;
 use peraz_core::{
     ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan, PlanError,
-    RateControl, Report, SizeTarget, VideoOutput, plan_gif, plan_image, plan_video,
+    RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_gif, plan_image, plan_video,
 };
 
 use crate::ffmpeg::{Capabilities, Toolchain, command};
@@ -73,13 +73,19 @@ fn run(
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
 
-    let wants_gif = info.kind == MediaKind::Animation
-        || (info.kind == MediaKind::Video && job.recipe.video.output == VideoOutput::Gif);
+    let output_kind = job.recipe.video.output;
+    let moving = matches!(info.kind, MediaKind::Video | MediaKind::Animation);
+    let wants_gif = (info.kind == MediaKind::Animation
+        && matches!(output_kind, VideoOutput::Keep | VideoOutput::Gif))
+        || (info.kind == MediaKind::Video && output_kind == VideoOutput::Gif);
     if wants_gif {
         return make_gif(tools, job, &info, progress, cancel, report);
     }
+    if moving && matches!(output_kind, VideoOutput::Webp | VideoOutput::Avif) {
+        return make_animated(tools, caps, job, &info, progress, cancel, report);
+    }
     match info.kind {
-        MediaKind::Video => {
+        MediaKind::Video | MediaKind::Animation => {
             let plan = match plan_video(&info, &job.recipe, |name| caps.has_encoder(name)) {
                 Ok(plan) => plan,
                 Err(e) => return failed(e.to_string()),
@@ -98,6 +104,7 @@ fn run(
             let partial = partial_path(&output);
             let duration = info.duration_seconds.unwrap_or(0.0);
             let sink = Sink {
+                before_input: &[],
                 file: Some(&partial),
                 workdir: None,
             };
@@ -110,7 +117,12 @@ fn run(
                     EncodeError::Failed(message) => failed(message),
                 };
             }
-            finish(&partial, &output, info.size_bytes, false)
+            finish(
+                &partial,
+                &output,
+                info.size_bytes,
+                info.kind == MediaKind::Animation,
+            )
         }
         MediaKind::Image => {
             let plan = match plan_image(&info, &job.recipe) {
@@ -198,6 +210,64 @@ fn make_gif(
     finish(&partial, &output, info.size_bytes, plan.converts_format)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn make_animated(
+    tools: &Toolchain,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let plan = match plan_animated(info, &job.recipe, |name| caps.has_encoder(name)) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return Outcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+    report.plan = Some(Plan::Animated(plan.clone()));
+    report.encoder = Some(format!("{} · {} fps", plan.encoder, plan.fps));
+    let output = job.output.resolve(&job.input, plan.extension);
+    if let Err(message) = check_output_path(job, &output) {
+        return Outcome::Failed { message };
+    }
+    // Seek before the input for speed; limit the length there too, so progress matches it.
+    let mut before_input = Vec::new();
+    if let Some(ms) = plan.start_ms {
+        before_input.extend(["-ss".to_owned(), format!("{}.{:03}", ms / 1000, ms % 1000)]);
+    }
+    if let Some(ms) = plan.duration_ms {
+        before_input.extend(["-t".to_owned(), format!("{}.{:03}", ms / 1000, ms % 1000)]);
+    }
+    let total = info.duration_seconds.unwrap_or(0.0);
+    #[allow(clippy::cast_precision_loss)]
+    let start = plan.start_ms.map_or(0.0, |ms| ms as f64 / 1000.0);
+    #[allow(clippy::cast_precision_loss)]
+    let expected = plan
+        .duration_ms
+        .map_or((total - start).max(0.0), |ms| ms as f64 / 1000.0);
+    let partial = partial_path(&output);
+    let sink = Sink {
+        before_input: &before_input,
+        file: Some(&partial),
+        workdir: None,
+    };
+    if let Err(error) = encode(
+        tools, &job.input, &sink, &plan.args, expected, progress, cancel,
+    ) {
+        let _ = std::fs::remove_file(&partial);
+        return match error {
+            EncodeError::Cancelled => Outcome::Cancelled,
+            EncodeError::Failed(message) => Outcome::Failed { message },
+        };
+    }
+    // A different format is the point of the conversion: keep it even when larger.
+    finish(&partial, &output, info.size_bytes, true)
+}
+
 /// Most encodes a size target may take: the first try plus corrections.
 const MAX_TARGET_ATTEMPTS: u32 = 4;
 
@@ -279,6 +349,7 @@ fn run_target_passes(
             &Pass::First { log: log.clone() },
         );
         let sink = Sink {
+            before_input: &[],
             file: None,
             workdir: Some(workdir),
         };
@@ -297,6 +368,7 @@ fn run_target_passes(
         };
         let args = plan.ffmpeg_args(RateControl::Bitrate(bit_rate), &pass);
         let sink = Sink {
+            before_input: &[],
             file: Some(&partial),
             workdir: Some(workdir),
         };
@@ -446,6 +518,8 @@ impl From<String> for EncodeError {
 
 /// Where an encode writes.
 struct Sink<'a> {
+    /// Arguments placed before `-i` (input seeking: `-ss`, `-t`).
+    before_input: &'a [String],
     /// The output file, or `None` for an analysis pass that writes nothing.
     file: Option<&'a Path>,
     /// FFmpeg's working directory (holds two-pass statistics), or `None` for the current one.
@@ -462,7 +536,9 @@ fn encode(
     cancel: &AtomicBool,
 ) -> Result<(), EncodeError> {
     let mut cmd = command(&tools.ffmpeg);
-    cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-y", "-i"])
+    cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-y"])
+        .args(sink.before_input)
+        .arg("-i")
         .arg(file_url(input)?)
         .args(plan_args)
         .args(["-progress", "pipe:1", "-nostats"]);

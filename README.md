@@ -18,6 +18,8 @@ peraz compress --format webp *.png *.jpg           # or --format avif (smallest,
 peraz compress IMG_0042.HEIC                       # → IMG_0042-peraz.jpg, upright, colors kept
 peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF (480 px, 12 fps)
 peraz compress -q small reaction.gif               # smaller GIF, same timing
+peraz compress --format webp clip.mp4              # animated WebP (or avif: smallest)
+peraz compress --format mp4 reaction.gif           # GIF → MP4, often 70-95% smaller
 peraz compress --json --out-dir out/ media/*     # machine-readable report
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
@@ -41,6 +43,10 @@ GIFs are encoded by Peraz itself: a palette per frame (imagequant) with ditherin
 pixels left transparent, frames cropped to what changed, and identical frames merged. Default
 GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `--max-width` and
 `--fps` override it.
+
+`--format webp` and `--format avif` turn videos and GIFs into animated WebP or AVIF (same
+`--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
+`--format mp4` turns a GIF into an H.264 video.
 
 Peraz needs `ffmpeg` and `ffprobe`. Until bundled builds exist, it uses `--ffmpeg <path>`,
 `PERAZ_FFMPEG`, or `ffmpeg` on `PATH`, in that order.

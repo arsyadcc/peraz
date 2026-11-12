@@ -40,19 +40,20 @@ pub struct Args {
     #[arg(long, value_name = "PIXELS")]
     max_height: Option<u32>,
 
-    /// Output format: keep, jpeg, png, webp, avif (images), or gif (videos and GIFs).
+    /// Output format: keep, jpeg, png, webp, avif, gif, mp4. For videos and GIFs, webp/avif make
+    /// animated images, gif makes a GIF, and mp4 turns a GIF into a video.
     #[arg(long, default_value = "keep", value_parser = parse_format)]
     format: OutputFormat,
 
-    /// GIF frame rate (default by quality level; never above the source).
+    /// Frame rate for GIF and animated WebP/AVIF (default by quality level; never above the source).
     #[arg(long, value_name = "FPS", value_parser = clap::value_parser!(u32).range(1..=50))]
     fps: Option<u32>,
 
-    /// Start the GIF this many seconds into the video (e.g. 12.5).
+    /// Start a GIF or animated WebP/AVIF this many seconds into the video (e.g. 12.5).
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
     start: Option<u64>,
 
-    /// Make the GIF at most this many seconds long.
+    /// Make a GIF or animated WebP/AVIF at most this many seconds long.
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
     duration: Option<u64>,
 
@@ -82,25 +83,39 @@ pub struct Args {
     json: bool,
 }
 
-/// `--format`: image formats, plus `gif` for videos and animations.
+/// `--format`: one flag for every kind of input.
+///
+/// | value  | still images        | videos                 | GIFs                   |
+/// |--------|---------------------|------------------------|------------------------|
+/// | keep   | same format         | MP4                    | GIF                    |
+/// | jpeg   | JPEG                | MP4                    | GIF                    |
+/// | png    | PNG                 | MP4                    | GIF                    |
+/// | webp   | WebP                | animated WebP          | animated WebP          |
+/// | avif   | AVIF                | animated AVIF          | animated AVIF          |
+/// | gif    | same format         | GIF                    | GIF                    |
+/// | mp4    | same format         | MP4                    | MP4                    |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputFormat {
-    Image(ImageFormat),
-    Gif,
+struct OutputFormat {
+    image: ImageFormat,
+    video: VideoOutput,
 }
 
 fn parse_format(s: &str) -> Result<OutputFormat, String> {
-    match s {
-        "gif" => Ok(OutputFormat::Gif),
-        other => other
-            .parse::<ImageFormat>()
-            .map(OutputFormat::Image)
-            .map_err(|_| {
-                format!(
-                    "unknown format `{other}`; expected one of: keep, jpeg, png, webp, avif, gif"
-                )
-            }),
-    }
+    let (image, video) = match s {
+        "keep" => (ImageFormat::Keep, VideoOutput::Keep),
+        "jpeg" | "jpg" => (ImageFormat::Jpeg, VideoOutput::Keep),
+        "png" => (ImageFormat::Png, VideoOutput::Keep),
+        "webp" => (ImageFormat::Webp, VideoOutput::Webp),
+        "avif" => (ImageFormat::Avif, VideoOutput::Avif),
+        "gif" => (ImageFormat::Keep, VideoOutput::Gif),
+        "mp4" => (ImageFormat::Keep, VideoOutput::Mp4),
+        other => {
+            return Err(format!(
+                "unknown format `{other}`; expected one of: keep, jpeg, png, webp, avif, gif, mp4"
+            ));
+        }
+    };
+    Ok(OutputFormat { image, video })
 }
 
 /// Parses an SI size (`25MB`, `8 MB`, `500kB`, `1.5GB`, `900000B`) into bytes.
@@ -265,11 +280,7 @@ fn recipe(args: &Args) -> Recipe {
             max_height: args.max_height,
             remove_audio: args.no_audio,
             target_bytes: args.target_size,
-            output: if args.format == OutputFormat::Gif {
-                VideoOutput::Gif
-            } else {
-                VideoOutput::Mp4
-            },
+            output: args.format.video,
         },
         gif: GifRecipe {
             fps: args.fps,
@@ -277,10 +288,7 @@ fn recipe(args: &Args) -> Recipe {
             duration_ms: args.duration,
         },
         image: ImageRecipe {
-            format: match args.format {
-                OutputFormat::Image(format) => format,
-                OutputFormat::Gif => ImageFormat::Keep,
-            },
+            format: args.format.image,
             max_width: args.max_width,
             max_height: args.max_height,
         },
@@ -416,12 +424,14 @@ mod tests {
 
     #[test]
     fn format_and_seconds_parsing() {
-        assert_eq!(parse_format("gif"), Ok(OutputFormat::Gif));
+        assert_eq!(parse_format("gif").unwrap().video, VideoOutput::Gif);
+        let webp = parse_format("webp").unwrap();
         assert_eq!(
-            parse_format("webp"),
-            Ok(OutputFormat::Image(ImageFormat::Webp))
+            (webp.image, webp.video),
+            (ImageFormat::Webp, VideoOutput::Webp)
         );
-        assert!(parse_format("mov").unwrap_err().contains("gif"));
+        assert_eq!(parse_format("mp4").unwrap().image, ImageFormat::Keep);
+        assert!(parse_format("mov").unwrap_err().contains("mp4"));
         assert_eq!(parse_seconds("12.5"), Ok(12_500));
         assert_eq!(parse_size("25MB"), Ok(25_000_000));
         assert_eq!(parse_size("8 mb"), Ok(8_000_000));

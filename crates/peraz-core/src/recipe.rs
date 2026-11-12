@@ -63,11 +63,17 @@ pub struct VideoRecipe {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoOutput {
-    /// A compressed MP4 video.
+    /// Videos become MP4, GIFs stay GIF.
     #[default]
+    Keep,
+    /// A compressed H.264/HEVC MP4 video (also from a GIF).
     Mp4,
     /// An animated GIF (silent, palette-based).
     Gif,
+    /// An animated WebP (silent; keeps transparency).
+    Webp,
+    /// An animated AVIF (silent; AV1, the smallest).
+    Avif,
 }
 
 /// Settings for animated GIF output (from a video or a GIF).
@@ -150,7 +156,7 @@ macro_rules! text_enum {
 text_enum!(Quality { Highest => "highest", High => "high", Balanced => "balanced", Small => "small", Smallest => "smallest" });
 text_enum!(VideoCodec { H264 => "h264", Hevc => "hevc" });
 text_enum!(EncoderPreference { Auto => "auto", Software => "software", Hardware => "hardware" });
-text_enum!(VideoOutput { Mp4 => "mp4", Gif => "gif" });
+text_enum!(VideoOutput { Keep => "keep", Mp4 => "mp4", Gif => "gif", Webp => "webp", Avif => "avif" });
 text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif" });
 
 /// A string that is not one of an enum's accepted spellings.

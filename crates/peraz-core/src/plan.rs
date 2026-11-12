@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::media::Alpha;
 use crate::media::{AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
-use crate::recipe::{EncoderPreference, ImageFormat, Quality, Recipe, VideoCodec};
+use crate::recipe::{EncoderPreference, ImageFormat, Quality, Recipe, VideoCodec, VideoOutput};
 
 /// A video encoder Peraz knows how to drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -129,6 +129,11 @@ pub enum PlanError {
         target_bytes: u64,
         minimum_bytes: u64,
     },
+    /// The FFmpeg build has no encoder for this animated format.
+    NoAnimationEncoder {
+        format: VideoOutput,
+        tried: Vec<&'static str>,
+    },
     /// The file cannot become an animated GIF.
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
@@ -157,6 +162,11 @@ impl std::fmt::Display for PlanError {
                 crate::units::format_bytes(*target_bytes),
                 crate::units::format_bytes(*minimum_bytes)
             ),
+            Self::NoAnimationEncoder { format, tried } => write!(
+                f,
+                "no encoder for animated {format} in this FFmpeg (needs one of: {}); run `peraz doctor`",
+                tried.join(", ")
+            ),
             Self::NotAnimation { kind } => {
                 write!(f, "cannot make a GIF from this file (detected: {kind:?})")
             }
@@ -180,9 +190,13 @@ pub fn plan_video(
     recipe: &Recipe,
     has_encoder: impl Fn(&str) -> bool,
 ) -> Result<VideoPlan, PlanError> {
-    let (Some(video), MediaKind::Video) = (&info.video, info.kind) else {
+    let gif_to_mp4 = info.kind == MediaKind::Animation && recipe.video.output == VideoOutput::Mp4;
+    let (Some(video), MediaKind::Video | MediaKind::Animation) = (&info.video, info.kind) else {
         return Err(PlanError::NotVideo { kind: info.kind });
     };
+    if info.kind == MediaKind::Animation && !gif_to_mp4 {
+        return Err(PlanError::NotVideo { kind: info.kind });
+    }
     let candidates = VideoEncoder::candidates(recipe.video.codec, recipe.video.encoder);
     let encoder = candidates
         .iter()
@@ -200,7 +214,8 @@ pub fn plan_video(
                 video.display_size(),
                 recipe.video.max_width,
                 recipe.video.max_height,
-            );
+            )
+            .or_else(|| even_size(video.display_size()));
             let audio = if recipe.video.remove_audio || info.audio.is_empty() {
                 AudioPlan::None
             } else {
@@ -648,9 +663,9 @@ pub struct GifPlan {
 
 /// Plans an animated GIF from a video (when the recipe asks for GIF) or from a GIF.
 pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError> {
-    let wants_gif = info.kind == MediaKind::Animation
-        || (info.kind == MediaKind::Video
-            && recipe.video.output == crate::recipe::VideoOutput::Gif);
+    let wants_gif = (info.kind == MediaKind::Animation
+        && matches!(recipe.video.output, VideoOutput::Keep | VideoOutput::Gif))
+        || (info.kind == MediaKind::Video && recipe.video.output == VideoOutput::Gif);
     let (Some(picture), true) = (&info.video, wants_gif) else {
         return Err(PlanError::NotAnimation { kind: info.kind });
     };
@@ -697,6 +712,217 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
         duration_ms: recipe.gif.duration_ms,
         converts_format: info.kind != MediaKind::Animation,
     })
+}
+
+/// An animated WebP or AVIF made by FFmpeg from a video or a GIF.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnimatedPlan {
+    /// `webp` or `avif`.
+    pub format: VideoOutput,
+    /// FFmpeg encoder name.
+    pub encoder: &'static str,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub start_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    /// Transparent areas are placed on white because the output format here has no alpha.
+    pub flatten_alpha: bool,
+    pub extension: &'static str,
+    /// FFmpeg arguments between the input and the output.
+    pub args: Vec<String>,
+}
+
+/// Plans an animated WebP or AVIF from a video or a GIF.
+///
+/// `has_encoder` reports whether the FFmpeg build contains an encoder (by FFmpeg name).
+pub fn plan_animated(
+    info: &MediaInfo,
+    recipe: &Recipe,
+    has_encoder: impl Fn(&str) -> bool,
+) -> Result<AnimatedPlan, PlanError> {
+    let format = recipe.video.output;
+    let (
+        Some(picture),
+        MediaKind::Video | MediaKind::Animation,
+        VideoOutput::Webp | VideoOutput::Avif,
+    ) = (&info.video, info.kind, format)
+    else {
+        return Err(PlanError::NotAnimation { kind: info.kind });
+    };
+    let level = recipe.quality as usize;
+    let (widths, rates) = if format == VideoOutput::Webp {
+        ([1080, 960, 720, 640, 480], [30, 24, 20, 15, 12])
+    } else {
+        ([1280, 1080, 960, 720, 540], [30, 30, 24, 20, 15])
+    };
+    let max_width = recipe
+        .video
+        .max_width
+        .or(if recipe.video.max_height.is_none() {
+            Some(widths[level])
+        } else {
+            None
+        });
+    let (width, height) = fit_within(picture.display_size(), max_width, recipe.video.max_height)
+        .or_else(|| even_size(picture.display_size()))
+        .unwrap_or_else(|| picture.display_size());
+    let source_fps = picture
+        .frame_rate
+        .map_or(f64::from(u32::MAX), Rational::as_f64);
+    let wanted = recipe.gif.fps.unwrap_or(rates[level]).clamp(1, 60);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped to 1..=60
+    let fps = if f64::from(wanted) > source_fps {
+        source_fps.round().clamp(1.0, 60.0) as u32
+    } else {
+        wanted
+    };
+
+    // GIFs may be transparent. WebP keeps it; AVIF output here does not, so it gets a white matte.
+    let maybe_alpha = info.kind == MediaKind::Animation || picture.alpha != Alpha::Absent;
+    let flatten_alpha = format == VideoOutput::Avif && maybe_alpha;
+    let scale = format!("fps={fps},scale={width}:{height}:flags=lanczos");
+    let frames = AnimationFrames {
+        scale,
+        width,
+        height,
+        fps,
+        level,
+        maybe_alpha,
+        flatten_alpha,
+    };
+    let (encoder, extension, args) = if format == VideoOutput::Webp {
+        animated_webp_args(&frames, &has_encoder)?
+    } else {
+        animated_avif_args(&frames, &has_encoder)?
+    };
+    Ok(AnimatedPlan {
+        format,
+        encoder,
+        fps,
+        width,
+        height,
+        start_ms: recipe.gif.start_ms,
+        duration_ms: recipe.gif.duration_ms,
+        flatten_alpha,
+        extension,
+        args,
+    })
+}
+
+/// What the animated encoders need to know about the frames.
+struct AnimationFrames {
+    scale: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    level: usize,
+    maybe_alpha: bool,
+    flatten_alpha: bool,
+}
+
+type EncoderArgs = (&'static str, &'static str, Vec<String>);
+
+fn animated_webp_args(
+    frames: &AnimationFrames,
+    has_encoder: &impl Fn(&str) -> bool,
+) -> Result<EncoderArgs, PlanError> {
+    let encoder = "libwebp_anim";
+    if !has_encoder(encoder) {
+        return Err(PlanError::NoAnimationEncoder {
+            format: VideoOutput::Webp,
+            tried: vec![encoder],
+        });
+    }
+    let pix = if frames.maybe_alpha {
+        "yuva420p"
+    } else {
+        "yuv420p"
+    };
+    let mut args: Vec<String> = vec![
+        "-map".into(),
+        "0:v:0".into(),
+        "-vf".into(),
+        format!("{},format={pix}", frames.scale),
+    ];
+    args.extend(["-c:v".into(), encoder.into()]);
+    // libwebp quality: the same scale as still WebP images.
+    args.extend([
+        "-quality".into(),
+        [90, 84, 76, 68, 58][frames.level].to_string(),
+    ]);
+    args.extend([
+        "-compression_level".into(),
+        "5".into(),
+        "-loop".into(),
+        "0".into(),
+    ]);
+    args.extend(["-an".into(), "-f".into(), "webp".into()]);
+    Ok((encoder, "webp", args))
+}
+
+fn animated_avif_args(
+    frames: &AnimationFrames,
+    has_encoder: &impl Fn(&str) -> bool,
+) -> Result<EncoderArgs, PlanError> {
+    let tried = vec!["libsvtav1", "libaom-av1"];
+    let encoder = tried
+        .iter()
+        .copied()
+        .find(|e| has_encoder(e))
+        .ok_or_else(|| PlanError::NoAnimationEncoder {
+            format: VideoOutput::Avif,
+            tried: tried.clone(),
+        })?;
+    let AnimationFrames {
+        scale,
+        width,
+        height,
+        fps,
+        level,
+        ..
+    } = frames;
+    let mut args: Vec<String> = if frames.flatten_alpha {
+        vec![
+            "-filter_complex".into(),
+            format!(
+                "[0:v:0]{scale},format=rgba[v];color=c=white:s={width}x{height}:r={fps}[bg];\
+                 [bg][v]overlay=shortest=1,format=yuv420p[out]"
+            ),
+            "-map".into(),
+            "[out]".into(),
+        ]
+    } else {
+        vec![
+            "-map".into(),
+            "0:v:0".into(),
+            "-vf".into(),
+            format!("{scale},format=yuv420p"),
+        ]
+    };
+    args.extend(["-c:v".into(), encoder.into()]);
+    // AV1 CRF 0–63; around 30 suits the web. SVT-AV1 preset 8 and libaom cpu-used 6 are quick.
+    args.extend(["-crf".into(), [24, 28, 32, 36, 42][*level].to_string()]);
+    if encoder == "libsvtav1" {
+        args.extend(["-preset".into(), "8".into()]);
+    } else {
+        args.extend([
+            "-cpu-used".into(),
+            "6".into(),
+            "-row-mt".into(),
+            "1".into(),
+            "-b:v".into(),
+            "0".into(),
+        ]);
+    }
+    args.extend(["-an".into(), "-f".into(), "avif".into()]);
+    Ok((encoder, "avif", args))
+}
+
+/// Rounds odd dimensions down to even ones (4:2:0 video needs even sizes); `None` when already even.
+fn even_size((width, height): (u32, u32)) -> Option<(u32, u32)> {
+    let even = ((width & !1).max(2), (height & !1).max(2));
+    (even != (width, height)).then_some(even)
 }
 
 /// Scales `(width, height)` down to fit the bounding box, keeping the aspect ratio and even
@@ -1062,7 +1288,7 @@ mod tests {
     #[test]
     fn video_to_gif_uses_level_defaults_and_never_upscales() {
         let mut recipe = Recipe::default();
-        recipe.video.output = crate::recipe::VideoOutput::Gif;
+        recipe.video.output = VideoOutput::Gif;
         let plan = plan_gif(&video_info(1920, 1080, vec![]), &recipe).unwrap();
         assert_eq!((plan.width, plan.height, plan.fps), (480, 270, 12));
         assert!(plan.converts_format);
@@ -1233,6 +1459,55 @@ mod tests {
             resolution_for_bit_rate((1920, 1080), 30.0, 10_000, VideoCodec::H264),
             Some((426, 240))
         );
+    }
+
+    #[test]
+    fn animated_webp_and_avif() {
+        let mut recipe = Recipe::default();
+        recipe.video.output = VideoOutput::Webp;
+        let webp = plan_animated(&video_info(1920, 1080, vec![]), &recipe, everything).unwrap();
+        assert_eq!(
+            (webp.width, webp.height, webp.fps, webp.extension),
+            (720, 404, 20, "webp")
+        );
+        assert!(
+            webp.args
+                .join(" ")
+                .contains("-c:v libwebp_anim -quality 76")
+        );
+
+        let mut gif = video_info(301, 201, vec![]);
+        gif.kind = MediaKind::Animation;
+        recipe.video.output = VideoOutput::Avif;
+        let avif = plan_animated(&gif, &recipe, |n| n == "libaom-av1").unwrap();
+        assert_eq!(
+            (avif.width, avif.height),
+            (300, 200),
+            "even sizes for 4:2:0"
+        );
+        assert!(avif.flatten_alpha);
+        assert!(avif.args.join(" ").contains("overlay=shortest=1"));
+        assert!(avif.args.contains(&"libaom-av1".to_owned()));
+
+        let err = plan_animated(&gif, &recipe, |_| false).unwrap_err();
+        assert!(err.to_string().contains("libsvtav1, libaom-av1"));
+        recipe.video.output = VideoOutput::Gif;
+        assert!(plan_animated(&gif, &recipe, everything).is_err());
+    }
+
+    #[test]
+    fn gif_to_mp4_is_planned_as_video_with_even_size() {
+        let mut gif = video_info(301, 201, vec![]);
+        gif.kind = MediaKind::Animation;
+        let mut recipe = Recipe::default();
+        assert!(
+            plan_video(&gif, &recipe, everything).is_err(),
+            "GIFs stay GIF unless asked"
+        );
+        recipe.video.output = VideoOutput::Mp4;
+        let plan = plan_video(&gif, &recipe, everything).unwrap();
+        assert_eq!(plan.scale_to, Some((300, 200)));
+        assert_eq!(plan.audio, AudioPlan::None);
     }
 
     #[test]

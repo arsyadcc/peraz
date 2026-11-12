@@ -524,3 +524,69 @@ fn fits_a_size_target_and_never_exceeds_it() {
         })
     );
 }
+
+#[test]
+fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
+    let Some(env) = setup("animated") else { return };
+    for (format, encoders, magic) in [
+        (VideoOutput::Webp, &["libwebp_anim"][..], &b"WEBP"[..]),
+        (
+            VideoOutput::Avif,
+            &["libsvtav1", "libaom-av1"][..],
+            &b"ftypavis"[..],
+        ),
+    ] {
+        if !encoders.iter().any(|e| env.caps.has_encoder(e)) {
+            eprintln!("skipped {format}: this FFmpeg has none of {encoders:?}");
+            continue;
+        }
+        let output = env.out.join(format!("clip.{format}"));
+        let mut job = job(
+            env.fixtures.join("video-720p-noaudio.mp4"),
+            output.clone(),
+            Quality::Small,
+        );
+        job.recipe.video.output = format;
+        job.recipe.gif.duration_ms = Some(2_000);
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{format}: {:?}",
+            report.outcome
+        );
+        let bytes = std::fs::read(&output).unwrap();
+        assert!(
+            bytes.windows(magic.len()).take(32).any(|w| w == magic),
+            "{format} signature"
+        );
+    }
+
+    let output = env.out.join("anim.mp4");
+    let mut job = job(
+        env.fixtures.join("animation.gif"),
+        output.clone(),
+        Quality::Balanced,
+    );
+    job.recipe.video.output = VideoOutput::Mp4;
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &job,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    let info = probe(&env.tools, &output).unwrap();
+    assert_eq!(info.kind, MediaKind::Video);
+    assert_eq!(info.video.unwrap().codec, "h264");
+}

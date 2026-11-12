@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::media::MediaKind;
-use crate::plan::{GifPlan, ImagePlan, VideoPlan};
+use crate::plan::{AnimatedPlan, GifPlan, ImagePlan, VideoPlan};
 use crate::recipe::Recipe;
 
 /// Where the result of a job goes.
@@ -80,6 +80,7 @@ pub enum Plan {
     Video(VideoPlan),
     Image(ImagePlan),
     Gif(GifPlan),
+    Animated(AnimatedPlan),
 }
 
 /// What happened to one input.
