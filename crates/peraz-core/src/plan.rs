@@ -393,8 +393,10 @@ fn size_budget(
     encoder: VideoEncoder,
     target_bytes: u64,
 ) -> Result<Budget, PlanError> {
-    let duration = info
-        .duration_seconds
+    // A clip only needs its own length in the budget.
+    let duration = recipe
+        .clip
+        .seconds(info.duration_seconds)
         .filter(|d| *d > 0.0)
         .ok_or(PlanError::UnknownDuration)?;
     // Keep 3% for the container (MP4 index, headers) and encoder rate-control variance.
@@ -711,8 +713,8 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
         max_quality,
         dithering_percent: [100, 100, 90, 80, 70][level],
         change_threshold: [1, 2, 3, 5, 8][level],
-        start_ms: recipe.gif.start_ms,
-        duration_ms: recipe.gif.duration_ms,
+        start_ms: recipe.clip.start_ms,
+        duration_ms: recipe.clip.duration_ms,
         converts_format: info.kind != MediaKind::Animation,
     })
 }
@@ -805,8 +807,8 @@ pub fn plan_animated(
         fps,
         width,
         height,
-        start_ms: recipe.gif.start_ms,
-        duration_ms: recipe.gif.duration_ms,
+        start_ms: recipe.clip.start_ms,
+        duration_ms: recipe.clip.duration_ms,
         flatten_alpha,
         extension,
         args,
@@ -1006,6 +1008,147 @@ pub fn plan_document(info: &MediaInfo, recipe: &Recipe) -> Result<DocumentPlan, 
             Some(2000),
             Some(1600),
         ][level]),
+    })
+}
+
+/// How a trim is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimMethod {
+    /// The streams are copied: instant and lossless.
+    StreamCopy,
+    /// The clip is re-encoded, because the start is not on a keyframe.
+    Reencode,
+}
+
+/// Cutting a clip out of a video without compressing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrimPlan {
+    pub method: TrimMethod,
+    /// Where the clip starts, after snapping to a keyframe when asked.
+    pub start_ms: u64,
+    /// Where to seek for a stream copy: just after the keyframe, so rounding to milliseconds can
+    /// never land on the keyframe before it.
+    #[serde(skip)]
+    pub seek_ms: u64,
+    pub duration_ms: Option<u64>,
+    /// Why the clip is re-encoded, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// File extension of the output (the input's container when copying, `mp4` otherwise).
+    pub extension: String,
+    /// FFmpeg arguments for a stream copy.
+    pub args: Vec<String>,
+    /// The encode, when the clip is re-encoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoPlan>,
+}
+
+/// A start within this distance of a keyframe counts as on it (about one frame at 25 fps).
+const KEYFRAME_TOLERANCE_MS: u64 = 40;
+
+/// Containers a stream copy can write, by input extension, with their FFmpeg muxer.
+const COPY_CONTAINERS: &[(&str, &str)] = &[
+    ("mp4", "mp4"),
+    ("m4v", "mp4"),
+    ("mov", "mov"),
+    ("mkv", "matroska"),
+    ("webm", "webm"),
+];
+
+/// Plans a trim. `keyframes_ms` are the video keyframe times at or before the start (any order);
+/// `extension` is the input file's extension.
+pub fn plan_trim(
+    info: &MediaInfo,
+    recipe: &Recipe,
+    keyframes_ms: &[u64],
+    extension: &str,
+    has_encoder: impl Fn(&str) -> bool,
+) -> Result<TrimPlan, PlanError> {
+    if info.kind != MediaKind::Video {
+        return Err(PlanError::NotVideo { kind: info.kind });
+    }
+    let wanted = recipe.clip.start_ms.unwrap_or(0);
+    let duration_ms = recipe.clip.duration_ms;
+    let previous = keyframes_ms
+        .iter()
+        .copied()
+        .filter(|k| *k <= wanted + KEYFRAME_TOLERANCE_MS)
+        .max();
+    let on_keyframe =
+        wanted == 0 || previous.is_some_and(|k| k.abs_diff(wanted) <= KEYFRAME_TOLERANCE_MS);
+    let muxer = COPY_CONTAINERS
+        .iter()
+        .find(|(ext, _)| ext.eq_ignore_ascii_case(extension))
+        .map(|(_, muxer)| *muxer);
+
+    let copy_from = match (muxer, on_keyframe, recipe.video.snap_to_keyframe, previous) {
+        (Some(_), true, _, _) => Some(if wanted == 0 {
+            0
+        } else {
+            previous.unwrap_or(wanted)
+        }),
+        (Some(_), false, true, Some(keyframe)) => Some(keyframe),
+        _ => None,
+    };
+    if let (Some(start_ms), Some(muxer)) = (copy_from, muxer) {
+        // Snapping moves the start back; keep the requested end so nothing asked for is lost.
+        let duration_ms = duration_ms.map(|d| d + wanted.saturating_sub(start_ms));
+        let mut args: Vec<String> = [
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-map_metadata",
+            "0",
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if matches!(muxer, "mp4" | "mov") {
+            args.extend(["-movflags".to_owned(), "+faststart".to_owned()]);
+        }
+        args.extend(["-f".to_owned(), muxer.to_owned()]);
+        return Ok(TrimPlan {
+            method: TrimMethod::StreamCopy,
+            start_ms,
+            seek_ms: if start_ms == 0 { 0 } else { start_ms + 1 },
+            duration_ms,
+            reason: None,
+            extension: extension.to_ascii_lowercase(),
+            args,
+            video: None,
+        });
+    }
+
+    let seconds = |ms: u64| format!("{}.{:03} s", ms / 1000, ms % 1000);
+    let reason = match (muxer, previous) {
+        (None, _) => format!(
+            "streams in a .{extension} file cannot be copied into a clip; re-encoded to MP4"
+        ),
+        (Some(_), Some(keyframe)) => format!(
+            "the start ({}) is not on a keyframe; the one before it is at {} (use --snap-to-keyframe to copy from there)",
+            seconds(wanted),
+            seconds(keyframe)
+        ),
+        (Some(_), None) => format!("no keyframe at or before the start ({})", seconds(wanted)),
+    };
+    let mut encode = recipe.clone();
+    encode.video.output = VideoOutput::Mp4;
+    let video = plan_video(info, &encode, has_encoder)?;
+    Ok(TrimPlan {
+        method: TrimMethod::Reencode,
+        start_ms: wanted,
+        seek_ms: wanted,
+        duration_ms,
+        reason: Some(reason),
+        extension: "mp4".to_owned(),
+        args: Vec::new(),
+        video: Some(video),
     })
 }
 
@@ -1623,6 +1766,73 @@ mod tests {
             Some(1200)
         );
         assert!(plan_document(&video_info(1, 1, vec![]), &recipe).is_err());
+    }
+
+    #[test]
+    fn trims_copy_on_keyframes_and_explain_re_encodes() {
+        let info = video_info(1920, 1080, vec![aac(128_000)]);
+        let keyframes = [0, 2_000, 4_000, 6_000];
+        let mut recipe = Recipe::default();
+        recipe.video.trim_only = true;
+        recipe.clip = crate::recipe::Clip {
+            start_ms: Some(4_010),
+            duration_ms: Some(3_000),
+        };
+        let copy = plan_trim(&info, &recipe, &keyframes, "MOV", everything).unwrap();
+        assert_eq!(
+            (copy.method, copy.start_ms, copy.extension.as_str()),
+            (TrimMethod::StreamCopy, 4_000, "mov")
+        );
+        assert!(
+            copy.args.join(" ").contains("-c copy")
+                && copy.args.ends_with(&["-f".into(), "mov".into()])
+        );
+
+        recipe.clip.start_ms = Some(5_000);
+        let encode = plan_trim(&info, &recipe, &keyframes, "mp4", everything).unwrap();
+        assert_eq!(encode.method, TrimMethod::Reencode);
+        assert!(
+            encode.reason.as_deref().unwrap().contains("4.000 s"),
+            "{:?}",
+            encode.reason
+        );
+        assert!(encode.video.is_some());
+
+        recipe.video.snap_to_keyframe = true;
+        let snapped = plan_trim(&info, &recipe, &keyframes, "mp4", everything).unwrap();
+        assert_eq!(
+            (snapped.method, snapped.start_ms, snapped.seek_ms),
+            (TrimMethod::StreamCopy, 4_000, 4_001)
+        );
+        assert_eq!(
+            snapped.duration_ms,
+            Some(4_000),
+            "the requested end (8 s) is kept"
+        );
+
+        let avi = plan_trim(&info, &recipe, &keyframes, "avi", everything).unwrap();
+        assert_eq!(
+            (avi.method, avi.extension.as_str()),
+            (TrimMethod::Reencode, "mp4")
+        );
+    }
+
+    #[test]
+    fn size_targets_use_the_clip_length() {
+        let mut recipe = Recipe::default();
+        recipe.video.target_bytes = Some(5_000_000);
+        let whole = plan_video(&video_info(1920, 1080, vec![]), &recipe, everything).unwrap();
+        recipe.clip = crate::recipe::Clip {
+            start_ms: Some(5_000),
+            duration_ms: Some(2_500),
+        };
+        let clip = plan_video(&video_info(1920, 1080, vec![]), &recipe, everything).unwrap();
+        let rate = |p: &VideoPlan| p.target.as_ref().unwrap().video_bit_rate;
+        assert_eq!(
+            rate(&clip),
+            rate(&whole) * 4,
+            "a quarter of the length gets four times the bit rate"
+        );
     }
 
     #[test]

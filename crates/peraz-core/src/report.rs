@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::media::MediaKind;
-use crate::plan::{AnimatedPlan, DocumentPlan, GifPlan, ImagePlan, VideoPlan};
+use crate::plan::{AnimatedPlan, DocumentPlan, GifPlan, ImagePlan, TrimPlan, VideoPlan};
 use crate::recipe::Recipe;
 
 /// Where the result of a job goes.
@@ -94,6 +94,7 @@ pub enum Plan {
     Gif(GifPlan),
     Animated(AnimatedPlan),
     Document(DocumentPlan),
+    Trim(TrimPlan),
 }
 
 /// What happened to the pictures inside a PDF or EPUB.

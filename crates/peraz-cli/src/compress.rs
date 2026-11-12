@@ -9,7 +9,7 @@ use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
     EncoderPreference, ExistingOutput, Job, KeepReason, Outcome, OutputTarget, Plan, Quality,
-    Recipe, Report, VideoCodec, VideoPlan,
+    Recipe, Report, TrimPlan, VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::BuildInfo;
@@ -54,13 +54,23 @@ pub struct SettingsArgs {
     #[arg(long, value_name = "FPS", value_parser = clap::value_parser!(u32).range(1..=50))]
     pub fps: Option<u32>,
 
-    /// Start a GIF or animated WebP/AVIF this many seconds into the video (e.g. 12.5).
-    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+    /// Start this far into a video: seconds (12.5) or [h:]m:ss (0:12, 1:02:03).
+    #[arg(long, value_name = "TIME", value_parser = parse_seconds)]
     pub start: Option<u64>,
 
-    /// Make a GIF or animated WebP/AVIF at most this many seconds long.
-    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+    /// Use at most this much of a video: seconds or [h:]m:ss.
+    #[arg(long, value_name = "TIME", value_parser = parse_seconds)]
     pub duration: Option<u64>,
+
+    /// Only cut the clip (--start/--duration), without compressing: the streams are copied when
+    /// the start is on a keyframe (instant, lossless); otherwise the clip is re-encoded.
+    #[arg(long)]
+    pub trim_only: bool,
+
+    /// With --trim-only, move the start back to the previous keyframe so the clip can always be
+    /// copied without re-encoding.
+    #[arg(long, requires = "trim_only")]
+    pub snap_to_keyframe: bool,
 
     /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
     /// Replaces --quality for videos; the result is verified and never larger than the target.
@@ -116,10 +126,22 @@ fn parse_size(s: &str) -> Result<String, String> {
 }
 
 /// Parses seconds (`12`, `12.5`) into milliseconds.
+/// Parses `12`, `12.5`, `0:12`, `1:02:03.5` into milliseconds.
 fn parse_seconds(s: &str) -> Result<u64, String> {
-    let seconds: f64 = s
-        .parse()
-        .map_err(|_| format!("`{s}` is not a number of seconds"))?;
+    let bad = || format!("`{s}` is not a time like 12.5, 0:12, or 1:02:03");
+    let parts: Vec<&str> = s.trim().split(':').collect();
+    if parts.len() > 3 {
+        return Err(bad());
+    }
+    let mut seconds = 0.0;
+    for (i, part) in parts.iter().enumerate() {
+        let value: f64 = part.parse().map_err(|_| bad())?;
+        let last = i == parts.len() - 1;
+        if i > 0 && (value >= 60.0 || (!last && value.fract() != 0.0)) {
+            return Err(bad());
+        }
+        seconds = seconds * 60.0 + value;
+    }
     if !seconds.is_finite() || seconds < 0.0 {
         return Err(format!("`{s}` must be zero or more seconds"));
     }
@@ -279,9 +301,11 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         }
         None => (flags, None),
     };
-    let recipe = merged
+    let mut recipe = merged
         .to_recipe(args.start, args.duration)
         .map_err(|e| e.to_string())?;
+    recipe.video.trim_only = args.trim_only;
+    recipe.video.snap_to_keyframe = args.snap_to_keyframe;
     Ok((recipe, name))
 }
 
@@ -438,6 +462,13 @@ pub(crate) fn print_human(report: &Report) {
                 percent_saved(before, *output_bytes),
                 report.elapsed_seconds
             );
+            if let Some(Plan::Trim(TrimPlan {
+                reason: Some(reason),
+                ..
+            })) = &report.plan
+            {
+                println!("  note: {reason}");
+            }
         }
         Outcome::KeptOriginal(KeepReason::NotSmaller { compressed_bytes }) => {
             println!("{input}");
@@ -491,6 +522,10 @@ mod tests {
         assert_eq!(parse_size("25MB").as_deref(), Ok("25MB"));
         assert!(parse_size("25MiB").unwrap_err().contains("SI"));
         assert_eq!(parse_seconds("12.5"), Ok(12_500));
+        assert_eq!(parse_seconds("0:12"), Ok(12_000));
+        assert_eq!(parse_seconds("1:02:03.5"), Ok(3_723_500));
+        assert!(parse_seconds("1:75").is_err());
+        assert!(parse_seconds("1:2:3:4").is_err());
         assert_eq!(parse_seconds("0"), Ok(0));
         assert!(parse_seconds("-1").is_err());
         assert!(parse_seconds("soon").is_err());

@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::recipe::{
-    EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
+    Clip, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
     VideoOutput, VideoRecipe,
 };
 use crate::units::parse_size;
@@ -217,14 +217,16 @@ impl Settings {
                 remove_audio: self.no_audio.unwrap_or(false),
                 output: format.video,
                 target_bytes,
+                trim_only: false,
+                snap_to_keyframe: false,
             },
             image: ImageRecipe {
                 format: format.image,
                 max_width: self.max_width,
                 max_height: self.max_height,
             },
-            gif: GifRecipe {
-                fps: self.fps,
+            gif: GifRecipe { fps: self.fps },
+            clip: Clip {
                 start_ms,
                 duration_ms,
             },

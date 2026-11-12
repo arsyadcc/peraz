@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    ExistingOutput, ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan,
-    PlanError, RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_document,
-    plan_gif, plan_image, plan_video,
+    Clip, ExistingOutput, ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan,
+    PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput, plan_animated,
+    plan_document, plan_gif, plan_image, plan_trim, plan_video,
 };
 
 use crate::batch::{Batch, Lane};
@@ -116,6 +116,9 @@ fn run(
         return make_animated(batch, tools, caps, job, &info, progress, cancel, report);
     }
     match info.kind {
+        MediaKind::Video if job.recipe.video.trim_only => {
+            make_trim(batch, tools, caps, job, &info, progress, cancel, report)
+        }
         MediaKind::Video | MediaKind::Animation => {
             let plan = match plan_video(&info, &job.recipe, |name| caps.has_encoder(name)) {
                 Ok(plan) => plan,
@@ -133,9 +136,14 @@ fn run(
                 );
             }
             let partial = partial_path(&output);
-            let duration = info.duration_seconds.unwrap_or(0.0);
+            let duration = job
+                .recipe
+                .clip
+                .seconds(info.duration_seconds)
+                .unwrap_or(0.0);
+            let seek = clip_args(job.recipe.clip);
             let sink = Sink {
-                before_input: &[],
+                before_input: &seek,
                 file: Some(&partial),
                 workdir: None,
             };
@@ -342,13 +350,10 @@ fn make_animated(
         return outcome;
     }
     // Seek before the input for speed; limit the length there too, so progress matches it.
-    let mut before_input = Vec::new();
-    if let Some(ms) = plan.start_ms {
-        before_input.extend(["-ss".to_owned(), format!("{}.{:03}", ms / 1000, ms % 1000)]);
-    }
-    if let Some(ms) = plan.duration_ms {
-        before_input.extend(["-t".to_owned(), format!("{}.{:03}", ms / 1000, ms % 1000)]);
-    }
+    let before_input = clip_args(Clip {
+        start_ms: plan.start_ms,
+        duration_ms: plan.duration_ms,
+    });
     let total = info.duration_seconds.unwrap_or(0.0);
     #[allow(clippy::cast_precision_loss)]
     let start = plan.start_ms.map_or(0.0, |ms| ms as f64 / 1000.0);
@@ -373,6 +378,131 @@ fn make_animated(
     }
     // A different format is the point of the conversion: keep it even when larger.
     finish(&partial, &output, info.size_bytes, true)
+}
+
+/// `-ss`/`-t` input options for a clip, placed before `-i` so FFmpeg seeks quickly.
+fn clip_args(clip: Clip) -> Vec<String> {
+    let seconds = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
+    let mut args = Vec::new();
+    if let Some(ms) = clip.start_ms.filter(|ms| *ms > 0) {
+        args.extend(["-ss".to_owned(), seconds(ms)]);
+    }
+    if let Some(ms) = clip.duration_ms {
+        args.extend(["-t".to_owned(), seconds(ms)]);
+    }
+    args
+}
+
+/// Cuts a clip: copies the streams when the start is on a keyframe, re-encodes otherwise.
+#[allow(clippy::too_many_arguments)]
+fn make_trim(
+    batch: &Batch,
+    tools: &Toolchain,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let start = job.recipe.clip.start_ms.unwrap_or(0);
+    let keyframes = if start == 0 {
+        Vec::new()
+    } else {
+        keyframes_before(tools, &job.input, start)
+    };
+    let extension = job
+        .input
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let plan = match plan_trim(info, &job.recipe, &keyframes, &extension, |name| {
+        caps.has_encoder(name)
+    }) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return Outcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+    report.plan = Some(Plan::Trim(plan.clone()));
+    report.encoder = Some(match (&plan.method, &plan.video) {
+        (TrimMethod::StreamCopy, _) => "stream copy (lossless)".to_owned(),
+        (TrimMethod::Reencode, Some(video)) => {
+            format!("{} (re-encoded)", video.encoder.ffmpeg_name())
+        }
+        (TrimMethod::Reencode, None) => "re-encoded".to_owned(),
+    });
+    let output = job.output.resolve(&job.input, &plan.extension);
+    if let Err(outcome) = check_output_path(batch, job, &output) {
+        return outcome;
+    }
+    let clip = Clip {
+        start_ms: Some(plan.start_ms),
+        duration_ms: plan.duration_ms,
+    };
+    let seek = clip_args(Clip {
+        start_ms: Some(plan.seek_ms),
+        ..clip
+    });
+    let args = plan.video.as_ref().map_or(&plan.args, |video| &video.args);
+    let duration = clip.seconds(info.duration_seconds).unwrap_or(0.0);
+    let partial = partial_path(&output);
+    let sink = Sink {
+        before_input: &seek,
+        file: Some(&partial),
+        workdir: None,
+    };
+    if let Err(error) = encode(tools, &job.input, &sink, args, duration, progress, cancel) {
+        let _ = std::fs::remove_file(&partial);
+        return match error {
+            EncodeError::Cancelled => Outcome::Cancelled,
+            EncodeError::Failed(message) => Outcome::Failed { message },
+        };
+    }
+    // A clip is what was asked for, even in the rare case it is not smaller.
+    finish(&partial, &output, info.size_bytes, true)
+}
+
+/// Video keyframe times (milliseconds) in the minute before `start_ms`, read from packet flags
+/// without decoding.
+fn keyframes_before(tools: &Toolchain, input: &Path, start_ms: u64) -> Vec<u64> {
+    let Ok(url) = file_url(input) else {
+        return Vec::new();
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let start = start_ms as f64 / 1000.0;
+    let interval = format!("{:.3}%{:.3}", (start - 60.0).max(0.0), start + 1.0);
+    let mut cmd = command(&tools.ffprobe);
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-read_intervals",
+        &interval,
+    ])
+    .args([
+        "-show_entries",
+        "packet=pts_time,flags",
+        "-of",
+        "csv=p=0",
+        "-i",
+    ])
+    .arg(url);
+    let Ok(output) = cmd.output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (time, flags) = line.split_once(',')?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let ms = (time.parse::<f64>().ok()? * 1000.0).round() as u64;
+            flags.contains('K').then_some(ms)
+        })
+        .collect()
 }
 
 /// Counter that keeps two-pass work folders unique within one process.
@@ -404,7 +534,11 @@ fn encode_to_target(
             target_bytes: target.target_bytes,
         });
     }
-    let duration = info.duration_seconds.unwrap_or(0.0);
+    let duration = job
+        .recipe
+        .clip
+        .seconds(info.duration_seconds)
+        .unwrap_or(0.0);
     let workdir = std::env::temp_dir().join(format!(
         "peraz-{}-{}-{}",
         std::process::id(),
@@ -447,6 +581,7 @@ fn run_target_passes(
     progress: Progress,
     cancel: &AtomicBool,
 ) -> Outcome {
+    let seek = clip_args(job.recipe.clip);
     let as_outcome = |error: EncodeError| match error {
         EncodeError::Cancelled => Outcome::Cancelled,
         EncodeError::Failed(message) => Outcome::Failed { message },
@@ -460,7 +595,7 @@ fn run_target_passes(
             &Pass::First { log: log.clone() },
         );
         let sink = Sink {
-            before_input: &[],
+            before_input: &seek,
             file: None,
             workdir: Some(workdir),
         };
@@ -479,7 +614,7 @@ fn run_target_passes(
         };
         let args = plan.ffmpeg_args(RateControl::Bitrate(bit_rate), &pass);
         let sink = Sink {
-            before_input: &[],
+            before_input: &seek,
             file: Some(&partial),
             workdir: Some(workdir),
         };

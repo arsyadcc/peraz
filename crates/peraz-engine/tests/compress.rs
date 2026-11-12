@@ -405,8 +405,8 @@ fn makes_a_gif_from_a_video_range() {
         Quality::Balanced,
     );
     job.recipe.video.output = VideoOutput::Gif;
-    job.recipe.gif.start_ms = Some(2_000);
-    job.recipe.gif.duration_ms = Some(3_000);
+    job.recipe.clip.start_ms = Some(2_000);
+    job.recipe.clip.duration_ms = Some(3_000);
     let mut last = 0.0;
     let report = compress(
         &env.tools,
@@ -547,7 +547,7 @@ fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
             Quality::Small,
         );
         job.recipe.video.output = format;
-        job.recipe.gif.duration_ms = Some(2_000);
+        job.recipe.clip.duration_ms = Some(2_000);
         let report = compress(
             &env.tools,
             &env.caps,
@@ -681,4 +681,65 @@ fn compresses_pictures_inside_epub_and_pdf() {
             "{name} is still a {kind:?}"
         );
     }
+}
+
+#[test]
+fn trims_by_copying_streams_when_possible() {
+    let Some(env) = setup("trim") else { return };
+    let input = env.fixtures.join("video-1080p-audio.mp4");
+    let trim = |name: &str, start_ms: u64, snap: bool| {
+        let mut job = job(input.clone(), env.out.join(name), Quality::Balanced);
+        job.recipe.video.trim_only = true;
+        job.recipe.video.snap_to_keyframe = snap;
+        job.recipe.clip = peraz_core::Clip {
+            start_ms: Some(start_ms),
+            duration_ms: Some(3_000),
+        };
+        compress(
+            &env.tools,
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        )
+    };
+    let method = |report: &peraz_core::Report| match &report.plan {
+        Some(peraz_core::Plan::Trim(plan)) => (plan.method, plan.reason.is_some()),
+        other => panic!("no trim plan: {other:?}"),
+    };
+    // The sample has a keyframe at 0 s and none at 1.5 s.
+    let copied = trim("copy.mp4", 0, false);
+    assert!(
+        matches!(copied.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        copied.outcome
+    );
+    assert_eq!(method(&copied), (peraz_core::TrimMethod::StreamCopy, false));
+    let encoded = trim("encoded.mp4", 1_500, false);
+    assert_eq!(
+        method(&encoded),
+        (peraz_core::TrimMethod::Reencode, true),
+        "explains the re-encode"
+    );
+    let snapped = trim("snapped.mp4", 1_500, true);
+    assert_eq!(
+        method(&snapped),
+        (peraz_core::TrimMethod::StreamCopy, false)
+    );
+
+    for name in ["copy.mp4", "encoded.mp4"] {
+        let seconds = probe(&env.tools, &env.out.join(name))
+            .unwrap()
+            .duration_seconds
+            .unwrap();
+        assert!((2.9..3.3).contains(&seconds), "{name} lasts {seconds} s");
+    }
+    let snapped_seconds = probe(&env.tools, &env.out.join("snapped.mp4"))
+        .unwrap()
+        .duration_seconds
+        .unwrap();
+    assert!(
+        snapped_seconds >= 4.4,
+        "snapping keeps the requested end (4.5 s): {snapped_seconds} s"
+    );
 }

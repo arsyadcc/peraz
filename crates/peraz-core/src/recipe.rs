@@ -57,6 +57,10 @@ pub struct VideoRecipe {
     pub output: VideoOutput,
     /// Fit the output in this many bytes (SI). Replaces the quality level for video.
     pub target_bytes: Option<u64>,
+    /// Only cut the clip: copy the streams when the start is on a keyframe, re-encode otherwise.
+    pub trim_only: bool,
+    /// With `trim_only`, move the start back to the previous keyframe so the streams can be copied.
+    pub snap_to_keyframe: bool,
 }
 
 /// What a video becomes.
@@ -81,10 +85,33 @@ pub enum VideoOutput {
 pub struct GifRecipe {
     /// Frames per second; default depends on the quality level. Never above the source.
     pub fps: Option<u32>,
+}
+
+/// The part of a video or animation to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Clip {
     /// Start this many milliseconds into the source.
     pub start_ms: Option<u64>,
     /// Use at most this many milliseconds of the source.
     pub duration_ms: Option<u64>,
+}
+
+impl Clip {
+    pub fn is_set(self) -> bool {
+        self.start_ms.is_some() || self.duration_ms.is_some()
+    }
+
+    /// The playing time of the clip, given the source duration (seconds).
+    #[allow(clippy::cast_precision_loss)] // milliseconds in f64 are exact far beyond any video length
+    pub fn seconds(self, source: Option<f64>) -> Option<f64> {
+        let start = self.start_ms.map_or(0.0, |ms| ms as f64 / 1000.0);
+        let rest = source.map(|d| (d - start).max(0.0));
+        match (self.duration_ms.map(|ms| ms as f64 / 1000.0), rest) {
+            (Some(want), Some(rest)) => Some(want.min(rest)),
+            (Some(want), None) => Some(want),
+            (None, rest) => rest,
+        }
+    }
 }
 
 /// Output format for still images.
@@ -121,6 +148,8 @@ pub struct Recipe {
     pub video: VideoRecipe,
     pub image: ImageRecipe,
     pub gif: GifRecipe,
+    /// The part of the source to use (videos and animations).
+    pub clip: Clip,
 }
 
 macro_rules! text_enum {

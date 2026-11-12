@@ -12,6 +12,8 @@ peraz compress clip.mov                         # → clip-peraz.mp4 (H.264, bal
 peraz compress -q small --codec hevc *.mp4      # smaller files
 peraz compress --encoder hardware --max-width 1280 --no-audio clip.mov
 peraz compress --target-size 25MB long-video.mov      # fits, verified (two-pass with x264/x265)
+peraz compress --start 0:12 --duration 10 clip.mov      # compress just that part
+peraz compress --trim-only --start 0:12 --duration 10 clip.mov   # cut only: lossless when possible
 peraz compress photo.jpg screenshot.png          # mozjpeg / pngquant-style palette + oxipng
 peraz compress --format jpeg --max-width 2000 *.png
 peraz compress --format webp *.png *.jpg           # or --format avif (smallest, slower)
@@ -38,6 +40,12 @@ Batches run in parallel: still images use up to one job per logical core, while 
 animation encodes (which already use many cores each) run one per 8 cores. Two inputs that would
 write the same output file are caught before either one writes. `--jobs N` sets the number of
 files worked on at once.
+
+`--start` and `--duration` (seconds or `[h:]m:ss`) pick part of a video. With `--trim-only` the
+clip is cut without compressing: when the start is on a keyframe the streams are copied (instant
+and lossless), otherwise the clip is re-encoded and the report says why and where the nearest
+keyframe is. `--snap-to-keyframe` moves the start back to that keyframe, keeping the end, so the
+clip can always be copied.
 
 With `--target-size`, the video and audio bit rates are computed from the target, software
 encoders run two passes, and the result is measured: if it is over, the final pass runs again
