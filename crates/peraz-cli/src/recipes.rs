@@ -121,6 +121,22 @@ fn all_in(user_dir: Option<&Path>) -> (Vec<Recipe>, Vec<String>) {
     (recipes, errors)
 }
 
+/// The file name of a project recipe.
+pub const PROJECT_RECIPE: &str = "peraz.toml";
+
+/// The nearest `peraz.toml` in `start` or one of its parent folders.
+pub fn project_recipe(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .map(|dir| dir.join(PROJECT_RECIPE))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Loads a project recipe found by [`project_recipe`].
+pub fn load_project(path: &Path) -> Result<Recipe, String> {
+    load_file(path, path.display().to_string(), Source::File)
+}
+
 /// Finds a recipe by name, or loads it from a path.
 pub fn find(name_or_path: &str) -> Result<Recipe, String> {
     find_in(name_or_path, recipes_dir().as_deref())
@@ -239,6 +255,25 @@ pub fn run(command: &Command) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_recipes_are_found_in_parent_folders() {
+        let root = std::env::temp_dir().join(format!("peraz-project-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets/icons")).unwrap();
+        assert_eq!(project_recipe(&root.join("assets/icons")), None);
+        std::fs::write(
+            root.join(PROJECT_RECIPE),
+            "version = 1\nformat = \"webp\"\n",
+        )
+        .unwrap();
+        let found = project_recipe(&root.join("assets/icons")).unwrap();
+        assert_eq!(found, root.join(PROJECT_RECIPE));
+        assert_eq!(
+            load_project(&found).unwrap().settings.format.as_deref(),
+            Some("webp")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn user_recipes_replace_builtins_and_paths_load_directly() {

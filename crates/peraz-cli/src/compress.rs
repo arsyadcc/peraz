@@ -19,11 +19,17 @@ use crate::{exit, locate, print_json, recipes};
 
 /// Flags that describe how files are compressed; shared by `compress` and `watch`.
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // command-line switches
 pub struct SettingsArgs {
     /// Use a recipe: a built-in or your own name (see `peraz recipe list`), or a .toml file.
-    /// Flags given here override the recipe's values.
+    /// Flags given here override the recipe's values. Without it, a `peraz.toml` in the current
+    /// folder or a parent folder is used.
     #[arg(short, long, value_name = "NAME|FILE")]
     pub recipe: Option<String>,
+
+    /// Do not look for a `peraz.toml` project recipe.
+    #[arg(long, conflicts_with = "recipe")]
+    pub ignore_project_recipe: bool,
 
     /// Quality level: highest, high, balanced (default), small, smallest.
     #[arg(short, long, value_parser = parse::<Quality>)]
@@ -103,6 +109,15 @@ pub struct Args {
     #[arg(short, long)]
     force: bool,
 
+    /// Check only, for CI: write nothing, and exit with code 4 when a file could be made at
+    /// least --check-threshold percent smaller.
+    #[arg(long, conflicts_with_all = ["output", "out_dir", "force"])]
+    check: bool,
+
+    /// With --check, the smallest saving (percent) that counts as "could be smaller".
+    #[arg(long, value_name = "PERCENT", default_value_t = 10, requires = "check", value_parser = clap::value_parser!(u8).range(1..=99))]
+    check_threshold: u8,
+
     /// How many files to work on at once (default: one per logical core; encodes are further
     /// limited to one per 8 cores). 1 processes files one by one with live progress.
     #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
@@ -159,8 +174,11 @@ fn parse<T: std::str::FromStr<Err = peraz_core::recipe::UnknownValue>>(
 #[derive(Serialize)]
 struct Output<'a> {
     ffmpeg: Option<&'a BuildInfo>,
-    /// The recipe used, when one was given with `--recipe`.
+    /// The recipe used: a name, or the path of a project `peraz.toml`.
     recipe: Option<&'a str>,
+    /// Present in --check mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check: Option<&'a Check>,
     results: &'a [Report],
     summary: Summary,
 }
@@ -210,6 +228,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     };
 
     let target = output_target(args);
+    let check_dir = check_folder(args, recipe_name.as_deref());
     let cancel = install_cancel_handler();
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let workers = args
@@ -222,20 +241,31 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     } else {
         Batch::for_this_machine()
     };
-    let job_for = |input: &PathBuf| Job {
-        input: input.clone(),
-        output: target.clone(),
-        recipe: recipe.clone(),
-        existing: if args.force {
+    let job_for = |input: &PathBuf| {
+        let output = match &check_dir {
+            Some(dir) => {
+                let folder = dir.join(input_key(input));
+                let _ = std::fs::create_dir_all(&folder);
+                OutputTarget::Folder(folder)
+            }
+            None => target.clone(),
+        };
+        let existing = if args.force || args.check {
             ExistingOutput::Replace
         } else {
             ExistingOutput::Fail
-        },
+        };
+        Job {
+            input: input.clone(),
+            output,
+            recipe: recipe.clone(),
+            existing,
+        }
     };
     // After cancellation every remaining file still gets a report (status `cancelled`), so
     // callers learn the fate of each input; the engine returns immediately for these.
     let reports = if workers == 1 {
-        run_sequential(&args.files, args.json, |input, progress| {
+        run_sequential(&args.files, args.json || args.check, |input, progress| {
             peraz_engine::compress::compress_in(
                 &batch,
                 &tools,
@@ -246,7 +276,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             )
         })
     } else {
-        run_parallel(&args.files, workers, args.json, |input| {
+        run_parallel(&args.files, workers, args.json || args.check, |input| {
             peraz_engine::compress::compress_in(
                 &batch,
                 &tools,
@@ -258,15 +288,41 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         })
     };
 
-    let summary = summarize(&reports);
+    finish_run(
+        args,
+        &build,
+        recipe_name.as_deref(),
+        &reports,
+        check_dir.as_deref(),
+    )
+}
+
+/// Prints the results and picks the exit code.
+fn finish_run(
+    args: &Args,
+    build: &BuildInfo,
+    recipe_name: Option<&str>,
+    reports: &[Report],
+    check_dir: Option<&Path>,
+) -> u8 {
+    let summary = summarize(reports);
     let (failed, cancelled) = (summary.failed, summary.cancelled > 0);
+    let check = check_dir.map(|dir| {
+        let result = check_results(reports, args.check_threshold);
+        // Only the folder this run created; it holds nothing but this run's temporary outputs.
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    });
     if args.json {
         print_json(Output {
-            ffmpeg: Some(&build),
-            recipe: recipe_name.as_deref(),
-            results: &reports,
+            ffmpeg: Some(build),
+            recipe: recipe_name,
+            results: reports,
             summary,
+            check: check.as_ref(),
         });
+    } else if let Some(check) = &check {
+        print_check(check, reports);
     } else if reports.len() > 1 || cancelled {
         print_summary(&summary, args.files.len());
     }
@@ -274,9 +330,98 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         exit::CANCELLED
     } else if failed > 0 {
         exit::INPUT_FAILED
+    } else if check.as_ref().is_some_and(|c| !c.could_shrink.is_empty()) {
+        exit::CHECK_FAILED
     } else {
         exit::SUCCESS
     }
+}
+
+/// For --check: a private temporary folder (one subfolder per input, removed at the end).
+/// Also tells the user when a project `peraz.toml` is in use.
+fn check_folder(args: &Args, recipe_name: Option<&str>) -> Option<PathBuf> {
+    if let Some(project) = recipe_name.filter(|n| n.ends_with(recipes::PROJECT_RECIPE))
+        && !args.json
+    {
+        eprintln!("using recipe {project}");
+    }
+    args.check
+        .then(|| std::env::temp_dir().join(format!("peraz-check-{}", std::process::id())))
+}
+
+/// A short, stable folder name for an input inside the --check folder.
+fn input_key(input: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::path::absolute(input)
+        .unwrap_or_else(|_| input.to_path_buf())
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// What --check found.
+#[derive(Serialize)]
+pub(crate) struct Check {
+    threshold_percent: u8,
+    /// Files that could be made at least the threshold smaller.
+    could_shrink: Vec<CheckItem>,
+}
+
+#[derive(Serialize)]
+struct CheckItem {
+    path: PathBuf,
+    input_bytes: u64,
+    possible_bytes: u64,
+    saving_percent: f64,
+}
+
+fn check_results(reports: &[Report], threshold: u8) -> Check {
+    let could_shrink = reports
+        .iter()
+        .filter_map(|report| {
+            let (Outcome::Compressed { output_bytes, .. }, Some(input)) =
+                (&report.outcome, report.input_bytes)
+            else {
+                return None;
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let saving = 100.0 * (1.0 - *output_bytes as f64 / input.max(1) as f64);
+            (saving >= f64::from(threshold)).then(|| CheckItem {
+                path: report.input.clone(),
+                input_bytes: input,
+                possible_bytes: *output_bytes,
+                saving_percent: (saving * 10.0).round() / 10.0,
+            })
+        })
+        .collect();
+    Check {
+        threshold_percent: threshold,
+        could_shrink,
+    }
+}
+
+fn print_check(check: &Check, reports: &[Report]) {
+    for item in &check.could_shrink {
+        println!(
+            "{}: could be {:.0}% smaller ({} → {})",
+            item.path.display(),
+            item.saving_percent,
+            format_bytes(item.input_bytes),
+            format_bytes(item.possible_bytes)
+        );
+    }
+    for report in reports {
+        if let Outcome::Failed { message } = &report.outcome {
+            eprintln!("{}: error: {message}", report.input.display());
+        }
+    }
+    let ok = reports.len() - check.could_shrink.len();
+    println!(
+        "\n{} of {} files could be at least {}% smaller; {ok} are fine",
+        check.could_shrink.len(),
+        reports.len(),
+        check.threshold_percent
+    );
 }
 
 /// The recipe the command-line flags describe.
@@ -294,11 +439,20 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         fps: args.fps,
         ..Settings::default()
     };
-    let (merged, name) = match &args.recipe {
-        Some(name) => {
-            let found = recipes::find(name)?;
-            (flags.over(&found.settings), Some(found.name))
-        }
+    let project = if args.recipe.is_none() && !args.ignore_project_recipe {
+        std::env::current_dir()
+            .ok()
+            .and_then(|dir| recipes::project_recipe(&dir))
+    } else {
+        None
+    };
+    let found = match (&args.recipe, &project) {
+        (Some(name), _) => Some(recipes::find(name)?),
+        (None, Some(path)) => Some(recipes::load_project(path)?),
+        (None, None) => None,
+    };
+    let (merged, name) = match found {
+        Some(found) => (flags.over(&found.settings), Some(found.name)),
         None => (flags, None),
     };
     let mut recipe = merged

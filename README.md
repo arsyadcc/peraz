@@ -70,6 +70,21 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
 `--format mp4` turns a GIF into an H.264 video.
 
+### Project recipes and CI
+
+Put a `peraz.toml` recipe at the root of a project: `peraz compress` and `peraz watch` use the
+nearest one found in the current folder or its parents (flags still override it; skip it with
+`--ignore-project-recipe`).
+
+`--check` writes nothing: it compresses into a temporary folder and exits with code `4` when any
+file could be made at least `--check-threshold` percent smaller (default 10, so files that were
+already compressed pass). A GitHub Actions step:
+
+```yaml
+- name: Check that images are compressed
+  run: peraz compress --check assets/**/*.{jpg,png,webp}
+```
+
 ### Watch folders
 
 `peraz watch <folders>` compresses new files as they appear, with the same flags as `compress`
@@ -110,7 +125,8 @@ Peraz needs `ffmpeg` and `ffprobe`. Until bundled builds exist, it uses `--ffmpe
 `PERAZ_FFMPEG`, or `ffmpeg` on `PATH`, in that order.
 
 Exit codes: `0` success (including files kept or skipped), `1` at least one input failed, `2` invalid
-usage, `3` environment problem (e.g. FFmpeg not found), `130` cancelled with Ctrl-C or SIGTERM
+usage, `3` environment problem (e.g. FFmpeg not found), `4` `--check` found files that could be
+smaller, `130` cancelled with Ctrl-C or SIGTERM
 (the current file's partial output is removed). Every `--json` document carries a
 `schema_version`.
 

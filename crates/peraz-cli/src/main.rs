@@ -29,6 +29,8 @@ pub mod exit {
     pub const USAGE: u8 = 2;
     /// The environment is broken, e.g. FFmpeg is missing.
     pub const ENVIRONMENT: u8 = 3;
+    /// `--check`: at least one file could be made noticeably smaller.
+    pub const CHECK_FAILED: u8 = 4;
     /// Stopped by Ctrl-C or a termination signal (128 + SIGINT, the shell convention).
     pub const CANCELLED: u8 = 130;
 }
