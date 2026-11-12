@@ -1,7 +1,7 @@
 <h1 align="center">Peraz</h1>
 
 <p align="center">
-  <img src=".github/assets/peraz-icon.png" width="160" alt="Peraz logo: an orange citrus juicer" />
+  <img src=".github/assets/peraz-logo.svg" width="240" alt="Peraz logo: an orange juicer with a turning reamer, juice dripping and rippling" />
 </p>
 
 <p align="center">
