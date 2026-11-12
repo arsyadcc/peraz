@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use crate::media::Alpha;
-use crate::media::{AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
+use crate::media::{AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
 use crate::recipe::{EncoderPreference, ImageFormat, Quality, Recipe, VideoCodec, VideoOutput};
 
 /// A video encoder Peraz knows how to drive.
@@ -98,6 +98,8 @@ pub struct VideoPlan {
     /// Output size when scaling down, `None` to keep the source size.
     pub scale_to: Option<(u32, u32)>,
     pub pixel_format: &'static str,
+    /// The source's color description, written into the output unchanged.
+    pub color: ColorInfo,
     pub audio: AudioPlan,
     /// Present when the video must fit a file size.
     pub target: Option<SizeTarget>,
@@ -112,6 +114,8 @@ pub struct VideoPlan {
 pub enum PlanError {
     /// The file is not a video.
     NotVideo { kind: MediaKind },
+    /// H.264 was asked for, but the video is HDR: 8-bit H.264 would lose it.
+    HdrNeedsHevc,
     /// No usable encoder for the requested codec and preference.
     NoEncoder {
         codec: VideoCodec,
@@ -143,6 +147,10 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotVideo { kind } => write!(f, "not a video (detected: {kind:?})"),
+            Self::HdrNeedsHevc => write!(
+                f,
+                "this is an HDR video, which H.264 cannot keep; use --codec hevc, or leave --codec out"
+            ),
             Self::NoEncoder { codec, tried } => write!(
                 f,
                 "no {codec} encoder available (needs one of: {}); run `peraz doctor`",
@@ -197,13 +205,14 @@ pub fn plan_video(
     if info.kind == MediaKind::Animation && !gif_to_mp4 {
         return Err(PlanError::NotVideo { kind: info.kind });
     }
-    let candidates = VideoEncoder::candidates(recipe.video.codec, recipe.video.encoder);
+    let codec = video_codec(recipe.video.codec, video)?;
+    let candidates = VideoEncoder::candidates(codec, recipe.video.encoder);
     let encoder = candidates
         .iter()
         .copied()
         .find(|e| has_encoder(e.ffmpeg_name()))
         .ok_or_else(|| PlanError::NoEncoder {
-            codec: recipe.video.codec,
+            codec,
             tried: candidates.iter().map(|e| e.ffmpeg_name()).collect(),
         })?;
 
@@ -250,6 +259,7 @@ pub fn plan_video(
         encoder,
         scale_to,
         pixel_format,
+        color: video.color.clone(),
         audio,
         target,
         args: Vec::new(),
@@ -294,6 +304,16 @@ pub struct SizeTarget {
 }
 
 impl VideoPlan {
+    /// The encoder, as reports show it: with a note when the HDR is carried over.
+    pub fn encoder_label(&self) -> String {
+        let name = self.encoder.ffmpeg_name();
+        if self.color.is_hdr() {
+            format!("{name}, HDR kept")
+        } else {
+            name.to_owned()
+        }
+    }
+
     /// FFmpeg arguments between the input and the output for one pass.
     pub fn ffmpeg_args(&self, rate: RateControl, pass: &Pass) -> Vec<String> {
         let analysis = matches!(pass, Pass::First { .. });
@@ -340,6 +360,19 @@ impl VideoPlan {
             args.extend(["-tag:v".into(), "hvc1".into()]);
         }
         args.extend(["-pix_fmt".into(), self.pixel_format.into()]);
+        // Carry the color description over explicitly: without it, older FFmpeg versions tag
+        // nothing, and HDR looks washed out.
+        let color = &self.color;
+        for (flag, value) in [
+            ("-color_primaries", &color.primaries),
+            ("-color_trc", &color.transfer),
+            ("-colorspace", &color.matrix),
+            ("-color_range", &color.range),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.into(), value.clone()]);
+            }
+        }
         if analysis {
             args.extend(["-an".into(), "-f".into(), "null".into()]);
             return args;
@@ -1172,6 +1205,16 @@ pub fn fit_within(
     Some((even(width, max_width), even(height, max_height)))
 }
 
+/// The output codec: the one asked for, or H.264 unless the video is HDR, which only HEVC keeps.
+fn video_codec(chosen: Option<VideoCodec>, video: &VideoTrack) -> Result<VideoCodec, PlanError> {
+    match (chosen, video.color.is_hdr()) {
+        (Some(VideoCodec::H264), true) => Err(PlanError::HdrNeedsHevc),
+        (Some(codec), _) => Ok(codec),
+        (None, true) => Ok(VideoCodec::Hevc),
+        (None, false) => Ok(VideoCodec::H264),
+    }
+}
+
 fn pixel_format(encoder: VideoEncoder, video: &VideoTrack) -> &'static str {
     let ten_bit = video
         .pixel_format
@@ -1231,6 +1274,7 @@ mod tests {
                 frame_rate: Some(Rational { num: 30, den: 1 }),
                 frame_count: Some(300),
                 pixel_format: Some("yuv420p".into()),
+                color: ColorInfo::default(),
                 alpha: Alpha::Absent,
                 bit_rate: Some(7_800_000),
             }),
@@ -1270,7 +1314,7 @@ mod tests {
     fn golden_hevc_scaled_without_audio() {
         let mut recipe = Recipe::default();
         recipe.quality = Quality::Small;
-        recipe.video.codec = VideoCodec::Hevc;
+        recipe.video.codec = Some(VideoCodec::Hevc);
         recipe.video.max_width = Some(1280);
         recipe.video.remove_audio = true;
         let plan = plan_video(
@@ -1643,7 +1687,7 @@ mod tests {
                 && second.ends_with("-f mp4")
         );
 
-        recipe.video.codec = VideoCodec::Hevc;
+        recipe.video.codec = Some(VideoCodec::Hevc);
         let plan = plan_video(&video_info(1280, 720, vec![]), &recipe, everything).unwrap();
         let first = plan
             .ffmpeg_args(
@@ -1837,15 +1881,88 @@ mod tests {
         let mut info = video_info(1920, 1080, vec![]);
         info.video.as_mut().unwrap().pixel_format = Some("yuv420p10le".into());
         let mut recipe = Recipe::default();
-        recipe.video.codec = VideoCodec::Hevc;
+        recipe.video.codec = Some(VideoCodec::Hevc);
         assert_eq!(
             plan_video(&info, &recipe, everything).unwrap().pixel_format,
             "yuv420p10le"
         );
-        recipe.video.codec = VideoCodec::H264;
+        recipe.video.codec = Some(VideoCodec::H264);
         assert_eq!(
             plan_video(&info, &recipe, everything).unwrap().pixel_format,
             "yuv420p"
         );
+    }
+
+    fn hdr_info(transfer: &str) -> MediaInfo {
+        let mut info = video_info(3840, 2160, vec![]);
+        let video = info.video.as_mut().unwrap();
+        video.codec = "hevc".into();
+        video.pixel_format = Some("yuv420p10le".into());
+        video.color = ColorInfo {
+            primaries: Some("bt2020".into()),
+            transfer: Some(transfer.into()),
+            matrix: Some("bt2020nc".into()),
+            range: Some("tv".into()),
+        };
+        info
+    }
+
+    #[test]
+    fn hdr_becomes_ten_bit_hevc_with_its_color_description() {
+        for transfer in ["smpte2084", "arib-std-b67"] {
+            let plan = plan_video(&hdr_info(transfer), &Recipe::default(), everything).unwrap();
+            assert_eq!(plan.encoder, VideoEncoder::Libx265, "{transfer}");
+            assert_eq!(plan.pixel_format, "yuv420p10le");
+            assert_eq!(plan.encoder_label(), "libx265, HDR kept");
+            let args = plan.args.join(" ");
+            assert!(
+                args.contains(&format!(
+                    "-color_primaries bt2020 -color_trc {transfer} -colorspace bt2020nc -color_range tv"
+                )),
+                "{args}"
+            );
+        }
+        // Hardware HEVC keeps 10 bits too.
+        let mut recipe = Recipe::default();
+        recipe.video.encoder = EncoderPreference::Hardware;
+        let plan = plan_video(&hdr_info("arib-std-b67"), &recipe, everything).unwrap();
+        assert_eq!(
+            (plan.encoder, plan.pixel_format),
+            (VideoEncoder::HevcVideoToolbox, "p010le")
+        );
+    }
+
+    #[test]
+    fn hdr_refuses_h264_when_asked_for() {
+        let mut recipe = Recipe::default();
+        recipe.video.codec = Some(VideoCodec::H264);
+        let err = plan_video(&hdr_info("smpte2084"), &recipe, everything).unwrap_err();
+        assert_eq!(err, PlanError::HdrNeedsHevc);
+        assert!(err.to_string().contains("--codec hevc"));
+    }
+
+    #[test]
+    fn sdr_color_tags_are_carried_over_and_missing_ones_left_out() {
+        let mut info = video_info(1920, 1080, vec![]);
+        info.video.as_mut().unwrap().color = ColorInfo {
+            primaries: Some("bt709".into()),
+            transfer: Some("bt709".into()),
+            matrix: Some("bt709".into()),
+            range: None,
+        };
+        let plan = plan_video(&info, &Recipe::default(), everything).unwrap();
+        assert_eq!(plan.encoder, VideoEncoder::Libx264);
+        assert_eq!(plan.encoder_label(), "libx264");
+        let args = plan.args.join(" ");
+        assert!(
+            args.contains("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -an"),
+            "{args}"
+        );
+        let untagged = plan_video(
+            &video_info(1920, 1080, vec![]),
+            &Recipe::default(),
+            everything,
+        );
+        assert!(!untagged.unwrap().args.join(" ").contains("-color"));
     }
 }

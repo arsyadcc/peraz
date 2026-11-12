@@ -101,6 +101,11 @@ fn print_human(path: &Path, result: &Result<MediaInfo, EngineError>) {
         if let Some(pix) = &v.pixel_format {
             parts.push(pix.clone());
         }
+        match v.color.transfer.as_deref() {
+            Some("smpte2084") => parts.push("HDR (PQ)".to_owned()),
+            Some("arib-std-b67") => parts.push("HDR (HLG)".to_owned()),
+            _ => {}
+        }
         parts.push(
             match v.alpha {
                 Alpha::Present => "alpha",

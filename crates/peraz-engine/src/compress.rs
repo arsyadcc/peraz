@@ -125,7 +125,7 @@ fn run(
                 Err(e) => return failed(e.to_string()),
             };
             report.plan = Some(Plan::Video(plan.clone()));
-            report.encoder = Some(plan.encoder.ffmpeg_name().to_owned());
+            report.encoder = Some(plan.encoder_label());
             let output = match choose_output(batch, job, "mp4") {
                 Ok(output) => output,
                 Err(outcome) => return outcome,
@@ -430,7 +430,7 @@ fn make_trim(
     report.encoder = Some(match (&plan.method, &plan.video) {
         (TrimMethod::StreamCopy, _) => "stream copy (lossless)".to_owned(),
         (TrimMethod::Reencode, Some(video)) => {
-            format!("{} (re-encoded)", video.encoder.ffmpeg_name())
+            format!("{} (re-encoded)", video.encoder_label())
         }
         (TrimMethod::Reencode, None) => "re-encoded".to_owned(),
     });

@@ -48,7 +48,8 @@ pub enum EncoderPreference {
 /// Settings for video output.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoRecipe {
-    pub codec: VideoCodec,
+    /// `None` chooses: H.264, or HEVC for HDR videos (H.264 output would lose the HDR).
+    pub codec: Option<VideoCodec>,
     pub encoder: EncoderPreference,
     /// Bounding box for the displayed picture. Never upscales; aspect ratio is kept.
     pub max_width: Option<u32>,

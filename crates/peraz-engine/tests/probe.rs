@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use peraz_core::{Alpha, MediaInfo, MediaKind, Rational};
+use peraz_core::{Alpha, ColorInfo, MediaInfo, MediaKind, Rational};
 use peraz_engine::ffmpeg::Toolchain;
 use peraz_engine::probe::{parse_probe_json, probe};
 
@@ -52,6 +52,26 @@ fn golden_hevc_4k60() {
         ("hevc", 3840, 2160)
     );
     assert_eq!(video.frame_rate, Some(Rational { num: 60, den: 1 }));
+}
+
+#[test]
+fn golden_hdr10_color_description() {
+    let video = golden("video-hdr10-hevc.mp4").video.unwrap();
+    assert_eq!(video.pixel_format.as_deref(), Some("yuv420p10le"));
+    assert_eq!(
+        video.color,
+        ColorInfo {
+            primaries: Some("bt2020".into()),
+            transfer: Some("smpte2084".into()),
+            matrix: Some("bt2020nc".into()),
+            range: Some("tv".into()),
+        }
+    );
+    assert!(video.color.is_hdr());
+    // An untagged file reports `unknown`, which is not carried over.
+    let sdr = golden("video-4k60-hevc.mp4").video.unwrap();
+    assert_eq!(sdr.color.primaries, None);
+    assert!(!sdr.color.is_hdr());
 }
 
 #[test]

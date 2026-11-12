@@ -10,7 +10,7 @@
 //! format = "webp"                  # keep, jpeg, png, webp, avif, gif, mp4
 //! max_width = 2000                 # pixels; never scales up
 //! max_height = 2000
-//! codec = "h264"                   # video codec: h264, hevc
+//! codec = "h264"                   # video codec: h264, hevc (default: h264, hevc for HDR)
 //! encoder = "auto"                 # auto, software, hardware
 //! no_audio = false
 //! target_size = "25MB"             # SI units; videos only
@@ -210,7 +210,7 @@ impl Settings {
         Ok(Recipe {
             quality: self.quality.unwrap_or_default(),
             video: VideoRecipe {
-                codec: self.codec.unwrap_or_default(),
+                codec: self.codec,
                 encoder: self.encoder.unwrap_or_default(),
                 max_width: self.max_width,
                 max_height: self.max_height,

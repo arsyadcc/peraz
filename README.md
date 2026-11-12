@@ -140,6 +140,10 @@ Quality levels, from largest to smallest file: `highest`, `high`, `balanced` (de
 
 ### Video
 
+The color description (primaries, transfer, matrix, range) is carried over, and 10-bit HEVC
+stays 10-bit. HDR videos (HDR10 and HLG, as phones record them) become 10-bit HEVC, because
+8-bit H.264 cannot keep HDR; asking for `--codec h264` on an HDR video is an error.
+
 With `--target-size`, the video and audio bit rates are computed from the target, software
 encoders run two passes, and the result is measured: if it is over, the final pass runs again
 at a lower bit rate. A file over the target is never kept. When the bit rate is too low for the

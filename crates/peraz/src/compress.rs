@@ -35,7 +35,7 @@ pub struct SettingsArgs {
     #[arg(short, long, value_parser = parse::<Quality>)]
     pub quality: Option<Quality>,
 
-    /// Video codec: h264 (default, plays everywhere) or hevc (smaller).
+    /// Video codec: h264 (default, plays everywhere) or hevc (smaller). HDR videos become hevc.
     #[arg(long, value_parser = parse::<VideoCodec>)]
     pub codec: Option<VideoCodec>,
 

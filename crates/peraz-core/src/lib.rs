@@ -10,7 +10,7 @@ pub mod report;
 pub mod settings;
 pub mod units;
 
-pub use media::{Alpha, AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
+pub use media::{Alpha, AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
 pub use plan::{
     AnimatedPlan, DocumentPlan, GifPlan, ImageDecoder, ImageEncoding, ImagePlan, Pass, PlanError,
     RateControl, SizeTarget, TrimMethod, TrimPlan, VideoPlan, plan_animated, plan_document,

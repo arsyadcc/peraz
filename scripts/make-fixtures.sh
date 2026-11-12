@@ -24,6 +24,14 @@ ff -f lavfi -i "testsrc2=size=3840x2160:rate=60:duration=3" \
    -c:v libx265 -crf 20 -tag:v hvc1 -pix_fmt yuv420p video-4k60-hevc.mp4 2>/dev/null \
    || echo "  skipped: local ffmpeg has no libx265"
 
+echo "video: 720p HDR10 (10-bit HEVC, BT.2020, PQ), 2 s"
+ff -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=2,format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv" \
+   -c:v libx265 -crf 20 -tag:v hvc1 \
+   -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv \
+   -x265-params "log-level=error:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400" \
+   video-hdr10-hevc.mp4 2>/dev/null \
+   || echo "  skipped: local ffmpeg has no libx265"
+
 echo "images: opaque PNG, transparent PNG, JPEG"
 ff -f lavfi -i "testsrc2=size=1600x1200,format=rgb24" -frames:v 1 image-opaque.png
 ff -f lavfi -i "testsrc2=size=1200x900,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lt(hypot(X-W/2,Y-H/2),H/3),255,X*255/W)'" \

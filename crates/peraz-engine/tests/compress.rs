@@ -951,3 +951,54 @@ fn trims_by_copying_streams_when_possible() {
         "snapping keeps the requested end (4.5 s): {snapped_seconds} s"
     );
 }
+
+#[test]
+fn hdr_video_stays_hdr_and_refuses_h264() {
+    let Some(env) = setup("hdr") else { return };
+    let input = env.fixtures.join("video-hdr10-hevc.mp4");
+    if !input.is_file() || !env.caps.has_encoder("libx265") {
+        eprintln!("skipped: the HDR sample needs an FFmpeg with libx265");
+        return;
+    }
+    let source = probe(&env.tools, &input).unwrap().video.unwrap();
+    assert!(source.color.is_hdr(), "{:?}", source.color);
+
+    // Without --codec, HDR becomes 10-bit HEVC with the same color description.
+    let output = env.out.join("hdr-1.mp4");
+    let mut hevc = job(input.clone(), output.clone(), Quality::Small);
+    hevc.recipe.video.encoder = peraz_core::EncoderPreference::Software;
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &hevc,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(report.encoder.as_deref(), Some("libx265, HDR kept"));
+    let result = probe(&env.tools, &output).unwrap().video.unwrap();
+    assert_eq!(result.codec, "hevc");
+    assert_eq!(result.pixel_format.as_deref(), Some("yuv420p10le"));
+    assert_eq!(result.color, source.color);
+
+    // Asking for H.264 explicitly fails with advice, and writes nothing.
+    let refused = env.out.join("hdr-h264.mp4");
+    let mut h264 = job(input, refused.clone(), Quality::Small);
+    h264.recipe.video.codec = Some(peraz_core::VideoCodec::H264);
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &h264,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    let Outcome::Failed { message } = report.outcome else {
+        panic!("{:?}", report.outcome)
+    };
+    assert!(message.contains("--codec hevc"), "{message}");
+    assert!(!refused.exists());
+}

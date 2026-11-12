@@ -85,8 +85,32 @@ pub struct VideoTrack {
     pub frame_rate: Option<Rational>,
     pub frame_count: Option<u64>,
     pub pixel_format: Option<String>,
+    /// Color description from the stream, to be carried over when re-encoding.
+    #[serde(default)]
+    pub color: ColorInfo,
     pub alpha: Alpha,
     pub bit_rate: Option<u64>,
+}
+
+/// How a video's pixel values map to colors, in FFmpeg's names. `None` when the file does not
+/// say, so nothing is written for it either.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorInfo {
+    /// Color primaries, e.g. `bt709`, `bt2020`.
+    pub primaries: Option<String>,
+    /// Transfer characteristics, e.g. `bt709`, `smpte2084` (PQ), `arib-std-b67` (HLG).
+    pub transfer: Option<String>,
+    /// Matrix coefficients, e.g. `bt709`, `bt2020nc`.
+    pub matrix: Option<String>,
+    /// `tv` (limited) or `pc` (full).
+    pub range: Option<String>,
+}
+
+impl ColorInfo {
+    /// High dynamic range: a PQ (HDR10, Dolby Vision) or HLG transfer.
+    pub fn is_hdr(&self) -> bool {
+        matches!(self.transfer.as_deref(), Some("smpte2084" | "arib-std-b67"))
+    }
 }
 
 impl VideoTrack {
@@ -174,6 +198,7 @@ mod tests {
             frame_rate: None,
             frame_count: frames,
             pixel_format: None,
+            color: ColorInfo::default(),
             alpha: Alpha::Absent,
             bit_rate: None,
         }

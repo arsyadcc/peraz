@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use peraz_core::{Alpha, AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};
+use peraz_core::{Alpha, AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
 use serde::Deserialize;
 
 use crate::EngineError;
@@ -214,6 +214,10 @@ struct RawStream {
     width: Option<u32>,
     height: Option<u32>,
     pix_fmt: Option<String>,
+    color_primaries: Option<String>,
+    color_transfer: Option<String>,
+    color_space: Option<String>,
+    color_range: Option<String>,
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     nb_frames: Option<String>,
@@ -248,8 +252,24 @@ impl RawStream {
                     .map_or(Alpha::Unknown, Alpha::from_pixel_format)
             },
             pixel_format,
+            color: self.color(),
             bit_rate: parse_num(self.bit_rate.as_deref()),
         })
+    }
+
+    /// The stream's color description; `ffprobe` reports what is not set as `unknown`.
+    fn color(&self) -> ColorInfo {
+        let known = |value: &Option<String>| {
+            value
+                .clone()
+                .filter(|v| !matches!(v.as_str(), "unknown" | "unspecified" | "reserved"))
+        };
+        ColorInfo {
+            primaries: known(&self.color_primaries),
+            transfer: known(&self.color_transfer),
+            matrix: known(&self.color_space),
+            range: known(&self.color_range),
+        }
     }
 
     fn audio_track(&self) -> AudioTrack {
