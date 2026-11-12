@@ -31,12 +31,16 @@ flate2.workspace = true
 quick-xml.workspace = true
 ravif.workspace = true
 png.workspace = true
+libdeflater = { workspace = true, optional = true }
 
 [features]
 # SIMD JPEG encoding (much faster). Needs `nasm` on x86/x86_64 build machines; enable for releases.
 simd-jpeg = ["mozjpeg/nasm_simd"]
 # Assembly for the AV1 encoder (much faster AVIF). Needs `nasm` on x86/x86_64; enable for releases.
 simd-avif = ["ravif/asm"]
+# Link the system libdeflate (found with pkg-config) instead of building the bundled copy. The
+# JPEG and WebP encoders have no such option in their crates and stay bundled.
+system-libs = ["dep:libdeflater", "libdeflater/dynamic"]
 
 [lints]
 workspace = true

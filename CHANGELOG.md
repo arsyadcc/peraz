@@ -20,6 +20,10 @@ alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a
 - Reference documentation in `docs/`: every command, flag, environment variable, and exit code
   ([cli.md](docs/cli.md)), every `--json` field ([json.md](docs/json.md)), and the recipe format
   ([recipes.md](docs/recipes.md)). Tests fail when the interface and the docs disagree.
+- A Homebrew formula that builds from source (`packaging/homebrew/peraz.rb`), tested on macOS
+  and Linux in CI. From 0.1.0 on, the tap installs stable versions with it.
+- Build feature `system-libs`: links the system's libdeflate (found with `pkg-config`) instead of
+  the bundled copy.
 - **Interface:** `--json` probe and report output include each video's color description
   (`color`: `primaries`, `transfer`, `matrix`, `range`), and `peraz probe` shows `HDR (PQ)` or
   `HDR (HLG)`.

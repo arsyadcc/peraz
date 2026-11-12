@@ -798,6 +798,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7870e5fbd2766179a937c725fb11f4ca0ef025d982beb61bd3ce755425bd19c"
 dependencies = [
  "cc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1143,6 +1144,7 @@ dependencies = [
  "gif",
  "image",
  "imagequant",
+ "libdeflater",
  "lopdf",
  "moxcms",
  "mozjpeg",
@@ -1158,6 +1160,12 @@ dependencies = [
  "webp",
  "zip",
 ]
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "png"

@@ -28,6 +28,9 @@ serde_json.workspace = true
 [features]
 # SIMD JPEG and AVIF encoding for release builds (needs `nasm` on x86/x86_64 build machines).
 simd = ["peraz-engine/simd-jpeg", "peraz-engine/simd-avif"]
+# Link system libraries where the dependencies allow it (libdeflate, through pkg-config), for
+# package managers that build from source.
+system-libs = ["peraz-engine/system-libs"]
 
 [package.metadata.dist]
 # The workspace is not published to crates.io yet, but the CLI is released with dist.

@@ -1,0 +1,67 @@
+# Runs after each successful release, once dist has pushed its formula to the tap.
+# - Alpha and beta versions keep dist's formula, which installs the prebuilt binaries; it has no
+#   hook for shell completions, so this adds the line that installs them.
+# - Stable versions replace it with packaging/homebrew/peraz.rb, which builds from the release's
+#   source tarball (the formula that can go to homebrew-core).
+name: Homebrew tap
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0
+        required: true
+
+jobs:
+  formula:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: peraz
+      - uses: actions/checkout@v4
+        with:
+          repository: arsyadcc/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Update the formula
+        working-directory: tap
+        run: |
+          formula=Formula/peraz.rb
+          case "$TAG" in
+            v*-*)
+              if grep -q generate_completions_from_executable "$formula"; then
+                echo "The formula already installs completions."
+                exit 0
+              fi
+              # `peraz completions bash|zsh|fish` prints each script.
+              sed -i 's|^    install_binary_aliases!$|    install_binary_aliases!\n\n    generate_completions_from_executable(bin/"peraz", "completions")|' "$formula"
+              grep -q generate_completions_from_executable "$formula"
+              message="peraz: install shell completions"
+              ;;
+            v*)
+              url="https://github.com/arsyadcc/peraz/archive/refs/tags/$TAG.tar.gz"
+              sha=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+              sed -e "s|^  url \".*\"|  url \"$url\"|" \
+                  -e "s|^  sha256 \".*\"|  sha256 \"$sha\"|" \
+                  ../peraz/packaging/homebrew/peraz.rb > "$formula"
+              grep -q "$sha" "$formula"
+              message="peraz ${TAG#v}: build from source"
+              ;;
+            *)
+              echo "Not a release tag: $TAG" >&2
+              exit 1
+              ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "$message"
+          git push

@@ -1,0 +1,58 @@
+# Builds the source formula (packaging/homebrew/peraz.rb) from this commit with Homebrew, then
+# runs `brew test` and `brew audit --strict --new`, on macOS and Linux. Runs when the formula or
+# the build manifests change, and by hand.
+name: Homebrew formula
+
+on:
+  pull_request:
+    paths:
+      - packaging/homebrew/**
+      - .github/workflows/homebrew-formula.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+  push:
+    branches: [main]
+    paths:
+      - packaging/homebrew/**
+      - .github/workflows/homebrew-formula.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formula:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Homebrew/actions/setup-homebrew@main
+      - name: Put the formula in a local tap, pointing at this commit
+        run: |
+          # Homebrew reads the version from the file name; the test checks `peraz --version`.
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tarball="$RUNNER_TEMP/peraz-$version.tar.gz"
+          git archive --prefix="peraz-$version/" -o "$tarball" HEAD
+          sha=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
+          brew tap-new --no-git peraz/test
+          formula="$(brew --repository peraz/test)/Formula/peraz.rb"
+          sed -e "s|^  url \".*\"|  url \"file://$tarball\"|" \
+              -e "s|^  sha256 \".*\"|  sha256 \"$sha\"|" \
+              packaging/homebrew/peraz.rb > "$formula"
+      - name: Build from source
+        run: brew install --build-from-source --verbose peraz/test/peraz
+      - name: Test
+        run: brew test --verbose peraz/test/peraz
+      - name: Audit
+        run: brew audit --strict --new peraz/test/peraz

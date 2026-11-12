@@ -281,6 +281,19 @@ cargo build --release             # toolchain pinned in rust-toolchain.toml
 Release builds use SIMD for JPEG and AVIF encoding (about 1.6x and 2x faster than a plain build);
 build with `--features simd` to get the same, which needs `nasm` on x86 machines.
 
+What a build needs besides Rust 1.99:
+
+| Machine | `--features simd` | `--features system-libs` |
+| --- | --- | --- |
+| Apple Silicon, Linux arm64 | nothing more | `pkg-config` and libdeflate |
+| Intel Mac, Linux x86_64 | `nasm` | `pkg-config` and libdeflate |
+| Windows x86_64 | `nasm` on `PATH` | not tested |
+
+`system-libs` links the system's libdeflate instead of building the bundled copy, for package
+managers that build from source. The JPEG (mozjpeg) and WebP (libwebp) encoders are always built
+from the copies bundled in their Rust crates. The Homebrew formula that builds from source is in
+[`packaging/homebrew/peraz.rb`](packaging/homebrew/peraz.rb).
+
 ```sh
 cargo test --workspace            # integration tests run when ./fixtures exists
 cargo clippy --workspace --all-targets -- -D warnings
@@ -297,6 +310,7 @@ crates/peraz/           The `peraz` binary
 scripts/                Test fixtures and video preset calibration
 dist-workspace.toml     Release builds and installers (cargo-dist)
 deny.toml               Allowed dependency licenses
+packaging/homebrew/     Homebrew formula that builds from source
 ```
 
 ## License
