@@ -44,9 +44,11 @@ install FFmpeg with your package manager, then check with `peraz doctor`.
 **With Cargo** (Rust 1.99 or newer), from [crates.io](https://crates.io/crates/peraz):
 
 ```sh
-cargo install --locked peraz                    # or --features simd for faster JPEG and AVIF (needs nasm on x86)
-cargo install --locked --path crates/peraz      # from a clone of this repository
+cargo install --locked peraz --version '^0.1.0-alpha'   # add --features simd for faster JPEG and AVIF (needs nasm on x86)
+cargo install --locked --path crates/peraz              # from a clone of this repository
 ```
+
+Cargo only installs alpha versions when asked for one, hence `--version` until Peraz 0.1.0.
 
 ## Quick start
 
