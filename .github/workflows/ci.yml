@@ -55,3 +55,21 @@ jobs:
       - run: cargo run --locked -- doctor
       - run: cargo run --locked -- probe fixtures/*.mp4 fixtures/*.png
       - run: cargo run --locked -- compress --out-dir "$RUNNER_TEMP" fixtures/*.mp4
+
+  integration-macos:
+    name: integration (macos, Homebrew FFmpeg)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install ffmpeg
+      - run: ffmpeg -version | head -1
+      # sips makes the HEIC samples, so only this job tests HEIC end to end.
+      - run: ./scripts/make-fixtures.sh
+      - run: cargo test --workspace --locked -- --nocapture 2>&1 | tee test.log
+      - name: no test skipped for a missing sample
+        run: "! grep -F 'skipped: ' test.log"
