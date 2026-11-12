@@ -44,7 +44,8 @@ pub struct Args {
     settings: SettingsArgs,
 
     /// Write outputs into this folder (subfolders are mirrored with --recursive). Default: next to
-    /// each input as `<name>-peraz.<ext>`.
+    /// each input as `<name>-1.<ext>`. Files named `<name>-<number>.<ext>` next to a `<name>.*`
+    /// file are taken as earlier results and never compressed again.
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
 
@@ -236,10 +237,20 @@ fn scan(folders: &[PathBuf], recursive: bool, out_dir: Option<&Path>) -> Vec<(Pa
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.filter_map(Result::ok) {
+        let entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        // Stems of every file here, to recognize Peraz's own `<name>-<number>.<ext>` outputs.
+        let stems: HashSet<String> = entries
+            .iter()
+            .filter_map(|e| {
+                Path::new(&e.file_name())
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            })
+            .collect();
+        for entry in entries {
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
-            if is_ignored(&path) {
+            if is_ignored(&path) || is_numbered_output(&path, &stems) {
                 continue;
             }
             if meta.is_dir() {
@@ -257,16 +268,22 @@ fn scan(folders: &[PathBuf], recursive: bool, out_dir: Option<&Path>) -> Vec<(Pa
     found
 }
 
-/// Hidden files, partial files, and Peraz's own outputs.
+/// Peraz's own output: `<name>-<number>.<ext>` next to a file named `<name>.<anything>`.
+fn is_numbered_output(path: &Path, stems: &HashSet<String>) -> bool {
+    let Some(stem) = path.file_stem().map(|s| s.to_string_lossy()) else {
+        return false;
+    };
+    stem.rsplit_once('-').is_some_and(|(base, number)| {
+        !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && stems.contains(base)
+    })
+}
+
+/// Hidden and partial files.
 fn is_ignored(path: &Path) -> bool {
     let Some(name) = path.file_name().map(|n| n.to_string_lossy()) else {
         return true;
     };
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_default();
-    name.starts_with('.') || name.ends_with(".peraz-partial") || stem.ends_with("-peraz")
+    name.starts_with('.') || name.ends_with(".peraz-partial")
 }
 
 fn is_media(path: &Path) -> bool {
@@ -331,10 +348,21 @@ mod tests {
 
     #[test]
     fn ignores_outputs_hidden_and_partial_files() {
-        assert!(is_ignored(Path::new("a/clip-peraz.mp4")));
         assert!(is_ignored(Path::new("a/.DS_Store")));
-        assert!(is_ignored(Path::new("a/.clip-peraz.mp4.peraz-partial")));
+        assert!(is_ignored(Path::new("a/.clip-1.mp4.peraz-partial")));
         assert!(!is_ignored(Path::new("a/clip.mp4")));
+        let stems: HashSet<String> = ["clip", "clip-1", "IMG_0042", "2024-05"]
+            .map(String::from)
+            .into();
+        assert!(is_numbered_output(Path::new("a/clip-1.mp4"), &stems));
+        assert!(is_numbered_output(Path::new("a/clip-12.webp"), &stems));
+        assert!(is_numbered_output(Path::new("a/clip-1-1.mp4"), &stems));
+        assert!(is_numbered_output(Path::new("a/IMG_0042-3.jpg"), &stems));
+        // No `photo.*` here, or not a number: the user's own files.
+        assert!(!is_numbered_output(Path::new("a/photo-1.jpg"), &stems));
+        assert!(!is_numbered_output(Path::new("a/clip-final.mp4"), &stems));
+        assert!(!is_numbered_output(Path::new("a/clip-.mp4"), &stems));
+        assert!(!is_numbered_output(Path::new("a/2024-05.png"), &stems));
         assert!(is_media(Path::new("Shot.PNG")) && is_media(Path::new("book.epub")));
         assert!(!is_media(Path::new("notes.txt")));
     }
@@ -360,10 +388,13 @@ mod tests {
         for file in [
             "a.jpg",
             "sub/b.png",
-            "out/c-peraz.png",
+            "out/c-1.png",
             "out/d.png",
             "notes.txt",
-            "e-peraz.jpg",
+            "a-1.jpg",
+            "a-2.webp",
+            "sub/b-1.png",
+            "f-1.jpg",
         ] {
             std::fs::write(root.join(file), b"x").unwrap();
         }
@@ -378,9 +409,10 @@ mod tests {
             })
             .collect();
         names.sort();
-        assert_eq!(names, ["a.jpg", "sub/b.png"]);
+        // `f-1.jpg` has no `f.*` next to it, so it is the user's file, not an output.
+        assert_eq!(names, ["a.jpg", "f-1.jpg", "sub/b.png"]);
         let flat = scan(std::slice::from_ref(&root), false, Some(&out));
-        assert_eq!(flat.len(), 1);
+        assert_eq!(flat.len(), 2);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

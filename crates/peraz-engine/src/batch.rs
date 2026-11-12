@@ -197,12 +197,12 @@ mod tests {
     #[test]
     fn outputs_are_claimed_once() {
         let batch = Batch::unlimited();
-        assert!(batch.claim(Path::new("out/a-peraz.webp")));
-        assert!(!batch.claim(Path::new("out/a-peraz.webp")));
+        assert!(batch.claim(Path::new("out/a-1.webp")));
+        assert!(!batch.claim(Path::new("out/a-1.webp")));
         assert!(
-            !batch.claim(Path::new("out/../out/./a-peraz.webp")),
+            !batch.claim(Path::new("out/../out/./a-1.webp")),
             "same file, other spelling"
         );
-        assert!(batch.claim(Path::new("out/b-peraz.webp")));
+        assert!(batch.claim(Path::new("out/b-1.webp")));
     }
 }

@@ -126,10 +126,10 @@ fn run(
             };
             report.plan = Some(Plan::Video(plan.clone()));
             report.encoder = Some(plan.encoder.ffmpeg_name().to_owned());
-            let output = job.output.resolve(&job.input, "mp4");
-            if let Err(outcome) = check_output_path(batch, job, &output) {
-                return outcome;
-            }
+            let output = match choose_output(batch, job, "mp4") {
+                Ok(output) => output,
+                Err(outcome) => return outcome,
+            };
             if plan.target.is_some() {
                 return encode_to_target(
                     tools, job, &info, plan, &output, progress, cancel, report,
@@ -194,10 +194,10 @@ fn make_image(
         Err(e) => return failed(e.to_string()),
     };
     report.plan = Some(Plan::Image(plan.clone()));
-    let output = job.output.resolve(&job.input, plan.extension);
-    if let Err(outcome) = check_output_path(batch, job, &output) {
-        return outcome;
-    }
+    let output = match choose_output(batch, job, plan.extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
     let decoded = match plan.decoder {
         ImageDecoder::Native => decode_native(&job.input),
         ImageDecoder::Ffmpeg => crate::heif::decode(tools, &job.input),
@@ -241,10 +241,10 @@ fn make_document(
     } else {
         "epub"
     };
-    let output = job.output.resolve(&job.input, extension);
-    if let Err(outcome) = check_output_path(batch, job, &output) {
-        return outcome;
-    }
+    let output = match choose_output(batch, job, extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
     let result = if info.kind == MediaKind::Pdf {
         crate::pdf::compress_pdf(&job.input, &plan)
     } else {
@@ -296,10 +296,10 @@ fn make_gif(
         }
     };
     report.plan = Some(Plan::Gif(plan.clone()));
-    let output = job.output.resolve(&job.input, "gif");
-    if let Err(outcome) = check_output_path(batch, job, &output) {
-        return outcome;
-    }
+    let output = match choose_output(batch, job, "gif") {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
     // Playing time being converted, for progress: the selected range, else the whole source.
     let total = info.duration_seconds.unwrap_or(0.0);
     #[allow(clippy::cast_precision_loss)]
@@ -345,10 +345,10 @@ fn make_animated(
     };
     report.plan = Some(Plan::Animated(plan.clone()));
     report.encoder = Some(format!("{} · {} fps", plan.encoder, plan.fps));
-    let output = job.output.resolve(&job.input, plan.extension);
-    if let Err(outcome) = check_output_path(batch, job, &output) {
-        return outcome;
-    }
+    let output = match choose_output(batch, job, plan.extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
     // Seek before the input for speed; limit the length there too, so progress matches it.
     let before_input = clip_args(Clip {
         start_ms: plan.start_ms,
@@ -434,10 +434,10 @@ fn make_trim(
         }
         (TrimMethod::Reencode, None) => "re-encoded".to_owned(),
     });
-    let output = job.output.resolve(&job.input, &plan.extension);
-    if let Err(outcome) = check_output_path(batch, job, &output) {
-        return outcome;
-    }
+    let output = match choose_output(batch, job, &plan.extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
     let clip = Clip {
         start_ms: Some(plan.start_ms),
         duration_ms: plan.duration_ms,
@@ -712,6 +712,51 @@ fn kind_name(kind: MediaKind) -> &'static str {
     }
 }
 
+/// Highest number tried for `<name>-<number>.<ext>` before giving up.
+const MAX_OUTPUT_NUMBER: u32 = 9999;
+
+/// The output path for this job. Numbered names take the first `<name>-<number>.<ext>` that
+/// neither exists nor belongs to another job of this batch, so nothing is ever replaced; an
+/// explicit `--output` file goes through the usual checks.
+fn choose_output(batch: &Batch, job: &Job, extension: &str) -> Result<PathBuf, Outcome> {
+    let first = job.output.resolve(&job.input, extension, 1);
+    if !job.output.is_numbered() {
+        check_output_path(batch, job, &first)?;
+        return Ok(first);
+    }
+    if job.existing == ExistingOutput::Skip && first.exists() {
+        return Err(Outcome::Skipped {
+            message: format!("already compressed: {} exists", first.display()),
+        });
+    }
+    check_output_folder(&first)?;
+    for number in 1..=MAX_OUTPUT_NUMBER {
+        let candidate = job.output.resolve(&job.input, extension, number);
+        if !candidate.exists() && batch.claim(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(Outcome::Failed {
+        message: format!(
+            "every name up to {} is taken; move some results away or use --output",
+            job.output
+                .resolve(&job.input, extension, MAX_OUTPUT_NUMBER)
+                .display()
+        ),
+    })
+}
+
+fn check_output_folder(output: &Path) -> Result<(), Outcome> {
+    if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty())
+        && !dir.is_dir()
+    {
+        return Err(Outcome::Failed {
+            message: format!("output folder {} does not exist", dir.display()),
+        });
+    }
+    Ok(())
+}
+
 fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outcome> {
     let fail = |message: String| Outcome::Failed { message };
     let same_file = match (
@@ -748,15 +793,7 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
             }
         }
     }
-    if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty())
-        && !dir.is_dir()
-    {
-        return Err(fail(format!(
-            "output folder {} does not exist",
-            dir.display()
-        )));
-    }
-    Ok(())
+    check_output_folder(output)
 }
 
 /// A hidden sibling of the output, so a crash never leaves a half-written file under the final name.
@@ -902,8 +939,8 @@ mod tests {
     #[test]
     fn partial_file_is_hidden_next_to_output() {
         assert_eq!(
-            partial_path(Path::new("/a/b/clip-peraz.mp4")),
-            PathBuf::from("/a/b/.clip-peraz.mp4.peraz-partial")
+            partial_path(Path::new("/a/b/clip-1.mp4")),
+            PathBuf::from("/a/b/.clip-1.mp4.peraz-partial")
         );
     }
 }

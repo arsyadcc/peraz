@@ -18,7 +18,7 @@
 
 ```console
 $ peraz compress peraz-icon.png
-peraz-icon.png → peraz-icon-peraz.png
+peraz-icon.png → peraz-icon-1.png
   199 kB → 47.1 kB (−76%) · imagequant q88 + oxipng · 0.2 s
 ```
 
@@ -50,7 +50,7 @@ cargo install --locked --path crates/peraz-cli
 ## Quick start
 
 ```sh
-peraz compress clip.mov                          # → clip-peraz.mp4 (H.264, balanced quality)
+peraz compress clip.mov                          # → clip-1.mp4 (H.264, balanced quality)
 peraz compress --target-size 25MB long-video.mov # fits under 25 MB, verified
 peraz compress --format webp photos/*            # smaller pictures for the web
 peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF
@@ -62,8 +62,9 @@ peraz doctor                                     # which FFmpeg is used and what
 
 - **Never worse** — if the compressed file is not smaller, it is thrown away and the report says
   why. A file over `--target-size` is never kept either.
-- **Safe by default** — existing files are never overwritten without `--force`, a half-written
-  file never appears under the final name, and Ctrl-C stops cleanly and removes partial output.
+- **Safe by default** — results are numbered (`photo.jpg` → `photo-1.jpg`, then `photo-2.jpg`, …)
+  so no file is ever replaced; with `--output`, an existing file is replaced only with `--force`.
+  A half-written file never appears under the final name, and Ctrl-C stops cleanly and removes partial output.
 - **Video** — H.264 and HEVC with five quality levels calibrated with VMAF, scaling without ever
   upscaling, optional audio removal, and hardware encoding with VideoToolbox on macOS.
 - **Target size** — `--target-size 25MB` computes the bit rates, runs two passes, measures the
@@ -104,7 +105,7 @@ Encrypted PDFs and DRM-protected EPUBs are skipped.
 ## Usage
 
 ```sh
-peraz compress clip.mov                         # → clip-peraz.mp4 (H.264, balanced quality)
+peraz compress clip.mov                         # → clip-1.mp4 (H.264, balanced quality)
 peraz compress -q small --codec hevc *.mp4      # smaller files
 peraz compress --encoder hardware --max-width 1280 --no-audio clip.mov
 peraz compress --target-size 25MB long-video.mov      # fits, verified (two-pass with x264/x265)
@@ -113,7 +114,7 @@ peraz compress --trim-only --start 0:12 --duration 10 clip.mov   # cut only: los
 peraz compress photo.jpg screenshot.png          # mozjpeg / palette PNG + oxipng
 peraz compress --format jpeg --max-width 2000 *.png
 peraz compress --format webp *.png *.jpg           # or --format avif (smallest, slower)
-peraz compress IMG_0042.HEIC                       # → IMG_0042-peraz.jpg, upright, colors kept
+peraz compress IMG_0042.HEIC                       # → IMG_0042-1.jpg, upright, colors kept
 peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF (480 px, 12 fps)
 peraz compress -q small reaction.gif               # smaller GIF, same timing
 peraz compress --format webp clip.mp4              # animated WebP (or avif: smallest)

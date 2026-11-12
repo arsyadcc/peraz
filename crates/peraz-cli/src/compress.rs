@@ -90,14 +90,15 @@ pub struct SettingsArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// Files to compress: videos (MP4/MOV/MKV/…) and images (JPEG, PNG, WebP, HEIC, AVIF; BMP/TIFF with --format).
+    /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF; BMP/TIFF with --format), GIFs, PDFs, and EPUBs.
     #[arg(required = true)]
     files: Vec<PathBuf>,
 
     #[command(flatten)]
     pub settings: SettingsArgs,
 
-    /// Output file (only with a single input). Default: `<name>-peraz.<ext>` next to the input.
+    /// Output file (only with a single input). Default: `<name>-1.<ext>` next to the input, or
+    /// `-2`, `-3`, … when that name is taken: existing files are never replaced.
     #[arg(short, long, value_name = "FILE", conflicts_with = "out_dir")]
     output: Option<PathBuf>,
 
@@ -105,7 +106,7 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
 
-    /// Replace existing output files.
+    /// With --output, replace that file if it exists.
     #[arg(short, long)]
     force: bool,
 

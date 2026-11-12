@@ -49,7 +49,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compress videos (images and GIFs are coming).
+    /// Compress videos, images, GIFs, PDFs, and EPUBs.
     Compress(compress::Args),
     /// Show what Peraz knows about media files.
     Probe(probe::Args),

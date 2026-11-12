@@ -11,29 +11,35 @@ use crate::recipe::Recipe;
 /// Where the result of a job goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputTarget {
-    /// `<name>-peraz.<ext>` next to the input.
+    /// `<name>-<number>.<ext>` next to the input, with the first number not taken yet.
     NextToInput,
-    /// `<name>-peraz.<ext>` in this folder.
+    /// `<name>-<number>.<ext>` in this folder, with the first number not taken yet.
     Folder(PathBuf),
     /// Exactly this file.
     File(PathBuf),
 }
 
 impl OutputTarget {
-    /// The output path for `input`, given the extension the plan produces.
-    pub fn resolve(&self, input: &Path, extension: &str) -> PathBuf {
+    /// The output path for `input`, given the extension the plan produces. Numbered targets use
+    /// `number` (from 1); the caller picks the first one whose file does not exist yet.
+    pub fn resolve(&self, input: &Path, extension: &str, number: u32) -> PathBuf {
         let name = || {
             let stem = input
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            format!("{stem}-peraz.{extension}")
+            format!("{stem}-{number}.{extension}")
         };
         match self {
             Self::NextToInput => input.with_file_name(name()),
             Self::Folder(dir) => dir.join(name()),
             Self::File(path) => path.clone(),
         }
+    }
+
+    /// Whether the name carries a number, so an existing file is never replaced.
+    pub fn is_numbered(&self) -> bool {
+        !matches!(self, Self::File(_))
     }
 }
 
@@ -150,20 +156,22 @@ mod tests {
     fn output_names_follow_the_plan_extension() {
         let input = Path::new("shots/photo.HEIC");
         assert_eq!(
-            OutputTarget::NextToInput.resolve(input, "jpg"),
-            PathBuf::from("shots/photo-peraz.jpg")
+            OutputTarget::NextToInput.resolve(input, "jpg", 1),
+            PathBuf::from("shots/photo-1.jpg")
         );
         assert_eq!(
-            OutputTarget::NextToInput.resolve(Path::new("clip.mov"), "mp4"),
-            PathBuf::from("clip-peraz.mp4")
+            OutputTarget::NextToInput.resolve(Path::new("clip.mov"), "mp4", 12),
+            PathBuf::from("clip-12.mp4")
         );
         assert_eq!(
-            OutputTarget::Folder("out".into()).resolve(input, "png"),
-            PathBuf::from("out/photo-peraz.png")
+            OutputTarget::Folder("out".into()).resolve(input, "png", 2),
+            PathBuf::from("out/photo-2.png")
         );
         assert_eq!(
-            OutputTarget::File("x.bin".into()).resolve(input, "png"),
+            OutputTarget::File("x.bin".into()).resolve(input, "png", 3),
             PathBuf::from("x.bin")
         );
+        assert!(OutputTarget::NextToInput.is_numbered());
+        assert!(!OutputTarget::File("x.bin".into()).is_numbered());
     }
 }

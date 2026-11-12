@@ -71,7 +71,7 @@ static NOT_CANCELLED: AtomicBool = AtomicBool::new(false);
 #[test]
 fn compresses_video_and_writes_only_the_final_file() {
     let Some(env) = setup("basic") else { return };
-    let output = env.out.join("clip-peraz.mp4");
+    let output = env.out.join("clip-1.mp4");
     let job = job(
         env.fixtures.join("video-720p-noaudio.mp4"),
         output.clone(),
@@ -98,7 +98,7 @@ fn compresses_video_and_writes_only_the_final_file() {
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(leftovers, [std::ffi::OsString::from("clip-peraz.mp4")]);
+    assert_eq!(leftovers, [std::ffi::OsString::from("clip-1.mp4")]);
 }
 
 #[test]
@@ -592,7 +592,7 @@ fn makes_animated_webp_and_avif_and_turns_gifs_into_mp4() {
 }
 
 #[test]
-fn a_batch_never_writes_one_output_twice() {
+fn a_batch_numbers_outputs_that_would_share_a_name() {
     let Some(env) = setup("batch") else { return };
     let batch = peraz_engine::batch::Batch::new(1, 4);
     let make = |input: &str| {
@@ -601,7 +601,7 @@ fn a_batch_never_writes_one_output_twice() {
         job.recipe.image.format = ImageFormat::Webp;
         job
     };
-    // Both inputs are named `image-photo.*`, so both want `image-photo-peraz.webp`.
+    // Both inputs are named `image-photo.*`, so both would be `image-photo-1.webp`.
     let (first, second) = std::thread::scope(|scope| {
         let a = scope.spawn(|| {
             peraz_engine::compress::compress_in(
@@ -630,20 +630,47 @@ fn a_batch_never_writes_one_output_twice() {
         });
         (a.join().unwrap(), b.join().unwrap())
     });
-    let outcomes = [&first.outcome, &second.outcome];
+    let mut outputs: Vec<String> = [&first.outcome, &second.outcome]
+        .iter()
+        .map(|o| match o {
+            Outcome::Compressed { output, .. } => {
+                output.file_name().unwrap().to_string_lossy().into_owned()
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        })
+        .collect();
+    outputs.sort();
+    assert_eq!(outputs, ["image-photo-1.webp", "image-photo-2.webp"]);
+}
+
+#[test]
+fn compressing_again_takes_the_next_number_and_replaces_nothing() {
+    let Some(env) = setup("numbered") else { return };
+    let input = env.out.join("photo.jpg");
+    std::fs::copy(env.fixtures.join("image-photo.jpg"), &input).unwrap();
+    // A file of the user's that already has the first name.
+    std::fs::write(env.out.join("photo-1.jpg"), b"keep me").unwrap();
+    let mut job = job(input, PathBuf::new(), Quality::Small);
+    job.output = OutputTarget::NextToInput;
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        let Outcome::Compressed { output, .. } = report.outcome else {
+            panic!("unexpected outcome: {:?}", report.outcome)
+        };
+        names.push(output.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    assert_eq!(names, ["photo-2.jpg", "photo-3.jpg"]);
     assert_eq!(
-        outcomes
-            .iter()
-            .filter(|o| matches!(o, Outcome::Compressed { .. }))
-            .count(),
-        1,
-        "{outcomes:?}"
+        std::fs::read(env.out.join("photo-1.jpg")).unwrap(),
+        b"keep me"
     );
-    let failure = outcomes.iter().find_map(|o| match o {
-        Outcome::Failed { message } => Some(message.clone()),
-        _ => None,
-    });
-    assert!(failure.unwrap().contains("another file in this batch"));
 }
 
 #[test]
