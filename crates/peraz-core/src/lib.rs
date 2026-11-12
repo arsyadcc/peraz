@@ -33,6 +33,10 @@ mod tests {
 
     #[test]
     fn version_is_semver() {
-        assert_eq!(VERSION.split('.').count(), 3);
+        // MAJOR.MINOR.PATCH, optionally followed by a pre-release or build suffix (0.1.0-alpha.1)
+        let core = VERSION.split(['-', '+']).next().unwrap_or_default();
+        let parts: Vec<&str> = core.split('.').collect();
+        assert_eq!(parts.len(), 3, "{VERSION}");
+        assert!(parts.iter().all(|p| p.parse::<u64>().is_ok()), "{VERSION}");
     }
 }
