@@ -9,11 +9,12 @@ mod probe;
 mod recipes;
 mod watch;
 
+use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, Parser, Subcommand};
 use peraz_engine::ffmpeg::Toolchain;
 use serde::Serialize;
 
@@ -37,7 +38,14 @@ pub mod exit {
 
 /// Peraz: a media compressor whose results you can trust.
 #[derive(Debug, Parser)]
-#[command(name = "peraz", version = peraz_engine::VERSION, about)]
+#[command(
+    name = "peraz",
+    version = peraz_engine::VERSION,
+    about,
+    override_usage = "peraz [OPTIONS] <FILES>...\n       peraz <COMMAND>",
+    after_help = "`peraz <FILES>...` is short for `peraz compress <FILES>...`: run `peraz compress --help` for its options.",
+    arg_required_else_help = true
+)]
 struct Cli {
     /// Path to the ffmpeg binary (or its directory). Overrides PERAZ_FFMPEG and PATH.
     #[arg(long, global = true, value_name = "PATH")]
@@ -63,7 +71,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(with_default_command(std::env::args_os().collect()));
     let ffmpeg = cli.ffmpeg.as_deref();
     let code = match &cli.command {
         Command::Compress(args) => compress::run(ffmpeg, args),
@@ -73,6 +81,23 @@ fn main() -> ExitCode {
         Command::Watch(args) => watch::run(ffmpeg, args),
     };
     ExitCode::from(code)
+}
+
+/// `peraz photo.jpg` means `peraz compress photo.jpg`: inserts `compress` unless the first
+/// argument names a command or asks for help or the version.
+fn with_default_command(mut args: Vec<OsString>) -> Vec<OsString> {
+    let Some(first) = args.get(1).and_then(|a| a.to_str()) else {
+        return args;
+    };
+    let cli = Cli::command();
+    let is_command = first == "help"
+        || cli
+            .get_subcommands()
+            .any(|c| c.get_name() == first || c.get_all_aliases().any(|a| a == first));
+    if !is_command && !matches!(first, "-h" | "--help" | "-V" | "--version") {
+        args.insert(1, OsString::from("compress"));
+    }
+    args
 }
 
 /// Finds FFmpeg or prints why not.
@@ -105,10 +130,52 @@ fn print_json<T: Serialize>(body: T) {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser as _};
 
     #[test]
     fn cli_definition_is_valid() {
         super::Cli::command().debug_assert();
+    }
+
+    fn rewrite(args: &[&str]) -> Vec<String> {
+        let args = std::iter::once("peraz").chain(args.iter().copied());
+        super::with_default_command(args.map(Into::into).collect())
+            .into_iter()
+            .skip(1)
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn files_and_options_mean_compress() {
+        assert_eq!(rewrite(&["image.png"]), ["compress", "image.png"]);
+        assert_eq!(
+            rewrite(&["-q", "small", "a.mov"]),
+            ["compress", "-q", "small", "a.mov"]
+        );
+        assert_eq!(
+            rewrite(&["--ffmpeg", "/x", "a.mov"]),
+            ["compress", "--ffmpeg", "/x", "a.mov"]
+        );
+        // Commands, help, and the version stay as they are.
+        assert_eq!(rewrite(&["compress", "a.mov"]), ["compress", "a.mov"]);
+        assert_eq!(rewrite(&["doctor"]), ["doctor"]);
+        assert_eq!(rewrite(&["watch", "dir"]), ["watch", "dir"]);
+        assert_eq!(rewrite(&["recipe", "list"]), ["recipe", "list"]);
+        assert_eq!(rewrite(&["help"]), ["help"]);
+        assert_eq!(rewrite(&["--help"]), ["--help"]);
+        assert_eq!(rewrite(&["-V"]), ["-V"]);
+        assert_eq!(rewrite(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn short_form_parses_like_compress() {
+        let cli = super::Cli::try_parse_from(super::with_default_command(
+            ["peraz", "photo.jpg", "-q", "small"]
+                .map(Into::into)
+                .to_vec(),
+        ))
+        .unwrap();
+        assert!(matches!(cli.command, super::Command::Compress(_)));
     }
 }

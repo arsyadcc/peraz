@@ -17,7 +17,7 @@
 > Indonesian *peras*, "to squeeze".
 
 ```console
-$ peraz compress peraz-icon.png
+$ peraz peraz-icon.png
 peraz-icon.png → peraz-icon-1.png
   199 kB → 47.1 kB (−76%) · imagequant q88 + oxipng · 0.2 s
 ```
@@ -50,12 +50,12 @@ cargo install --locked --path crates/peraz
 ## Quick start
 
 ```sh
-peraz compress clip.mov                          # → clip-1.mp4 (H.264, balanced quality)
-peraz compress --target-size 25MB long-video.mov # fits under 25 MB, verified
-peraz compress --format webp photos/*            # smaller pictures for the web
-peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF
-peraz compress report.pdf book.epub              # recompress the pictures inside
-peraz doctor                                     # which FFmpeg is used and what it can encode
+peraz clip.mov                           # → clip-1.mp4 (H.264, balanced quality)
+peraz --target-size 25MB long-video.mov  # fits under 25 MB, verified
+peraz --format webp photos/*             # smaller pictures for the web
+peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF
+peraz report.pdf book.epub               # recompress the pictures inside
+peraz doctor                             # which FFmpeg is used and what it can encode
 ```
 
 ## Features
@@ -104,29 +104,32 @@ Encrypted PDFs and DRM-protected EPUBs are skipped.
 
 ## Usage
 
+`peraz <files>` is short for `peraz compress <files>`; `peraz compress --help` lists every
+option.
+
 ```sh
-peraz compress clip.mov                         # → clip-1.mp4 (H.264, balanced quality)
-peraz compress -q small --codec hevc *.mp4      # smaller files
-peraz compress --encoder hardware --max-width 1280 --no-audio clip.mov
-peraz compress --target-size 25MB long-video.mov      # fits, verified (two-pass with x264/x265)
-peraz compress --start 0:12 --duration 10 clip.mov      # compress just that part
-peraz compress --trim-only --start 0:12 --duration 10 clip.mov   # cut only: lossless when possible
-peraz compress photo.jpg screenshot.png          # mozjpeg / palette PNG + oxipng
-peraz compress --format jpeg --max-width 2000 *.png
-peraz compress --format webp *.png *.jpg           # or --format avif (smallest, slower)
-peraz compress IMG_0042.HEIC                       # → IMG_0042-1.jpg, upright, colors kept
-peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF (480 px, 12 fps)
-peraz compress -q small reaction.gif               # smaller GIF, same timing
-peraz compress --format webp clip.mp4              # animated WebP (or avif: smallest)
-peraz compress --format mp4 reaction.gif           # GIF → MP4, often 70-95% smaller
-peraz compress report.pdf book.epub                # recompress the pictures inside
-peraz compress --json --out-dir out/ media/*     # machine-readable report
-peraz compress --jobs 1 *.mov                      # one at a time, with live progress
-peraz compress --recipe web-images photos/*        # named settings (see Recipes)
+peraz clip.mov                             # → clip-1.mp4 (H.264, balanced quality)
+peraz -q small --codec hevc *.mp4          # smaller files
+peraz --encoder hardware --max-width 1280 --no-audio clip.mov
+peraz --target-size 25MB long-video.mov    # fits, verified (two-pass with x264/x265)
+peraz --start 0:12 --duration 10 clip.mov  # compress just that part
+peraz --trim-only --start 0:12 --duration 10 clip.mov  # cut only: lossless when possible
+peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
+peraz --format jpeg --max-width 2000 *.png
+peraz --format webp *.png *.jpg            # or --format avif (smallest, slower)
+peraz IMG_0042.HEIC                        # → IMG_0042-1.jpg, upright, colors kept
+peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12 fps)
+peraz -q small reaction.gif                # smaller GIF, same timing
+peraz --format webp clip.mp4               # animated WebP (or avif: smallest)
+peraz --format mp4 reaction.gif            # GIF → MP4, often 70-95% smaller
+peraz report.pdf book.epub                 # recompress the pictures inside
+peraz --json --out-dir out/ media/*        # machine-readable report
+peraz --jobs 1 *.mov                       # one at a time, with live progress
+peraz --recipe web-images photos/*         # named settings (see Recipes)
 peraz recipe list
 peraz watch ~/Screenshots --recipe web-images --out-dir ~/Screenshots/small
-peraz probe video.mp4 photo.heic                # inspect media
-peraz doctor                                    # which FFmpeg is used and what it can encode
+peraz probe video.mp4 photo.heic           # inspect media
+peraz doctor                               # which FFmpeg is used and what it can encode
 ```
 
 Quality levels, from largest to smallest file: `highest`, `high`, `balanced` (default), `small`,
@@ -196,7 +199,7 @@ fps = 12                         # GIF and animated WebP/AVIF
 ```
 
 Every key except `version` is optional, and unknown keys are errors. Use one with
-`peraz compress --recipe <name or file.toml>`; flags on the command line override the recipe's
+`peraz --recipe <name or file.toml>`; flags on the command line override the recipe's
 values. `peraz recipe list` shows the built-in recipes and yours; `peraz recipe show <name>`
 prints one as TOML. Your recipes live in `<config dir>/recipes/<name>.toml`, where the config
 dir is `PERAZ_CONFIG_DIR`, or `~/Library/Application Support/peraz` (macOS),
@@ -205,7 +208,7 @@ with the same name as a built-in one replaces it.
 
 ### Project recipes and CI
 
-Put a `peraz.toml` recipe at the root of a project: `peraz compress` and `peraz watch` use the
+Put a `peraz.toml` recipe at the root of a project: `peraz` and `peraz watch` use the
 nearest one found in the current folder or its parents (flags still override it; skip it with
 `--ignore-project-recipe`).
 
@@ -215,7 +218,7 @@ already compressed pass). A GitHub Actions step:
 
 ```yaml
 - name: Check that images are compressed
-  run: peraz compress --check assets/**/*.{jpg,png,webp}
+  run: peraz --check assets/**/*.{jpg,png,webp}
 ```
 
 ### Watch folders
