@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan, PlanError,
-    RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_document, plan_gif,
-    plan_image, plan_video,
+    ExistingOutput, ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan,
+    PlanError, RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_document,
+    plan_gif, plan_image, plan_video,
 };
 
 use crate::batch::{Batch, Lane};
@@ -124,8 +124,8 @@ fn run(
             report.plan = Some(Plan::Video(plan.clone()));
             report.encoder = Some(plan.encoder.ffmpeg_name().to_owned());
             let output = job.output.resolve(&job.input, "mp4");
-            if let Err(message) = check_output_path(batch, job, &output) {
-                return failed(message);
+            if let Err(outcome) = check_output_path(batch, job, &output) {
+                return outcome;
             }
             if plan.target.is_some() {
                 return encode_to_target(
@@ -187,8 +187,8 @@ fn make_image(
     };
     report.plan = Some(Plan::Image(plan.clone()));
     let output = job.output.resolve(&job.input, plan.extension);
-    if let Err(message) = check_output_path(batch, job, &output) {
-        return failed(message);
+    if let Err(outcome) = check_output_path(batch, job, &output) {
+        return outcome;
     }
     let decoded = match plan.decoder {
         ImageDecoder::Native => decode_native(&job.input),
@@ -234,8 +234,8 @@ fn make_document(
         "epub"
     };
     let output = job.output.resolve(&job.input, extension);
-    if let Err(message) = check_output_path(batch, job, &output) {
-        return Outcome::Failed { message };
+    if let Err(outcome) = check_output_path(batch, job, &output) {
+        return outcome;
     }
     let result = if info.kind == MediaKind::Pdf {
         crate::pdf::compress_pdf(&job.input, &plan)
@@ -289,8 +289,8 @@ fn make_gif(
     };
     report.plan = Some(Plan::Gif(plan.clone()));
     let output = job.output.resolve(&job.input, "gif");
-    if let Err(message) = check_output_path(batch, job, &output) {
-        return Outcome::Failed { message };
+    if let Err(outcome) = check_output_path(batch, job, &output) {
+        return outcome;
     }
     // Playing time being converted, for progress: the selected range, else the whole source.
     let total = info.duration_seconds.unwrap_or(0.0);
@@ -338,8 +338,8 @@ fn make_animated(
     report.plan = Some(Plan::Animated(plan.clone()));
     report.encoder = Some(format!("{} · {} fps", plan.encoder, plan.fps));
     let output = job.output.resolve(&job.input, plan.extension);
-    if let Err(message) = check_output_path(batch, job, &output) {
-        return Outcome::Failed { message };
+    if let Err(outcome) = check_output_path(batch, job, &output) {
+        return outcome;
     }
     // Seek before the input for speed; limit the length there too, so progress matches it.
     let mut before_input = Vec::new();
@@ -577,7 +577,8 @@ fn kind_name(kind: MediaKind) -> &'static str {
     }
 }
 
-fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), String> {
+fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outcome> {
+    let fail = |message: String| Outcome::Failed { message };
     let same_file = match (
         std::fs::canonicalize(&job.input),
         std::fs::canonicalize(output),
@@ -586,24 +587,39 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Stri
         _ => false,
     };
     if same_file {
-        return Err("the output path is the input file; choose a different output".to_owned());
+        return Err(fail(
+            "the output path is the input file; choose a different output".to_owned(),
+        ));
     }
     if !batch.claim(output) {
-        return Err(format!(
+        return Err(fail(format!(
             "{} is already the output of another file in this batch; rename one input or use --output",
             output.display()
-        ));
+        )));
     }
-    if output.exists() && !job.overwrite {
-        return Err(format!(
-            "{} already exists (use --force to replace it)",
-            output.display()
-        ));
+    if output.exists() {
+        match job.existing {
+            ExistingOutput::Replace => {}
+            ExistingOutput::Skip => {
+                return Err(Outcome::Skipped {
+                    message: format!("already compressed: {} exists", output.display()),
+                });
+            }
+            ExistingOutput::Fail => {
+                return Err(fail(format!(
+                    "{} already exists (use --force to replace it)",
+                    output.display()
+                )));
+            }
+        }
     }
     if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty())
         && !dir.is_dir()
     {
-        return Err(format!("output folder {} does not exist", dir.display()));
+        return Err(fail(format!(
+            "output folder {} does not exist",
+            dir.display()
+        )));
     }
     Ok(())
 }

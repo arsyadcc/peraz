@@ -43,8 +43,20 @@ pub struct Job {
     pub input: PathBuf,
     pub output: OutputTarget,
     pub recipe: Recipe,
-    /// Replace `output` if it already exists.
-    pub overwrite: bool,
+    /// What to do when the output file already exists.
+    pub existing: ExistingOutput,
+}
+
+/// What to do when a job's output file already exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExistingOutput {
+    /// Fail the job, so nothing is overwritten by accident.
+    #[default]
+    Fail,
+    /// Replace the existing file.
+    Replace,
+    /// Skip the input: it was compressed before (used by watch folders).
+    Skip,
 }
 
 /// Why the original file was kept instead of the compressed one.

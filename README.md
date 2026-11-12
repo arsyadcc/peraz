@@ -25,6 +25,7 @@ peraz compress --json --out-dir out/ media/*     # machine-readable report
 peraz compress --jobs 1 *.mov                      # one at a time, with live progress
 peraz compress --recipe web-images photos/*        # named settings (see Recipes)
 peraz recipe list
+peraz watch ~/Screenshots --recipe web-images --out-dir ~/Screenshots/small
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
 ```
@@ -60,6 +61,16 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 `--format webp` and `--format avif` turn videos and GIFs into animated WebP or AVIF (same
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
 `--format mp4` turns a GIF into an H.264 video.
+
+### Watch folders
+
+`peraz watch <folders>` compresses new files as they appear, with the same flags as `compress`
+(including `--recipe`). A file is picked up once it has stopped changing for two seconds, so files
+still being copied or recorded are never read half-written. Files that were there before watching
+started are left alone unless you pass `--include-existing`, and a file whose output already exists
+is skipped, so restarting a watch never compresses anything twice. `--recursive` includes
+subfolders (mirrored inside `--out-dir`), and `--json` prints one JSON report per line. Stop with
+Ctrl-C.
 
 ### Recipes
 

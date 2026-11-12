@@ -60,7 +60,7 @@ fn job(input: PathBuf, output: PathBuf, quality: Quality) -> Job {
             quality,
             ..Recipe::default()
         },
-        overwrite: false,
+        existing: peraz_core::ExistingOutput::Fail,
     }
 }
 

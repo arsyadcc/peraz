@@ -8,8 +8,8 @@ use std::sync::{Mutex, PoisonError};
 use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, Job, KeepReason, Outcome, OutputTarget, Plan, Quality, Recipe, Report,
-    VideoCodec, VideoPlan,
+    EncoderPreference, ExistingOutput, Job, KeepReason, Outcome, OutputTarget, Plan, Quality,
+    Recipe, Report, VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::BuildInfo;
@@ -17,62 +17,69 @@ use serde::Serialize;
 
 use crate::{exit, locate, print_json, recipes};
 
+/// Flags that describe how files are compressed; shared by `compress` and `watch`.
+#[derive(Debug, clap::Args)]
+pub struct SettingsArgs {
+    /// Use a recipe: a built-in or your own name (see `peraz recipe list`), or a .toml file.
+    /// Flags given here override the recipe's values.
+    #[arg(short, long, value_name = "NAME|FILE")]
+    pub recipe: Option<String>,
+
+    /// Quality level: highest, high, balanced (default), small, smallest.
+    #[arg(short, long, value_parser = parse::<Quality>)]
+    pub quality: Option<Quality>,
+
+    /// Video codec: h264 (default, plays everywhere) or hevc (smaller).
+    #[arg(long, value_parser = parse::<VideoCodec>)]
+    pub codec: Option<VideoCodec>,
+
+    /// Encoder: auto (default, smallest files), software, or hardware (fastest).
+    #[arg(long, value_parser = parse::<EncoderPreference>)]
+    pub encoder: Option<EncoderPreference>,
+
+    /// Scale down to at most this width (never scales up).
+    #[arg(long, value_name = "PIXELS")]
+    pub max_width: Option<u32>,
+
+    /// Scale down to at most this height (never scales up).
+    #[arg(long, value_name = "PIXELS")]
+    pub max_height: Option<u32>,
+
+    /// Output format: keep (default), jpeg, png, webp, avif, gif, mp4. For videos and GIFs,
+    /// webp/avif make animated images, gif makes a GIF, and mp4 turns a GIF into a video.
+    #[arg(long, value_parser = parse_format)]
+    pub format: Option<String>,
+
+    /// Frame rate for GIF and animated WebP/AVIF (default by quality level; never above the source).
+    #[arg(long, value_name = "FPS", value_parser = clap::value_parser!(u32).range(1..=50))]
+    pub fps: Option<u32>,
+
+    /// Start a GIF or animated WebP/AVIF this many seconds into the video (e.g. 12.5).
+    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+    pub start: Option<u64>,
+
+    /// Make a GIF or animated WebP/AVIF at most this many seconds long.
+    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+    pub duration: Option<u64>,
+
+    /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
+    /// Replaces --quality for videos; the result is verified and never larger than the target.
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    pub target_size: Option<String>,
+
+    /// Remove all audio tracks.
+    #[arg(long)]
+    pub no_audio: bool,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Files to compress: videos (MP4/MOV/MKV/…) and images (JPEG, PNG, WebP, HEIC, AVIF; BMP/TIFF with --format).
     #[arg(required = true)]
     files: Vec<PathBuf>,
 
-    /// Use a recipe: a built-in or your own name (see `peraz recipe list`), or a .toml file.
-    /// Flags given here override the recipe's values.
-    #[arg(short, long, value_name = "NAME|FILE")]
-    recipe: Option<String>,
-
-    /// Quality level: highest, high, balanced (default), small, smallest.
-    #[arg(short, long, value_parser = parse::<Quality>)]
-    quality: Option<Quality>,
-
-    /// Video codec: h264 (default, plays everywhere) or hevc (smaller).
-    #[arg(long, value_parser = parse::<VideoCodec>)]
-    codec: Option<VideoCodec>,
-
-    /// Encoder: auto (default, smallest files), software, or hardware (fastest).
-    #[arg(long, value_parser = parse::<EncoderPreference>)]
-    encoder: Option<EncoderPreference>,
-
-    /// Scale down to at most this width (never scales up).
-    #[arg(long, value_name = "PIXELS")]
-    max_width: Option<u32>,
-
-    /// Scale down to at most this height (never scales up).
-    #[arg(long, value_name = "PIXELS")]
-    max_height: Option<u32>,
-
-    /// Output format: keep (default), jpeg, png, webp, avif, gif, mp4. For videos and GIFs,
-    /// webp/avif make animated images, gif makes a GIF, and mp4 turns a GIF into a video.
-    #[arg(long, value_parser = parse_format)]
-    format: Option<String>,
-
-    /// Frame rate for GIF and animated WebP/AVIF (default by quality level; never above the source).
-    #[arg(long, value_name = "FPS", value_parser = clap::value_parser!(u32).range(1..=50))]
-    fps: Option<u32>,
-
-    /// Start a GIF or animated WebP/AVIF this many seconds into the video (e.g. 12.5).
-    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
-    start: Option<u64>,
-
-    /// Make a GIF or animated WebP/AVIF at most this many seconds long.
-    #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
-    duration: Option<u64>,
-
-    /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
-    /// Replaces --quality for videos; the result is verified and never larger than the target.
-    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
-    target_size: Option<String>,
-
-    /// Remove all audio tracks.
-    #[arg(long)]
-    no_audio: bool,
+    #[command(flatten)]
+    pub settings: SettingsArgs,
 
     /// Output file (only with a single input). Default: `<name>-peraz.<ext>` next to the input.
     #[arg(short, long, value_name = "FILE", conflicts_with = "out_dir")]
@@ -137,7 +144,7 @@ struct Output<'a> {
 }
 
 #[derive(Serialize, Default, Clone, Copy)]
-struct Summary {
+pub(crate) struct Summary {
     compressed: usize,
     kept_original: usize,
     skipped: usize,
@@ -158,7 +165,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         eprintln!("error: --out-dir {} is not a folder", dir.display());
         return exit::USAGE;
     }
-    let (recipe, recipe_name) = match recipe(args) {
+    let (recipe, recipe_name) = match recipe(&args.settings) {
         Ok(found) => found,
         Err(e) => {
             eprintln!("error: {e}");
@@ -197,7 +204,11 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         input: input.clone(),
         output: target.clone(),
         recipe: recipe.clone(),
-        overwrite: args.force,
+        existing: if args.force {
+            ExistingOutput::Replace
+        } else {
+            ExistingOutput::Fail
+        },
     };
     // After cancellation every remaining file still gets a report (status `cancelled`), so
     // callers learn the fate of each input; the engine returns immediately for these.
@@ -248,7 +259,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
 
 /// The recipe the command-line flags describe.
 /// The settings the command line describes: flags first, then the recipe, then defaults.
-fn recipe(args: &Args) -> Result<(Recipe, Option<String>), String> {
+pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
     let flags = Settings {
         quality: args.quality,
         format: args.format.clone(),
@@ -316,7 +327,7 @@ fn run_sequential(
 
 /// Several files at once on `workers` threads. Text results print as they finish, prefixed
 /// with a counter; the returned reports keep the input order.
-fn run_parallel(
+pub(crate) fn run_parallel(
     files: &[PathBuf],
     workers: usize,
     json: bool,
@@ -356,7 +367,7 @@ fn run_parallel(
 
 /// First Ctrl-C (or SIGTERM): stop the current file cleanly and skip the rest.
 /// Second Ctrl-C: exit immediately.
-fn install_cancel_handler() -> &'static AtomicBool {
+pub(crate) fn install_cancel_handler() -> &'static AtomicBool {
     static CANCEL: AtomicBool = AtomicBool::new(false);
     let result = ctrlc::set_handler(|| {
         if CANCEL.swap(true, Ordering::SeqCst) {
@@ -370,7 +381,7 @@ fn install_cancel_handler() -> &'static AtomicBool {
     &CANCEL
 }
 
-fn summarize(reports: &[Report]) -> Summary {
+pub(crate) fn summarize(reports: &[Report]) -> Summary {
     let mut summary = Summary::default();
     for report in reports {
         match report.outcome {
@@ -399,7 +410,7 @@ fn percent_saved(before: u64, after: u64) -> String {
     }
 }
 
-fn print_human(report: &Report) {
+pub(crate) fn print_human(report: &Report) {
     let input = report.input.display();
     match &report.outcome {
         Outcome::Compressed {
@@ -450,7 +461,7 @@ fn print_human(report: &Report) {
     }
 }
 
-fn print_summary(summary: &Summary, total: usize) {
+pub(crate) fn print_summary(summary: &Summary, total: usize) {
     let mut parts = vec![format!("{} compressed", summary.compressed)];
     for (count, label) in [
         (summary.kept_original, "kept original"),

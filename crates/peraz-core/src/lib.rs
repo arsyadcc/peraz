@@ -20,7 +20,9 @@ pub use recipe::{
     EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
     VideoOutput, VideoRecipe,
 };
-pub use report::{DocumentStats, Job, KeepReason, Outcome, OutputTarget, Plan, Report};
+pub use report::{
+    DocumentStats, ExistingOutput, Job, KeepReason, Outcome, OutputTarget, Plan, Report,
+};
 
 /// Peraz version, taken from the workspace manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
