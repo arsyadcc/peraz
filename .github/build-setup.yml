@@ -1,0 +1,6 @@
+# Extra steps dist runs on every build runner before building (see dist-workspace.toml).
+- name: Put NASM on PATH (Windows)
+  # Chocolatey installs NASM but does not add it to PATH; rav1e and mozjpeg need it to build.
+  if: runner.os == 'Windows'
+  shell: bash
+  run: echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH"
