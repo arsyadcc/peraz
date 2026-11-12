@@ -380,6 +380,92 @@ fn converts_heic_to_jpeg_with_full_tile_grid() {
     );
 }
 
+/// Asserts that `path` is the upright fixture picture with no orientation tag left: red, green,
+/// blue, and yellow corners at top-left, top-right, bottom-left, bottom-right.
+fn assert_upright(path: &Path, (width, height): (u32, u32), name: &str) {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(path)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap()
+        .into_decoder()
+        .unwrap();
+    assert_eq!(
+        decoder.orientation().unwrap(),
+        image::metadata::Orientation::NoTransforms,
+        "{name}: the orientation is applied to the pixels, so the tag must be gone"
+    );
+    let pixels = image::DynamicImage::from_decoder(decoder)
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(pixels.dimensions(), (width, height), "{name}");
+    // Sample the middle of each corner box (100 px of 800).
+    let inset = width / 16;
+    let corners = [
+        ("top-left", inset, inset, [255, 0, 0]),
+        ("top-right", width - inset, inset, [0, 255, 0]),
+        ("bottom-left", inset, height - inset, [0, 0, 255]),
+        ("bottom-right", width - inset, height - inset, [255, 255, 0]),
+    ];
+    for (corner, x, y, expected) in corners {
+        let got = pixels.get_pixel(x, y).0;
+        assert!(
+            got.iter().zip(expected).all(|(g, e)| g.abs_diff(e) < 48),
+            "{name}: {corner} is {got:?}, expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn applies_every_exif_orientation_to_the_pixels() {
+    let Some(env) = setup("orientation") else {
+        return;
+    };
+    if !env.fixtures.join("image-orientation1.jpg").is_file() {
+        eprintln!("skipped: run scripts/make-fixtures.sh again to add the orientation samples");
+        return;
+    }
+    for n in 1..=8 {
+        let name = format!("image-orientation{n}.jpg");
+        let output = env.out.join(&name);
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job(env.fixtures.join(&name), output.clone(), Quality::Balanced),
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{name}: {:?}",
+            report.outcome
+        );
+        assert_upright(&output, (800, 600), &name);
+    }
+    // The size limit applies to the upright picture: a landscape photo stored as portrait is
+    // limited by its displayed width.
+    let output = env.out.join("resized.jpg");
+    let mut job = job(
+        env.fixtures.join("image-orientation6.jpg"),
+        output.clone(),
+        Quality::Balanced,
+    );
+    job.recipe.image.max_width = Some(400);
+    let report = compress(
+        &env.tools,
+        &env.caps,
+        &job,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_upright(&output, (400, 300), "resized orientation 6");
+}
+
 fn gif_frames(path: &Path) -> (u16, u16, usize, u32) {
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::RGBA);

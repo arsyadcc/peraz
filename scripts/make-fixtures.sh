@@ -30,6 +30,24 @@ ff -f lavfi -i "testsrc2=size=1200x900,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='
    -frames:v 1 image-alpha.png
 ff -i image-opaque.png -q:v 2 image-photo.jpg
 
+echo "JPEGs with EXIF orientations 1-8 that all display the same upright picture"
+# Upright, 800x600: red top-left, green top-right, blue bottom-left, yellow bottom-right corners.
+corners="drawbox=x=0:y=0:w=100:h=100:c=red:t=fill,drawbox=x=iw-100:y=0:w=100:h=100:c=lime:t=fill"
+corners="$corners,drawbox=x=0:y=ih-100:w=100:h=100:c=blue:t=fill,drawbox=x=iw-100:y=ih-100:w=100:h=100:c=yellow:t=fill"
+# Stored pixels are the inverse of the transform each orientation asks a viewer to apply.
+stored=(null hflip hflip,vflip vflip transpose=0 transpose=2 transpose=3 transpose=1)
+for n in 1 2 3 4 5 6 7 8; do
+  ff -f lavfi -i "testsrc2=size=800x600,$corners,${stored[n-1]}" -frames:v 1 -q:v 2 stored.jpg
+  {
+    head -c 2 stored.jpg # SOI
+    # APP1 Exif segment, big-endian TIFF, one IFD entry: Orientation (0x0112), SHORT, value n.
+    printf '\377\341\000\042Exif\000\000MM\000\052\000\000\000\010\000\001\001\022\000\003\000\000\000\001'
+    printf "\\000\\$(printf '%03o' "$n")\\000\\000\\000\\000\\000\\000"
+    tail -c +3 stored.jpg
+  } >"image-orientation$n.jpg"
+done
+rm stored.jpg
+
 echo "animated GIF: 480 px, 3 s"
 ff -f lavfi -i "testsrc2=size=480x270:rate=15:duration=3" \
    -vf "split[a][b];[a]palettegen[p];[b][p]paletteuse" animation.gif
