@@ -337,7 +337,201 @@ fn parse_ipma(payload: &[u8]) -> Option<Vec<(u32, Vec<u16>)>> {
 #[derive(Debug, Clone, Copy)]
 struct Bx<'a> {
     kind: [u8; 4],
+    /// Size of the box header: 8, or 16 with a 64-bit size.
+    header: usize,
     payload: &'a [u8],
+}
+
+/// Adds an ICC profile to a HEIF/AVIF file: a `colr` box of type `prof` in `ipco`, associated
+/// with the primary item, and `iloc` offsets moved by the bytes this adds before the image data.
+/// Returns `None` when the file's structure is not one this understands.
+pub fn embed_icc(file: &[u8], icc: &[u8]) -> Option<Vec<u8>> {
+    let top: Vec<Bx> = boxes(file).collect();
+    if top
+        .iter()
+        .map(|b| b.header + b.payload.len())
+        .sum::<usize>()
+        != file.len()
+    {
+        return None;
+    }
+    let meta = top.iter().find(|b| &b.kind == b"meta")?;
+    let meta_end = offset_in(file, meta.payload)? + meta.payload.len();
+    let (meta_head, meta_children) = meta.payload.split_at_checked(4)?;
+    let children: Vec<Bx> = boxes(meta_children).collect();
+    let iprp = children.iter().find(|b| &b.kind == b"iprp")?;
+    let parts: Vec<Bx> = boxes(iprp.payload).collect();
+    // Rewritten boxes get 8-byte headers, so only the added bytes move the image data.
+    if [meta, iprp]
+        .into_iter()
+        .chain(&children)
+        .chain(&parts)
+        .any(|b| b.header != 8)
+    {
+        return None;
+    }
+
+    let pitm = children.iter().find(|b| &b.kind == b"pitm")?;
+    let primary = match *pitm.payload.first()? {
+        0 => u32::from(be16(pitm.payload, 4)?),
+        _ => be32(pitm.payload, 4)?,
+    };
+
+    // New iprp: the profile appended to ipco, and the primary item associated with it.
+    let ipco = parts.iter().find(|b| &b.kind == b"ipco")?;
+    let index = u16::try_from(boxes(ipco.payload).count() + 1).ok()?;
+    let colr = make_box(*b"colr", &[&b"prof"[..], icc].concat())?;
+    let mut new_iprp = Vec::new();
+    for part in &parts {
+        let payload = match &part.kind {
+            b"ipco" => [part.payload, &colr].concat(),
+            b"ipma" => associate(part.payload, primary, index)?,
+            _ => part.payload.to_vec(),
+        };
+        new_iprp.extend(make_box(part.kind, &payload)?);
+    }
+    let new_iprp = make_box(*b"iprp", &new_iprp)?;
+    let shift = new_iprp
+        .len()
+        .checked_sub(iprp.header + iprp.payload.len())?;
+
+    let mut new_meta = meta_head.to_vec();
+    for child in &children {
+        match &child.kind {
+            b"iprp" => new_meta.extend_from_slice(&new_iprp),
+            b"iloc" => new_meta.extend(make_box(
+                *b"iloc",
+                &shift_iloc(child.payload, meta_end, shift)?,
+            )?),
+            _ => new_meta.extend(make_box(child.kind, child.payload)?),
+        }
+    }
+    let new_meta = make_box(*b"meta", &new_meta)?;
+
+    let mut out = Vec::with_capacity(file.len() + shift);
+    for b in &top {
+        if &b.kind == b"meta" {
+            out.extend_from_slice(&new_meta);
+        } else {
+            let start = offset_in(file, b.payload)? - b.header;
+            out.extend_from_slice(&file[start..start + b.header + b.payload.len()]);
+        }
+    }
+    Some(out)
+}
+
+/// Where `part` (a subslice of `file`) starts in `file`.
+fn offset_in(file: &[u8], part: &[u8]) -> Option<usize> {
+    (part.as_ptr() as usize).checked_sub(file.as_ptr() as usize)
+}
+
+/// A box with a 32-bit size header.
+fn make_box(kind: [u8; 4], payload: &[u8]) -> Option<Vec<u8>> {
+    let size = u32::try_from(payload.len() + 8).ok()?;
+    Some([&size.to_be_bytes()[..], &kind, payload].concat())
+}
+
+/// `ipma` with one more (non-essential) property index for `item`, everything else unchanged.
+fn associate(payload: &[u8], item: u32, index: u16) -> Option<Vec<u8>> {
+    let version = *payload.first()?;
+    let wide_index = payload.get(3)? & 1 == 1;
+    if (!wide_index && index > 0x7f) || index > 0x7fff {
+        return None;
+    }
+    let count = be32(payload, 4)?;
+    let mut out = payload.get(..8)?.to_vec();
+    let mut at = 8;
+    let mut found = false;
+    for _ in 0..count {
+        let id_len = if version < 1 { 2 } else { 4 };
+        let id = if version < 1 {
+            u32::from(be16(payload, at)?)
+        } else {
+            be32(payload, at)?
+        };
+        let n = *payload.get(at + id_len)?;
+        let entries_len = usize::from(n) * if wide_index { 2 } else { 1 };
+        let entries = payload.get(at + id_len + 1..at + id_len + 1 + entries_len)?;
+        out.extend_from_slice(&payload[at..at + id_len]);
+        if id == item {
+            found = true;
+            out.push(n.checked_add(1)?);
+            out.extend_from_slice(entries);
+            if wide_index {
+                out.extend_from_slice(&index.to_be_bytes());
+            } else {
+                out.push(u8::try_from(index).ok()?);
+            }
+        } else {
+            out.push(n);
+            out.extend_from_slice(entries);
+        }
+        at += id_len + 1 + entries_len;
+    }
+    (found && at == payload.len()).then_some(out)
+}
+
+/// `iloc` with every file offset at or past `from` moved forward by `shift` bytes.
+fn shift_iloc(payload: &[u8], from: usize, shift: usize) -> Option<Vec<u8>> {
+    let mut out = payload.to_vec();
+    let version = *payload.first()?;
+    let sizes = be16(payload, 4)?;
+    let offset_size = usize::from(sizes >> 12);
+    let length_size = usize::from((sizes >> 8) & 0xf);
+    let base_offset_size = usize::from((sizes >> 4) & 0xf);
+    let index_size = if version >= 1 {
+        usize::from(sizes & 0xf)
+    } else {
+        0
+    };
+    let (count, mut at) = if version < 2 {
+        (u32::from(be16(payload, 6)?), 8)
+    } else {
+        (be32(payload, 6)?, 10)
+    };
+    // Rewrites the `width`-byte offset at `at` in place when it points past the shifted bytes.
+    let bump = |out: &mut Vec<u8>, at: usize, width: usize| -> Option<()> {
+        if width == 0 {
+            return Some(());
+        }
+        let field = out.get_mut(at..at + width)?;
+        let value = field.iter().fold(0u64, |v, b| v << 8 | u64::from(*b));
+        if value >= u64::try_from(from).ok()? {
+            let moved = value.checked_add(u64::try_from(shift).ok()?)?;
+            if width < 8 && moved >> (8 * width) != 0 {
+                return None;
+            }
+            field.copy_from_slice(&moved.to_be_bytes()[8 - width..]);
+        }
+        Some(())
+    };
+    for _ in 0..count {
+        at += if version < 2 { 2 } else { 4 }; // item ID
+        let mut file_offsets = true;
+        if version >= 1 {
+            // Construction method 0 (the low 4 bits): offsets into the file.
+            file_offsets = be16(payload, at)?.trailing_zeros() >= 4;
+            at += 2;
+        }
+        at += 2; // data reference index
+        let base_offset = at;
+        at += base_offset_size;
+        let extents = be16(payload, at)?;
+        at += 2;
+        let base = payload.get(base_offset..at - 2)?;
+        let has_base = base.iter().any(|b| *b != 0);
+        if file_offsets && has_base {
+            bump(&mut out, base_offset, base_offset_size)?;
+        }
+        for _ in 0..extents {
+            at += index_size;
+            if file_offsets && !has_base {
+                bump(&mut out, at, offset_size)?;
+            }
+            at += offset_size + length_size;
+        }
+    }
+    (at == payload.len()).then_some(out)
 }
 
 /// Iterates over the boxes in `data`, stopping at the first malformed one.
@@ -353,7 +547,11 @@ fn boxes(data: &[u8]) -> impl Iterator<Item = Bx<'_>> {
         };
         let payload = data.get(at + header..at.checked_add(size)?)?;
         at += size;
-        Some(Bx { kind, payload })
+        Some(Bx {
+            kind,
+            header,
+            payload,
+        })
     })
 }
 
@@ -420,6 +618,93 @@ mod tests {
                 Transform::FlipHorizontal
             ]
         );
+    }
+
+    /// The (offset, length) extents of every item in a version 0 or 1 `iloc` without base offsets,
+    /// as ravif writes it.
+    fn extents(file: &[u8]) -> Vec<(usize, usize)> {
+        let meta = boxes(file).find(|b| &b.kind == b"meta").unwrap();
+        let iloc = boxes(&meta.payload[4..])
+            .find(|b| &b.kind == b"iloc")
+            .unwrap()
+            .payload;
+        let sizes = be16(iloc, 4).unwrap();
+        let (offset_size, length_size) =
+            (usize::from(sizes >> 12), usize::from((sizes >> 8) & 0xf));
+        assert_eq!(sizes & 0xf0, 0, "no base offsets");
+        let read = |at: usize, width: usize| {
+            iloc[at..at + width]
+                .iter()
+                .fold(0usize, |v, b| v << 8 | usize::from(*b))
+        };
+        let mut at = 8;
+        let mut out = Vec::new();
+        for _ in 0..be16(iloc, 6).unwrap() {
+            at += 2 + if iloc[0] == 1 { 2 } else { 0 } + 2; // item ID, method, data reference
+            let count = be16(iloc, at).unwrap();
+            at += 2;
+            for _ in 0..count {
+                out.push((read(at, offset_size), read(at + offset_size, length_size)));
+                at += offset_size + length_size;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn embeds_an_icc_profile_into_an_avif_file() {
+        // A real encoder output, with an alpha item, so both images must still be found.
+        let pixels: Vec<ravif::RGBA8> = (0..64u8)
+            .map(|i| ravif::RGBA8::new(i * 4, 255 - i * 4, 128, i * 4))
+            .collect();
+        let plain = ravif::Encoder::new()
+            .with_speed(10)
+            .encode_rgba(ravif::Img::new(pixels.as_slice(), 8, 8))
+            .unwrap()
+            .avif_file;
+        assert_eq!(read_properties(&plain).icc, None);
+        let profile = b"ICC-PROFILE-BYTES".repeat(40);
+        let tagged = embed_icc(&plain, &profile).unwrap();
+        assert_eq!(read_properties(&tagged).icc.as_deref(), Some(&profile[..]));
+
+        let (before, after) = (extents(&plain), extents(&tagged));
+        assert_eq!(before.len(), 2, "color and alpha");
+        for ((old, len), (new, new_len)) in before.into_iter().zip(after) {
+            assert_eq!(len, new_len);
+            assert_eq!(plain[old..old + len], tagged[new..new + len]);
+        }
+    }
+
+    #[test]
+    fn rejects_files_it_cannot_tag() {
+        assert_eq!(embed_icc(b"", b"icc"), None);
+        assert_eq!(embed_icc(&sample()[..40], b"icc"), None);
+        // No iloc is fine (nothing to move), but the primary item must have an association.
+        let tagged = embed_icc(&sample(), b"NEW").unwrap();
+        // The original profile is property 1 and comes first, so it still wins.
+        assert_eq!(
+            read_properties(&tagged).icc.as_deref(),
+            Some(&b"ICC-DATA"[..])
+        );
+    }
+
+    #[test]
+    fn moves_base_offsets_and_extents_past_the_insertion() {
+        // Version 1, offset/length/base sizes 4/4/4, index size 0; two items.
+        let mut iloc = vec![1, 0, 0, 0, 0x44, 0x40, 0, 2];
+        // Item 1: file offsets, base 1000, one extent (offset 0, length 10).
+        iloc.extend([
+            0, 1, 0, 0, 0, 0, 0, 0, 0x03, 0xe8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10,
+        ]);
+        // Item 2: idat (construction method 1) offset 5: never moved.
+        iloc.extend([0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 3]);
+        let moved = shift_iloc(&iloc, 900, 7).unwrap();
+        assert_eq!(&moved[14..18], 1007u32.to_be_bytes());
+        assert_eq!(moved[18..], iloc[18..]);
+        // Offsets before the insertion point stay.
+        assert_eq!(shift_iloc(&iloc, 2000, 7).unwrap(), iloc);
+        // An offset that would no longer fit its field is an error, not a wraparound.
+        assert_eq!(shift_iloc(&iloc, 0, u32::MAX as usize), None);
     }
 
     #[test]

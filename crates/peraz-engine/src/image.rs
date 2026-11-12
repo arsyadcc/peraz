@@ -1,10 +1,9 @@
 //! Still-image encoding: decode, make upright, resize, then mozjpeg, imagequant + oxipng,
 //! libwebp, or rav1e (AVIF).
 //!
-//! Metadata policy: the EXIF orientation is applied to the pixels, the ICC color profile is kept,
-//! and everything else (EXIF, XMP, text chunks) is dropped because it can hold location and
-//! device details. AVIF output cannot carry an ICC profile here, so pixels are converted to sRGB
-//! first; the colors look the same, only the profile is gone.
+//! Metadata policy: the EXIF orientation is applied to the pixels, the ICC color profile is kept
+//! (in every output format, so wide-gamut pictures stay wide-gamut), and everything else (EXIF,
+//! XMP, text chunks) is dropped because it can hold location and device details.
 
 use std::path::Path;
 
@@ -68,19 +67,26 @@ fn encode_image_inner(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage
         ),
         ImageEncoding::Avif { quality } => {
             let mut rgba = image.to_rgba8();
-            let converted = match icc.as_deref() {
-                Some(profile) => to_srgb(&mut rgba, profile)?,
-                None => false,
+            let avif = encode_avif(&rgba, quality)?;
+            let tagged = match icc.as_deref() {
+                Some(profile) => crate::heif::embed_icc(&avif, profile).ok_or(profile),
+                None => Ok(avif),
             };
-            let note = if converted {
-                " (converted to sRGB)"
-            } else {
-                ""
-            };
-            (
-                encode_avif(&rgba, quality)?,
-                format!("rav1e q{quality}{note}"),
-            )
+            match tagged {
+                Ok(avif) => (avif, format!("rav1e q{quality}")),
+                // The container could not take the profile: keep the colors by converting.
+                Err(profile) => {
+                    let note = if to_srgb(&mut rgba, profile)? {
+                        " (converted to sRGB)"
+                    } else {
+                        ""
+                    };
+                    (
+                        encode_avif(&rgba, quality)?,
+                        format!("rav1e q{quality}{note}"),
+                    )
+                }
+            }
         }
     };
     Ok(EncodedImage {

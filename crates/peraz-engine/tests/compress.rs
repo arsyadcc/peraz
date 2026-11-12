@@ -481,6 +481,101 @@ fn gif_frames(path: &Path) -> (u16, u16, usize, u32) {
     (w, h, frames, centiseconds)
 }
 
+/// Writes a 256×256 PNG: a gradient with a solid 64×64 patch of `color` in the middle, tagged with `icc`.
+fn write_png_with_profile(path: &Path, color: [u8; 3], icc: Option<Vec<u8>>) {
+    use image::ImageEncoder;
+    let pixels = image::RgbImage::from_fn(256, 256, |x, y| {
+        if (96..160).contains(&x) && (96..160).contains(&y) {
+            image::Rgb(color)
+        } else {
+            image::Rgb([x, y, 128].map(|v| u8::try_from(v).unwrap()))
+        }
+    });
+    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut encoder = image::codecs::png::PngEncoder::new(file);
+    if let Some(icc) = icc {
+        encoder.set_icc_profile(icc).unwrap();
+    }
+    encoder
+        .write_image(pixels.as_raw(), 256, 256, image::ExtendedColorType::Rgb8)
+        .unwrap();
+}
+
+/// Mean color of the middle patch written by [`write_png_with_profile`].
+fn patch_color(picture: &image::DynamicImage) -> [u32; 3] {
+    let rgb = picture.to_rgb8();
+    let mut sum = [0u32; 3];
+    for y in 104..152 {
+        for x in 104..152 {
+            for (s, c) in sum.iter_mut().zip(rgb.get_pixel(x, y).0) {
+                *s += u32::from(c);
+            }
+        }
+    }
+    sum.map(|s| s / (48 * 48))
+}
+
+#[test]
+fn avif_keeps_the_color_profile_instead_of_converting_to_srgb() {
+    let Some(env) = setup("avif-icc") else { return };
+    let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+    let patch = [200, 100, 50];
+    // In sRGB this color would be noticeably different, so a conversion cannot pass for a copy.
+    let in_srgb = {
+        let transform = moxcms::ColorProfile::new_from_slice(&p3)
+            .unwrap()
+            .create_transform_8bit(
+                moxcms::Layout::Rgb,
+                &moxcms::ColorProfile::new_srgb(),
+                moxcms::Layout::Rgb,
+                moxcms::TransformOptions::default(),
+            )
+            .unwrap();
+        let mut out = [0u8; 3];
+        transform.transform(&patch, &mut out).unwrap();
+        out
+    };
+    assert!(
+        patch.iter().zip(in_srgb).any(|(a, b)| a.abs_diff(b) > 12),
+        "{in_srgb:?}"
+    );
+
+    for (name, icc) in [("p3", Some(p3.clone())), ("untagged", None)] {
+        let input = env.out.join(format!("{name}.png"));
+        write_png_with_profile(&input, patch, icc.clone());
+        let output = env.out.join(format!("{name}.avif"));
+        let mut job = job(input, output.clone(), Quality::High);
+        job.recipe.image.format = ImageFormat::Avif;
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{name}: {:?}",
+            report.outcome
+        );
+        let encoder = report.encoder.unwrap();
+        assert!(!encoder.contains("sRGB"), "{name}: {encoder}");
+
+        let decoded = peraz_engine::heif::decode(&env.tools, &output).unwrap();
+        assert_eq!(
+            decoded.icc, icc,
+            "{name}: the profile is carried over as is"
+        );
+        let got = patch_color(&decoded.image);
+        assert!(
+            got.iter()
+                .zip(patch)
+                .all(|(g, p)| g.abs_diff(u32::from(p)) <= 4),
+            "{name}: pixel values are kept, got {got:?}, expected {patch:?}"
+        );
+    }
+}
+
 #[test]
 fn makes_a_gif_from_a_video_range() {
     let Some(env) = setup("vgif") else { return };
