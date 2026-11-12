@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Arsyad"]
@@ -12,8 +12,8 @@ homepage = "https://github.com/arsyadcc/peraz"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-peraz-core = { path = "crates/peraz-core", version = "=0.1.0-alpha.1" }
-peraz-engine = { path = "crates/peraz-engine", version = "=0.1.0-alpha.1" }
+peraz-core = { path = "crates/peraz-core", version = "=0.1.0-alpha.2" }
+peraz-engine = { path = "crates/peraz-engine", version = "=0.1.0-alpha.2" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

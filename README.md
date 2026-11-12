@@ -41,10 +41,11 @@ brew install peraz
 installer for macOS and Linux and a PowerShell installer for Windows. These install `peraz` only:
 install FFmpeg with your package manager, then check with `peraz doctor`.
 
-**From source** (Rust 1.99 or newer):
+**With Cargo** (Rust 1.99 or newer), from [crates.io](https://crates.io/crates/peraz):
 
 ```sh
-cargo install --locked --path crates/peraz
+cargo install --locked peraz                    # or --features simd for faster JPEG and AVIF (needs nasm on x86)
+cargo install --locked --path crates/peraz      # from a clone of this repository
 ```
 
 ## Quick start
