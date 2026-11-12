@@ -315,11 +315,15 @@ fn live_without_ffmpeg_agrees_with_ffprobe() {
             assert_eq!(ours.alpha, theirs.alpha, "{name}");
         }
     }
+    // The HEIC sample is made only on macOS.
     for name in [
         "video-720p-noaudio.mp4",
         "animation.gif",
         "image-photo.heic",
     ] {
+        if !fixtures.join(name).is_file() {
+            continue;
+        }
         assert!(
             probe_without_ffmpeg(&fixtures.join(name))
                 .unwrap()
