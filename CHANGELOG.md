@@ -1,0 +1,85 @@
+# Changelog
+
+All notable changes to Peraz are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/).
+
+Changes to the interface that scripts depend on (command-line flags, the `--json` output, exit
+codes, and the recipe format) are marked **Interface**. Until 0.1.0 they can still change between
+alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a new
+`schema_version` for `--json`).
+
+## [Unreleased]
+
+### Added
+
+- `peraz completions <shell>` prints a completion script for bash, zsh, fish, PowerShell, or
+  elvish. In zsh and fish, `--recipe` completes recipe names. The Homebrew formula installs the
+  completions.
+- **Interface:** `peraz recipe list --names` prints only the recipe names, one per line.
+- **Interface:** `--json` probe and report output include each video's color description
+  (`color`: `primaries`, `transfer`, `matrix`, `range`), and `peraz probe` shows `HDR (PQ)` or
+  `HDR (HLG)`.
+
+### Changed
+
+- Videos keep their color description (primaries, transfer, matrix, range), and 10-bit HEVC
+  stays 10-bit.
+- HDR videos become 10-bit HEVC when no codec is given, because 8-bit H.264 cannot keep HDR;
+  the report shows `HDR kept`. **Interface:** `--codec h264` on an HDR video now fails with a
+  message instead of producing washed-out colors.
+- AVIF output keeps the color profile instead of converting the colors to sRGB, so wide-gamut
+  pictures (Display P3) stay wide-gamut.
+
+### Fixed
+
+- Transparent HEIC and AVIF pictures keep their transparency (it was dropped).
+- HEIC files whose picture is not the first tile grid in the file decode correctly.
+
+## [0.1.0-alpha.2] - 2026-11-12
+
+### Added
+
+- `peraz <files>` is short for `peraz compress <files>`.
+- Peraz is on crates.io: `peraz` (the command), `peraz-core`, and `peraz-engine`.
+
+### Changed
+
+- **Interface:** results are named `<name>-1.<ext>`, then `<name>-2.<ext>` when that is taken,
+  instead of `<name>-peraz.<ext>`. Compressing a file again never fails or replaces an earlier
+  result, and inputs of a batch that would share a name get different numbers. `--output` still
+  writes exactly the file given, replaced only with `--force`.
+- Watch folders treat `<name>-<number>.<ext>` next to a `<name>.*` file as an earlier result and
+  do not compress it again.
+- The release archives are named `peraz-*` (they were named after the internal crate).
+
+## [0.1.0-alpha.1] - 2026-11-12
+
+The first public alpha.
+
+### Added
+
+- Video compression to H.264 or HEVC with software or hardware (VideoToolbox) encoders, five
+  quality levels calibrated with VMAF, and a never-worse rule: a result that is not smaller is
+  not kept.
+- Images: JPEG (mozjpeg), PNG (imagequant and oxipng), WebP, and AVIF output; HEIC and AVIF
+  input. The EXIF orientation is applied, the color profile is kept, and other metadata is
+  removed.
+- GIFs, animated WebP and AVIF from videos and GIFs, and GIF to MP4.
+- `--target-size` fits a video into a file size.
+- Trimming with `--start` and `--duration`, losslessly with `--trim-only` when the cut lands on
+  a keyframe.
+- PDF and EPUB compression by recompressing their pictures.
+- Parallel batches with per-resource limits.
+- Recipes: named settings in TOML files, built-in or your own, and a `peraz.toml` project
+  recipe used automatically.
+- `--check` mode for CI.
+- `peraz watch` compresses new files as they appear in folders.
+- `peraz probe` and `peraz doctor`.
+- **Interface:** `--json` output with `schema_version` 1, and exit codes 0, 1, 2, 3, 4, and 130.
+- Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
+  tap that installs FFmpeg too.
+
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/arsyadcc/peraz/releases/tag/v0.1.0-alpha.1
