@@ -1,6 +1,8 @@
 # Builds the source formula (packaging/homebrew/peraz.rb) from this commit with Homebrew, then
-# runs `brew test` and `brew audit --strict --new`, on macOS and Linux. Runs when the formula or
-# the build manifests change, and by hand.
+# runs `brew test` and `brew audit --strict --new`, on macOS and Linux. Free macOS runners are
+# scarce, and a push that needs several at once can leave jobs waiting until they are cancelled,
+# so this runs only when the formula or this workflow changes, once a week (to catch dependency
+# changes), and by hand before a stable release.
 name: Homebrew formula
 
 on:
@@ -8,17 +10,13 @@ on:
     paths:
       - packaging/homebrew/**
       - .github/workflows/homebrew-formula.yml
-      - Cargo.toml
-      - Cargo.lock
-      - crates/*/Cargo.toml
   push:
     branches: [main]
     paths:
       - packaging/homebrew/**
       - .github/workflows/homebrew-formula.yml
-      - Cargo.toml
-      - Cargo.lock
-      - crates/*/Cargo.toml
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 concurrency:
