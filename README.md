@@ -31,11 +31,12 @@ peraz-icon.png → peraz-icon-1.png
 **Homebrew** (macOS and Linux) installs Peraz and FFmpeg together:
 
 ```sh
-brew tap arsyadcc/tap
-brew install peraz
+brew install arsyadcc/tap/peraz
 ```
 
-(or in one step: `brew install arsyadcc/tap/peraz`)
+Homebrew loads formulae from taps outside Homebrew only once you trust them, and naming the
+formula in full like this trusts it. If you added the tap with `brew tap arsyadcc/tap` first, run
+`brew trust arsyadcc/tap` before `brew install peraz`.
 
 **Installers:** the [latest release](https://github.com/arsyadcc/peraz/releases/latest) has a shell
 installer for macOS and Linux and a PowerShell installer for Windows. These install `peraz` only:
