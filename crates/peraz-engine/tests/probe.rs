@@ -150,13 +150,22 @@ fn live_probe_rejects_non_media_and_missing_files() {
     };
     let missing = probe(&tools, &fixtures.join("does-not-exist.mp4")).unwrap_err();
     assert!(!missing.is_environment());
-    let not_media = probe(&tools, &fixtures.join("book.epub")).unwrap_err();
+    let text = std::env::temp_dir().join(format!("peraz-notes-{}.txt", std::process::id()));
+    std::fs::write(&text, "plain text, not media").unwrap();
+    let not_media = probe(&tools, &text).unwrap_err();
+    std::fs::remove_file(&text).unwrap();
     assert!(!not_media.is_environment());
     assert!(!not_media.to_string().contains("file:"), "{not_media}");
-    // A PDF has no audio/video streams ffprobe understands.
+    // Documents are recognized from their first bytes.
+    assert_eq!(
+        probe(&tools, &fixtures.join("book.epub")).unwrap().kind,
+        MediaKind::Epub
+    );
     if fixtures.join("document.pdf").is_file() {
-        let pdf = probe(&tools, &fixtures.join("document.pdf"));
-        assert!(pdf.is_err() || pdf.unwrap().kind == MediaKind::Unknown);
+        assert_eq!(
+            probe(&tools, &fixtures.join("document.pdf")).unwrap().kind,
+            MediaKind::Pdf
+        );
     }
 }
 

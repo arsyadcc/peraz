@@ -20,11 +20,16 @@ peraz compress --format gif --start 12 --duration 4 clip.mp4   # video → GIF (
 peraz compress -q small reaction.gif               # smaller GIF, same timing
 peraz compress --format webp clip.mp4              # animated WebP (or avif: smallest)
 peraz compress --format mp4 reaction.gif           # GIF → MP4, often 70-95% smaller
+peraz compress report.pdf book.epub                # recompress the pictures inside
 peraz compress --json --out-dir out/ media/*     # machine-readable report
 peraz compress --jobs 1 *.mov                      # one at a time, with live progress
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
 ```
+
+PDF and EPUB files keep their text, layout, and links: only the pictures inside are
+recompressed (photos with mozjpeg, graphics as palette images), and a picture is replaced only
+when the new version is smaller. Encrypted PDFs and DRM-protected EPUBs are skipped.
 
 Batches run in parallel: still images use up to one job per logical core, while video and
 animation encodes (which already use many cores each) run one per 8 cores. Two inputs that would

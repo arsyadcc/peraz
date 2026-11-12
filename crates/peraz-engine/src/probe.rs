@@ -19,6 +19,22 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if !metadata.is_file() {
         return Err(input_error(std::io::Error::other("not a regular file")));
     }
+    if let Some(kind) = sniff_document(path).map_err(input_error)? {
+        return Ok(MediaInfo {
+            kind,
+            container: if kind == MediaKind::Pdf {
+                "pdf"
+            } else {
+                "epub"
+            }
+            .to_owned(),
+            size_bytes: metadata.len(),
+            duration_seconds: None,
+            bit_rate: None,
+            video: None,
+            audio: Vec::new(),
+        });
+    }
     let absolute = std::path::absolute(path).map_err(input_error)?;
     // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
     // as protocols: only local files are ever opened.
@@ -278,9 +294,49 @@ fn parse_num<T: std::str::FromStr>(text: Option<&str>) -> Option<T> {
     text?.trim().parse().ok()
 }
 
+/// Recognizes PDF and EPUB files from their first bytes (ffprobe reads neither).
+fn sniff_document(path: &Path) -> std::io::Result<Option<MediaKind>> {
+    use std::io::Read as _;
+    let mut head = [0u8; 64];
+    let mut file = std::fs::File::open(path)?;
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(classify_head(&head[..filled]))
+}
+
+fn classify_head(head: &[u8]) -> Option<MediaKind> {
+    // PDF: `%PDF-` within the first bytes (some writers put junk before it).
+    if head.windows(5).any(|w| w == b"%PDF-") {
+        return Some(MediaKind::Pdf);
+    }
+    // EPUB: a ZIP whose first entry is an uncompressed `mimetype` holding `application/epub+zip`.
+    let epub = head.starts_with(b"PK\x03\x04")
+        && head.get(30..38) == Some(b"mimetype")
+        && head.get(38..58) == Some(b"application/epub+zip");
+    epub.then_some(MediaKind::Epub)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_pdf_and_epub_headers() {
+        assert_eq!(classify_head(b"%PDF-1.7\n%\xe2\xe3"), Some(MediaKind::Pdf));
+        let mut epub = b"PK\x03\x04".to_vec();
+        epub.extend_from_slice(&[0; 26]);
+        epub.extend_from_slice(b"mimetypeapplication/epub+zip");
+        assert_eq!(classify_head(&epub), Some(MediaKind::Epub));
+        let mut zip = epub.clone();
+        zip[30..38].copy_from_slice(b"readme.t");
+        assert_eq!(classify_head(&zip), None, "other ZIP files are not EPUB");
+        assert_eq!(classify_head(b"\x00\x00\x00\x18ftypmp42"), None);
+    }
 
     #[test]
     fn rotation_is_normalized_clockwise() {

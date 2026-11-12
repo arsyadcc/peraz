@@ -645,3 +645,40 @@ fn a_batch_never_writes_one_output_twice() {
     });
     assert!(failure.unwrap().contains("another file in this batch"));
 }
+
+#[test]
+fn compresses_pictures_inside_epub_and_pdf() {
+    let Some(env) = setup("documents") else {
+        return;
+    };
+    let mut inputs = vec![("book.epub", MediaKind::Epub)];
+    if env.fixtures.join("document.pdf").is_file() {
+        inputs.push(("document.pdf", MediaKind::Pdf));
+    }
+    for (name, kind) in inputs {
+        let input = env.fixtures.join(name);
+        assert_eq!(probe(&env.tools, &input).unwrap().kind, kind);
+        let output = env.out.join(name);
+        let report = compress(
+            &env.tools,
+            &env.caps,
+            &job(input, output.clone(), Quality::Balanced),
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        let Outcome::Compressed { output_bytes, .. } = report.outcome else {
+            panic!("{name}: unexpected outcome {:?}", report.outcome)
+        };
+        assert!(output_bytes < report.input_bytes.unwrap());
+        let stats = report.document.unwrap();
+        assert!(
+            stats.images > 0 && stats.recompressed > 0,
+            "{name}: {stats:?}"
+        );
+        assert_eq!(
+            probe(&env.tools, &output).unwrap().kind,
+            kind,
+            "{name} is still a {kind:?}"
+        );
+    }
+}

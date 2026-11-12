@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use peraz_core::units::format_bytes;
 use peraz_core::{
     ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan, PlanError,
-    RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_gif, plan_image, plan_video,
+    RateControl, Report, SizeTarget, VideoOutput, plan_animated, plan_document, plan_gif,
+    plan_image, plan_video,
 };
 
 use crate::batch::{Batch, Lane};
@@ -59,6 +60,7 @@ pub fn compress_in(
         },
         plan: None,
         encoder: None,
+        document: None,
         elapsed_seconds: 0.0,
     };
     report.outcome = if cancel.load(Ordering::SeqCst) {
@@ -88,7 +90,11 @@ fn run(
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
 
-    let still_image = info.kind == MediaKind::Image;
+    // Still images and documents are in-process work; everything else runs FFmpeg encodes.
+    let still_image = matches!(
+        info.kind,
+        MediaKind::Image | MediaKind::Pdf | MediaKind::Epub
+    );
     let lane = if still_image {
         Lane::Image
     } else {
@@ -150,6 +156,9 @@ fn run(
             )
         }
         MediaKind::Image => make_image(batch, tools, job, &info, progress, cancel, report),
+        MediaKind::Pdf | MediaKind::Epub => {
+            make_document(batch, job, &info, progress, cancel, report)
+        }
         other => Outcome::Skipped {
             message: format!("{} compression is not available yet", kind_name(other)),
         },
@@ -200,6 +209,65 @@ fn make_image(
     }
     progress(1.0);
     finish(&partial, &output, info.size_bytes, plan.converts_format)
+}
+
+fn make_document(
+    batch: &Batch,
+    job: &Job,
+    info: &MediaInfo,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let plan = match plan_document(info, &job.recipe) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return Outcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+    report.plan = Some(Plan::Document(plan.clone()));
+    let extension = if info.kind == MediaKind::Pdf {
+        "pdf"
+    } else {
+        "epub"
+    };
+    let output = job.output.resolve(&job.input, extension);
+    if let Err(message) = check_output_path(batch, job, &output) {
+        return Outcome::Failed { message };
+    }
+    let result = if info.kind == MediaKind::Pdf {
+        crate::pdf::compress_pdf(&job.input, &plan)
+    } else {
+        crate::epub::compress_epub(&job.input, &plan)
+    };
+    let (bytes, stats) = match result {
+        Ok(done) => done,
+        Err(crate::pdf::DocumentError::Protected(why)) => {
+            return Outcome::Skipped {
+                message: format!("{why}; Peraz never changes protected files"),
+            };
+        }
+        Err(crate::pdf::DocumentError::Failed(message)) => return Outcome::Failed { message },
+    };
+    report.encoder = Some(format!(
+        "{} of {} pictures recompressed",
+        stats.recompressed, stats.images
+    ));
+    report.document = Some(stats);
+    if cancel.load(Ordering::SeqCst) {
+        return Outcome::Cancelled;
+    }
+    let partial = partial_path(&output);
+    if let Err(e) = std::fs::write(&partial, &bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return Outcome::Failed {
+            message: format!("cannot write {}: {e}", partial.display()),
+        };
+    }
+    progress(1.0);
+    finish(&partial, &output, info.size_bytes, false)
 }
 
 fn make_gif(
@@ -504,6 +572,8 @@ fn kind_name(kind: MediaKind) -> &'static str {
         MediaKind::Animation => "animation",
         MediaKind::Audio => "audio",
         MediaKind::Unknown => "unknown file",
+        MediaKind::Pdf => "PDF",
+        MediaKind::Epub => "EPUB",
     }
 }
 

@@ -93,11 +93,27 @@ fn encode_image_inner(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage
 
 /// Decodes a JPEG/PNG/WebP/BMP/TIFF image with its EXIF orientation applied and its ICC profile.
 pub fn decode_native(input: &Path) -> Result<Decoded, String> {
-    let error = |e: image::ImageError| format!("cannot decode {}: {e}", input.display());
     let reader = ImageReader::open(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?
         .with_guessed_format()
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    decode_reader(reader, &input.display().to_string())
+}
+
+/// Like [`decode_native`], for an image held in memory (e.g. inside an EPUB). `name` is used in
+/// error messages.
+pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> {
+    let reader = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("cannot read {name}: {e}"))?;
+    decode_reader(reader, name)
+}
+
+fn decode_reader<R: std::io::BufRead + std::io::Seek>(
+    reader: ImageReader<R>,
+    name: &str,
+) -> Result<Decoded, String> {
+    let error = |e: image::ImageError| format!("cannot decode {name}: {e}");
     let mut decoder = reader.into_decoder().map_err(error)?;
     let orientation = decoder.orientation().map_err(error)?;
     let icc = decoder.icc_profile().map_err(error)?;
@@ -120,8 +136,42 @@ fn flatten_on_white(rgba: &RgbaImage) -> RgbImage {
 }
 
 fn encode_jpeg(rgb: &RgbImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    let mut compress = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
-    compress.set_size(rgb.width() as usize, rgb.height() as usize);
+    jpeg_from_pixels(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        mozjpeg::ColorSpace::JCS_RGB,
+        quality,
+        icc,
+    )
+}
+
+/// Encodes a grayscale or RGB picture as JPEG with mozjpeg (no ICC profile), for documents
+/// that keep their color space elsewhere. Panics inside mozjpeg are contained.
+pub(crate) fn encode_jpeg_plain(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let (pixels, space) = if image.color().channel_count() == 1 {
+        (
+            image.to_luma8().into_raw(),
+            mozjpeg::ColorSpace::JCS_GRAYSCALE,
+        )
+    } else {
+        (image.to_rgb8().into_raw(), mozjpeg::ColorSpace::JCS_RGB)
+    };
+    let (width, height) = (image.width(), image.height());
+    std::panic::catch_unwind(move || jpeg_from_pixels(&pixels, width, height, space, quality, None))
+        .unwrap_or_else(|_| Err("mozjpeg crashed on this picture".to_owned()))
+}
+
+fn jpeg_from_pixels(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    space: mozjpeg::ColorSpace,
+    quality: u8,
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let mut compress = mozjpeg::Compress::new(space);
+    compress.set_size(width as usize, height as usize);
     compress.set_quality(f32::from(quality));
     // mozjpeg's defaults already use progressive scans and optimized Huffman tables.
     let mut started = compress
@@ -131,7 +181,7 @@ fn encode_jpeg(rgb: &RgbImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8
         started.write_icc_profile(icc);
     }
     started
-        .write_scanlines(rgb.as_raw())
+        .write_scanlines(pixels)
         .map_err(|e| format!("mozjpeg: {e}"))?;
     started.finish().map_err(|e| format!("mozjpeg: {e}"))
 }
@@ -183,9 +233,9 @@ fn encode_png(
 }
 
 /// Palette, per-pixel indexes, and achieved quality; `None` when the minimum quality is out of reach.
-type Quantized = (Vec<imagequant::RGBA>, Vec<u8>, u8);
+pub(crate) type Quantized = (Vec<imagequant::RGBA>, Vec<u8>, u8);
 
-fn quantize(
+pub(crate) fn quantize(
     rgba: &RgbaImage,
     min_quality: u8,
     max_quality: u8,

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::media::MediaKind;
-use crate::plan::{AnimatedPlan, GifPlan, ImagePlan, VideoPlan};
+use crate::plan::{AnimatedPlan, DocumentPlan, GifPlan, ImagePlan, VideoPlan};
 use crate::recipe::Recipe;
 
 /// Where the result of a job goes.
@@ -81,6 +81,20 @@ pub enum Plan {
     Image(ImagePlan),
     Gif(GifPlan),
     Animated(AnimatedPlan),
+    Document(DocumentPlan),
+}
+
+/// What happened to the pictures inside a PDF or EPUB.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DocumentStats {
+    /// Pictures found.
+    pub images: u32,
+    /// Pictures replaced by a smaller version.
+    pub recompressed: u32,
+    /// Pictures Peraz could process but whose new version was not smaller.
+    pub kept: u32,
+    /// Pictures left alone (formats or color spaces Peraz does not rewrite).
+    pub skipped: u32,
 }
 
 /// What happened to one input.
@@ -94,6 +108,8 @@ pub struct Report {
     pub plan: Option<Plan>,
     /// What actually did the encoding, e.g. `libx264`, `mozjpeg`, `imagequant + oxipng`.
     pub encoder: Option<String>,
+    /// For PDF and EPUB: what happened to the pictures inside.
+    pub document: Option<DocumentStats>,
     pub elapsed_seconds: f64,
 }
 

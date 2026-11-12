@@ -22,6 +22,10 @@ oxipng.workspace = true
 webp.workspace = true
 moxcms.workspace = true
 gif.workspace = true
+lopdf.workspace = true
+zip.workspace = true
+flate2.workspace = true
+quick-xml.workspace = true
 ravif.workspace = true
 png.workspace = true
 

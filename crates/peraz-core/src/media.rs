@@ -14,6 +14,10 @@ pub enum MediaKind {
     Animation,
     /// Audio only.
     Audio,
+    /// A PDF document.
+    Pdf,
+    /// An EPUB e-book.
+    Epub,
     /// Nothing Peraz can work with.
     Unknown,
 }

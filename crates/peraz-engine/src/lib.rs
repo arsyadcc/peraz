@@ -7,11 +7,13 @@
 
 pub mod batch;
 pub mod compress;
+pub mod epub;
 mod error;
 pub mod ffmpeg;
 pub mod gif;
 pub mod heif;
 pub mod image;
+pub mod pdf;
 pub mod probe;
 
 pub use error::EngineError;

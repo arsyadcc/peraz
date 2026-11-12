@@ -134,6 +134,8 @@ pub enum PlanError {
         format: VideoOutput,
         tried: Vec<&'static str>,
     },
+    /// The file is not a PDF or EPUB.
+    NotDocument { kind: MediaKind },
     /// The file cannot become an animated GIF.
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
@@ -162,6 +164,7 @@ impl std::fmt::Display for PlanError {
                 crate::units::format_bytes(*target_bytes),
                 crate::units::format_bytes(*minimum_bytes)
             ),
+            Self::NotDocument { kind } => write!(f, "not a PDF or EPUB (detected: {kind:?})"),
             Self::NoAnimationEncoder { format, tried } => write!(
                 f,
                 "no encoder for animated {format} in this FFmpeg (needs one of: {}); run `peraz doctor`",
@@ -925,6 +928,87 @@ fn even_size((width, height): (u32, u32)) -> Option<(u32, u32)> {
     (even != (width, height)).then_some(even)
 }
 
+/// How the pictures inside a PDF or EPUB are recompressed. Text, layout, and links are untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DocumentPlan {
+    /// mozjpeg quality for photos.
+    pub jpeg_quality: u8,
+    /// Palette quality range for graphics (pngquant-style).
+    pub png_min_quality: u8,
+    pub png_max_quality: u8,
+    /// libwebp quality for WebP pictures (EPUB).
+    pub webp_quality: u8,
+    /// Pictures larger than this on their long side are scaled down; `None` keeps every size.
+    pub max_image_side: Option<u32>,
+}
+
+impl DocumentPlan {
+    /// The plan for one picture inside the document, kept in `format`.
+    pub fn image_plan(&self, format: ImageFormat) -> ImagePlan {
+        let (encoding, extension) = match format {
+            ImageFormat::Png => (
+                ImageEncoding::Png {
+                    min_quality: self.png_min_quality,
+                    max_quality: self.png_max_quality,
+                },
+                "png",
+            ),
+            ImageFormat::Webp => (
+                ImageEncoding::Webp {
+                    quality: self.webp_quality,
+                },
+                "webp",
+            ),
+            ImageFormat::Avif => (
+                ImageEncoding::Avif {
+                    quality: self.webp_quality,
+                },
+                "avif",
+            ),
+            ImageFormat::Jpeg | ImageFormat::Keep => (
+                ImageEncoding::Jpeg {
+                    quality: self.jpeg_quality,
+                },
+                "jpg",
+            ),
+        };
+        ImagePlan {
+            encoding,
+            max_width: self.max_image_side,
+            max_height: self.max_image_side,
+            flatten_alpha: false,
+            extension,
+            decoder: ImageDecoder::Native,
+            converts_format: false,
+        }
+    }
+}
+
+/// Plans the recompression of a PDF or EPUB.
+pub fn plan_document(info: &MediaInfo, recipe: &Recipe) -> Result<DocumentPlan, PlanError> {
+    if !matches!(info.kind, MediaKind::Pdf | MediaKind::Epub) {
+        return Err(PlanError::NotDocument { kind: info.kind });
+    }
+    let level = recipe.quality as usize;
+    let (png_min_quality, png_max_quality) =
+        [(90, 100), (75, 95), (65, 85), (50, 75), (30, 60)][level];
+    Ok(DocumentPlan {
+        jpeg_quality: [90, 85, 78, 70, 60][level],
+        png_min_quality,
+        png_max_quality,
+        webp_quality: [90, 84, 76, 68, 58][level],
+        // Enough for print at the higher levels and for screens and e-readers at the lower ones;
+        // an explicit bounding box wins.
+        max_image_side: recipe.image.max_width.max(recipe.image.max_height).or([
+            None,
+            Some(3000),
+            Some(2400),
+            Some(2000),
+            Some(1600),
+        ][level]),
+    })
+}
+
 /// Scales `(width, height)` down to fit the bounding box, keeping the aspect ratio and even
 /// dimensions (required by 4:2:0 chroma). Returns `None` when no scaling is needed.
 pub fn fit_within(
@@ -1508,6 +1592,37 @@ mod tests {
         let plan = plan_video(&gif, &recipe, everything).unwrap();
         assert_eq!(plan.scale_to, Some((300, 200)));
         assert_eq!(plan.audio, AudioPlan::None);
+    }
+
+    #[test]
+    fn document_plans_by_level() {
+        let mut pdf = video_info(1, 1, vec![]);
+        pdf.kind = MediaKind::Pdf;
+        pdf.video = None;
+        let plan = plan_document(&pdf, &Recipe::default()).unwrap();
+        assert_eq!((plan.jpeg_quality, plan.max_image_side), (78, Some(2400)));
+        let picture = plan.image_plan(ImageFormat::Png);
+        assert_eq!(
+            picture.encoding,
+            ImageEncoding::Png {
+                min_quality: 65,
+                max_quality: 85
+            }
+        );
+        assert_eq!(
+            (picture.max_width, picture.max_height),
+            (Some(2400), Some(2400))
+        );
+
+        let mut recipe = Recipe::default();
+        recipe.quality = Quality::Highest;
+        assert_eq!(plan_document(&pdf, &recipe).unwrap().max_image_side, None);
+        recipe.image.max_width = Some(1200);
+        assert_eq!(
+            plan_document(&pdf, &recipe).unwrap().max_image_side,
+            Some(1200)
+        );
+        assert!(plan_document(&video_info(1, 1, vec![]), &recipe).is_err());
     }
 
     #[test]
