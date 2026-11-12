@@ -44,7 +44,7 @@ install FFmpeg with your package manager, then check with `peraz doctor`.
 **From source** (Rust 1.99 or newer):
 
 ```sh
-cargo install --locked --path crates/peraz-cli
+cargo install --locked --path crates/peraz
 ```
 
 ## Quick start
@@ -271,7 +271,7 @@ cargo deny check                  # dependency licenses, advisories, sources (de
 ```
 crates/peraz-core/      Domain model and planner, no I/O
 crates/peraz-engine/    Engine: FFmpeg, probing, images, HEIF, GIF, PDF, EPUB, batches
-crates/peraz-cli/       The `peraz` binary
+crates/peraz/           The `peraz` binary
 scripts/                Test fixtures and video preset calibration
 dist-workspace.toml     Release builds and installers (cargo-dist)
 deny.toml               Allowed dependency licenses
