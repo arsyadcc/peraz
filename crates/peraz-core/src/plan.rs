@@ -57,7 +57,7 @@ impl VideoEncoder {
     /// The rate-control arguments for a quality level.
     ///
     /// Calibrated with `scripts/calibrate-video.py`: each preset aims at a mean VMAF (model
-    /// vmaf_v0.6.1) over a sample set of natural footage, screen recordings, and motion graphics,
+    /// `vmaf_v0.6.1`) over a sample set of natural footage, screen recordings, and motion graphics,
     /// with no clip more than 3 points below it. Targets: highest 97, high 95, balanced 93,
     /// small 89, smallest 84. Each value is the most economical one that met its target.
     fn quality_args(self, quality: Quality) -> Vec<String> {

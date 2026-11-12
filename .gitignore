@@ -6,3 +6,5 @@
 CLAUDE.local.md
 # Local development samples (third-party files, never committed)
 /samples/
+# Python bytecode from scripts
+__pycache__/
