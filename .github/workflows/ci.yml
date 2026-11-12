@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same branch or pull request cancels the older run, so runs do not queue up.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -32,7 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS runs in its own job below, which also builds the samples: one macOS runner per run.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -56,10 +62,11 @@ jobs:
       - run: cargo run --locked -- probe fixtures/*.mp4 fixtures/*.png
       - run: cargo run --locked -- compress --out-dir "$RUNNER_TEMP" fixtures/*.mp4
 
-  integration-macos:
-    name: integration (macos, Homebrew FFmpeg)
-    runs-on: macos-latest
-    timeout-minutes: 25
+  macos:
+    name: test and integration (macos, Homebrew FFmpeg)
+    # Pinned: the newest image has the least capacity, and changes without notice.
+    runs-on: macos-15
+    timeout-minutes: 30
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -68,6 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: brew install ffmpeg
       - run: ffmpeg -version | head -1
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # sips makes the HEIC samples, so only this job tests HEIC end to end.
       - run: ./scripts/make-fixtures.sh
       - run: cargo test --workspace --locked -- --nocapture 2>&1 | tee test.log
