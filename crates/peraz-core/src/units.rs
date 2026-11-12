@@ -61,9 +61,52 @@ pub fn format_duration(seconds: f64) -> String {
     }
 }
 
+/// Parses an SI size (`25MB`, `8 MB`, `500kB`, `1.5GB`, `900000B`) into bytes. Binary units
+/// (`MiB`) are rejected with an explanation rather than silently reinterpreted.
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let text = s.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("`{s}` is not a size like 25MB"))?;
+    let scale = match unit.trim().to_ascii_lowercase().as_str() {
+        "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" | "m" => 1e6,
+        "gb" | "g" => 1e9,
+        "kib" | "mib" | "gib" => {
+            return Err(format!(
+                "`{s}` uses binary units; Peraz uses SI units (kB, MB, GB)"
+            ));
+        }
+        "" => return Err(format!("`{s}` needs a unit: B, kB, MB, or GB")),
+        other => return Err(format!("unknown size unit `{other}`; use B, kB, MB, or GB")),
+    };
+    let bytes = value * scale;
+    if !bytes.is_finite() || bytes < 1.0 {
+        return Err(format!("`{s}` is not a usable size"));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // checked positive and finite
+    Ok(bytes.floor() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_parse_in_si_units() {
+        assert_eq!(parse_size("25MB"), Ok(25_000_000));
+        assert_eq!(parse_size("8 mb"), Ok(8_000_000));
+        assert_eq!(parse_size("1.5GB"), Ok(1_500_000_000));
+        assert_eq!(parse_size("500kB"), Ok(500_000));
+        assert!(parse_size("25MiB").unwrap_err().contains("SI"));
+        assert!(parse_size("25").unwrap_err().contains("unit"));
+    }
 
     #[test]
     fn bytes_use_si_units() {

@@ -6,6 +6,7 @@
 mod compress;
 mod doctor;
 mod probe;
+mod recipes;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,9 @@ enum Command {
     Probe(probe::Args),
     /// Show which FFmpeg Peraz uses and what it can encode.
     Doctor(doctor::Args),
+    /// List and show recipes (named sets of settings for --recipe).
+    #[command(subcommand)]
+    Recipe(recipes::Command),
 }
 
 fn main() -> ExitCode {
@@ -60,6 +64,7 @@ fn main() -> ExitCode {
         Command::Compress(args) => compress::run(ffmpeg, args),
         Command::Probe(args) => probe::run(ffmpeg, args),
         Command::Doctor(args) => doctor::run(ffmpeg, args),
+        Command::Recipe(command) => recipes::run(command),
     };
     ExitCode::from(code)
 }

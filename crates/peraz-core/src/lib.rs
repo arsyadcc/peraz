@@ -7,6 +7,7 @@ pub mod media;
 pub mod plan;
 pub mod recipe;
 pub mod report;
+pub mod settings;
 pub mod units;
 
 pub use media::{Alpha, AudioTrack, MediaInfo, MediaKind, Rational, VideoTrack};

@@ -23,6 +23,8 @@ peraz compress --format mp4 reaction.gif           # GIF → MP4, often 70-95% s
 peraz compress report.pdf book.epub                # recompress the pictures inside
 peraz compress --json --out-dir out/ media/*     # machine-readable report
 peraz compress --jobs 1 *.mov                      # one at a time, with live progress
+peraz compress --recipe web-images photos/*        # named settings (see Recipes)
+peraz recipe list
 peraz probe video.mp4 photo.heic                # inspect media
 peraz doctor                                    # which FFmpeg is used and what it can encode
 ```
@@ -58,6 +60,32 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 `--format webp` and `--format avif` turn videos and GIFs into animated WebP or AVIF (same
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
 `--format mp4` turns a GIF into an H.264 video.
+
+### Recipes
+
+A recipe is a named set of settings, written in TOML with the same keys as the flags:
+
+```toml
+version = 1                      # recipe format version
+description = "Pictures for our website"
+quality = "balanced"             # highest, high, balanced, small, smallest
+format = "webp"                  # keep, jpeg, png, webp, avif, gif, mp4
+max_width = 2000                 # pixels; never scales up
+max_height = 2000
+codec = "h264"                   # h264, hevc
+encoder = "auto"                 # auto, software, hardware
+no_audio = false
+target_size = "25MB"             # SI units; videos only
+fps = 12                         # GIF and animated WebP/AVIF
+```
+
+Every key except `version` is optional, and unknown keys are errors. Use one with
+`peraz compress --recipe <name or file.toml>`; flags on the command line override the recipe's
+values. `peraz recipe list` shows the built-in recipes and yours; `peraz recipe show <name>`
+prints one as TOML. Your recipes live in `<config dir>/recipes/<name>.toml`, where the config
+dir is `PERAZ_CONFIG_DIR`, or `~/Library/Application Support/peraz` (macOS),
+`$XDG_CONFIG_HOME/peraz` or `~/.config/peraz` (Linux), `%APPDATA%\peraz` (Windows). A recipe
+with the same name as a built-in one replaces it.
 
 Peraz needs `ffmpeg` and `ffprobe`. Until bundled builds exist, it uses `--ffmpeg <path>`,
 `PERAZ_FFMPEG`, or `ffmpeg` on `PATH`, in that order.

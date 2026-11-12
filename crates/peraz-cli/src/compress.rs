@@ -5,16 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
+use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Job, KeepReason, Outcome, OutputTarget,
-    Plan, Quality, Recipe, Report, VideoCodec, VideoOutput, VideoPlan, VideoRecipe,
+    EncoderPreference, Job, KeepReason, Outcome, OutputTarget, Plan, Quality, Recipe, Report,
+    VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::BuildInfo;
 use serde::Serialize;
 
-use crate::{exit, locate, print_json};
+use crate::{exit, locate, print_json, recipes};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -22,17 +23,22 @@ pub struct Args {
     #[arg(required = true)]
     files: Vec<PathBuf>,
 
-    /// Quality level: highest, high, balanced, small, smallest.
-    #[arg(short, long, default_value_t = Quality::Balanced, value_parser = parse::<Quality>)]
-    quality: Quality,
+    /// Use a recipe: a built-in or your own name (see `peraz recipe list`), or a .toml file.
+    /// Flags given here override the recipe's values.
+    #[arg(short, long, value_name = "NAME|FILE")]
+    recipe: Option<String>,
 
-    /// Video codec: h264 (plays everywhere) or hevc (smaller).
-    #[arg(long, default_value_t = VideoCodec::H264, value_parser = parse::<VideoCodec>)]
-    codec: VideoCodec,
+    /// Quality level: highest, high, balanced (default), small, smallest.
+    #[arg(short, long, value_parser = parse::<Quality>)]
+    quality: Option<Quality>,
 
-    /// Encoder: auto (smallest files), software, or hardware (fastest).
-    #[arg(long, default_value_t = EncoderPreference::Auto, value_parser = parse::<EncoderPreference>)]
-    encoder: EncoderPreference,
+    /// Video codec: h264 (default, plays everywhere) or hevc (smaller).
+    #[arg(long, value_parser = parse::<VideoCodec>)]
+    codec: Option<VideoCodec>,
+
+    /// Encoder: auto (default, smallest files), software, or hardware (fastest).
+    #[arg(long, value_parser = parse::<EncoderPreference>)]
+    encoder: Option<EncoderPreference>,
 
     /// Scale down to at most this width (never scales up).
     #[arg(long, value_name = "PIXELS")]
@@ -42,10 +48,10 @@ pub struct Args {
     #[arg(long, value_name = "PIXELS")]
     max_height: Option<u32>,
 
-    /// Output format: keep, jpeg, png, webp, avif, gif, mp4. For videos and GIFs, webp/avif make
-    /// animated images, gif makes a GIF, and mp4 turns a GIF into a video.
-    #[arg(long, default_value = "keep", value_parser = parse_format)]
-    format: OutputFormat,
+    /// Output format: keep (default), jpeg, png, webp, avif, gif, mp4. For videos and GIFs,
+    /// webp/avif make animated images, gif makes a GIF, and mp4 turns a GIF into a video.
+    #[arg(long, value_parser = parse_format)]
+    format: Option<String>,
 
     /// Frame rate for GIF and animated WebP/AVIF (default by quality level; never above the source).
     #[arg(long, value_name = "FPS", value_parser = clap::value_parser!(u32).range(1..=50))]
@@ -62,7 +68,7 @@ pub struct Args {
     /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
     /// Replaces --quality for videos; the result is verified and never larger than the target.
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
-    target_size: Option<u64>,
+    target_size: Option<String>,
 
     /// Remove all audio tracks.
     #[arg(long)]
@@ -90,71 +96,16 @@ pub struct Args {
     json: bool,
 }
 
-/// `--format`: one flag for every kind of input.
-///
-/// | value  | still images        | videos                 | GIFs                   |
-/// |--------|---------------------|------------------------|------------------------|
-/// | keep   | same format         | MP4                    | GIF                    |
-/// | jpeg   | JPEG                | MP4                    | GIF                    |
-/// | png    | PNG                 | MP4                    | GIF                    |
-/// | webp   | WebP                | animated WebP          | animated WebP          |
-/// | avif   | AVIF                | animated AVIF          | animated AVIF          |
-/// | gif    | same format         | GIF                    | GIF                    |
-/// | mp4    | same format         | MP4                    | MP4                    |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OutputFormat {
-    image: ImageFormat,
-    video: VideoOutput,
+/// `--format`: checked here so mistakes are usage errors; the meaning lives in `peraz-core`.
+fn parse_format(s: &str) -> Result<String, String> {
+    s.parse::<OutputFormat>()
+        .map(|_| s.to_owned())
+        .map_err(|e| e.to_string())
 }
 
-fn parse_format(s: &str) -> Result<OutputFormat, String> {
-    let (image, video) = match s {
-        "keep" => (ImageFormat::Keep, VideoOutput::Keep),
-        "jpeg" | "jpg" => (ImageFormat::Jpeg, VideoOutput::Keep),
-        "png" => (ImageFormat::Png, VideoOutput::Keep),
-        "webp" => (ImageFormat::Webp, VideoOutput::Webp),
-        "avif" => (ImageFormat::Avif, VideoOutput::Avif),
-        "gif" => (ImageFormat::Keep, VideoOutput::Gif),
-        "mp4" => (ImageFormat::Keep, VideoOutput::Mp4),
-        other => {
-            return Err(format!(
-                "unknown format `{other}`; expected one of: keep, jpeg, png, webp, avif, gif, mp4"
-            ));
-        }
-    };
-    Ok(OutputFormat { image, video })
-}
-
-/// Parses an SI size (`25MB`, `8 MB`, `500kB`, `1.5GB`, `900000B`) into bytes.
-fn parse_size(s: &str) -> Result<u64, String> {
-    let text = s.trim();
-    let split = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let value: f64 = number
-        .parse()
-        .map_err(|_| format!("`{s}` is not a size like 25MB"))?;
-    let scale = match unit.trim().to_ascii_lowercase().as_str() {
-        "b" => 1.0,
-        "kb" | "k" => 1e3,
-        "mb" | "m" => 1e6,
-        "gb" | "g" => 1e9,
-        "kib" | "mib" | "gib" => {
-            return Err(format!(
-                "`{s}` uses binary units; Peraz uses SI units (kB, MB, GB)"
-            ));
-        }
-        "" => return Err(format!("`{s}` needs a unit: B, kB, MB, or GB")),
-        other => return Err(format!("unknown size unit `{other}`; use B, kB, MB, or GB")),
-    };
-    let bytes = value * scale;
-    if !bytes.is_finite() || bytes < 1.0 {
-        return Err(format!("`{s}` is not a usable size"));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    // checked positive and finite
-    Ok(bytes.floor() as u64)
+/// `--target-size`: an SI size such as `25MB`.
+fn parse_size(s: &str) -> Result<String, String> {
+    peraz_core::units::parse_size(s).map(|_| s.to_owned())
 }
 
 /// Parses seconds (`12`, `12.5`) into milliseconds.
@@ -179,6 +130,8 @@ fn parse<T: std::str::FromStr<Err = peraz_core::recipe::UnknownValue>>(
 #[derive(Serialize)]
 struct Output<'a> {
     ffmpeg: Option<&'a BuildInfo>,
+    /// The recipe used, when one was given with `--recipe`.
+    recipe: Option<&'a str>,
     results: &'a [Report],
     summary: Summary,
 }
@@ -205,6 +158,13 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         eprintln!("error: --out-dir {} is not a folder", dir.display());
         return exit::USAGE;
     }
+    let (recipe, recipe_name) = match recipe(args) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return exit::USAGE;
+        }
+    };
     let tools = match locate(ffmpeg) {
         Ok(tools) => tools,
         Err(code) => return code,
@@ -220,7 +180,6 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         }
     };
 
-    let recipe = recipe(args);
     let target = output_target(args);
     let cancel = install_cancel_handler();
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
@@ -271,6 +230,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     if args.json {
         print_json(Output {
             ffmpeg: Some(&build),
+            recipe: recipe_name.as_deref(),
             results: &reports,
             summary,
         });
@@ -287,29 +247,31 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
 }
 
 /// The recipe the command-line flags describe.
-fn recipe(args: &Args) -> Recipe {
-    Recipe {
+/// The settings the command line describes: flags first, then the recipe, then defaults.
+fn recipe(args: &Args) -> Result<(Recipe, Option<String>), String> {
+    let flags = Settings {
         quality: args.quality,
-        video: VideoRecipe {
-            codec: args.codec,
-            encoder: args.encoder,
-            max_width: args.max_width,
-            max_height: args.max_height,
-            remove_audio: args.no_audio,
-            target_bytes: args.target_size,
-            output: args.format.video,
-        },
-        gif: GifRecipe {
-            fps: args.fps,
-            start_ms: args.start,
-            duration_ms: args.duration,
-        },
-        image: ImageRecipe {
-            format: args.format.image,
-            max_width: args.max_width,
-            max_height: args.max_height,
-        },
-    }
+        format: args.format.clone(),
+        max_width: args.max_width,
+        max_height: args.max_height,
+        codec: args.codec,
+        encoder: args.encoder,
+        no_audio: args.no_audio.then_some(true),
+        target_size: args.target_size.clone(),
+        fps: args.fps,
+        ..Settings::default()
+    };
+    let (merged, name) = match &args.recipe {
+        Some(name) => {
+            let found = recipes::find(name)?;
+            (flags.over(&found.settings), Some(found.name))
+        }
+        None => (flags, None),
+    };
+    let recipe = merged
+        .to_recipe(args.start, args.duration)
+        .map_err(|e| e.to_string())?;
+    Ok((recipe, name))
 }
 
 fn output_target(args: &Args) -> OutputTarget {
@@ -512,22 +474,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_and_seconds_parsing() {
-        assert_eq!(parse_format("gif").unwrap().video, VideoOutput::Gif);
-        let webp = parse_format("webp").unwrap();
-        assert_eq!(
-            (webp.image, webp.video),
-            (ImageFormat::Webp, VideoOutput::Webp)
-        );
-        assert_eq!(parse_format("mp4").unwrap().image, ImageFormat::Keep);
+    fn flag_values_are_checked() {
+        assert_eq!(parse_format("webp").as_deref(), Ok("webp"));
         assert!(parse_format("mov").unwrap_err().contains("mp4"));
-        assert_eq!(parse_seconds("12.5"), Ok(12_500));
-        assert_eq!(parse_size("25MB"), Ok(25_000_000));
-        assert_eq!(parse_size("8 mb"), Ok(8_000_000));
-        assert_eq!(parse_size("1.5GB"), Ok(1_500_000_000));
-        assert_eq!(parse_size("500kB"), Ok(500_000));
+        assert_eq!(parse_size("25MB").as_deref(), Ok("25MB"));
         assert!(parse_size("25MiB").unwrap_err().contains("SI"));
-        assert!(parse_size("25").unwrap_err().contains("unit"));
+        assert_eq!(parse_seconds("12.5"), Ok(12_500));
         assert_eq!(parse_seconds("0"), Ok(0));
         assert!(parse_seconds("-1").is_err());
         assert!(parse_seconds("soon").is_err());
