@@ -30,20 +30,20 @@ dir="$out/manifests/a/Arsyadcc/Peraz/$version"
 mkdir -p "$dir"
 
 cat > "$dir/$id.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.28.0.schema.json
 
 PackageIdentifier: $id
 PackageVersion: $version
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 # Peraz runs FFmpeg as a separate program for videos, GIFs, HEIC, and AVIF, so FFmpeg is installed
 # with it, as Homebrew does. The release is built with a static C runtime: no Visual C++
 # redistributable is needed.
 cat > "$dir/$id.installer.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
 
 PackageIdentifier: $id
 PackageVersion: $version
@@ -61,11 +61,11 @@ Installers:
   InstallerUrl: $url
   InstallerSha256: $sha
 ManifestType: installer
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 cat > "$dir/$id.locale.en-US.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
 
 PackageIdentifier: $id
 PackageVersion: $version
@@ -100,7 +100,7 @@ Documentations:
 - DocumentLabel: Command-line reference
   DocumentUrl: $repo/blob/$tag/docs/cli.md
 ManifestType: defaultLocale
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 echo "$dir"
