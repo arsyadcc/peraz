@@ -59,6 +59,25 @@ cargo install --locked peraz                 # add --features simd for faster JP
 cargo install --locked --path crates/peraz   # from a clone of this repository
 ```
 
+### Coding agents
+
+A plugin for Claude Code and Codex teaches the agent to use Peraz: when to reach for it, which
+flags fit a request, and how to read its `--json` report. Then you can ask in plain words, such as
+"make the images in `public/` smaller for the web".
+
+```sh
+# Claude Code (in a session)
+/plugin marketplace add arsyadcc/peraz
+/plugin install peraz@peraz
+
+# Codex: add the marketplace, then install Peraz from /plugins
+codex plugin marketplace add arsyadcc/peraz
+```
+
+The plugin is a skill in [agents/peraz](agents/peraz); Peraz itself must be installed. Other
+agents that read Agent Skills can use
+[agents/peraz/skills/peraz](agents/peraz/skills/peraz) directly.
+
 ### Shell completions
 
 Homebrew installs them for you. Otherwise, `peraz completions <shell>` prints the script for

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "peraz",
+  "version": "0.1.0",
+  "description": "Compress videos, images, GIFs, PDFs, and EPUBs with the peraz CLI, and read its reports",
+  "author": {
+    "name": "Arsyad",
+    "url": "https://github.com/arsyadcc"
+  },
+  "homepage": "https://github.com/arsyadcc/peraz",
+  "repository": "https://github.com/arsyadcc/peraz",
+  "license": "GPL-3.0-or-later",
+  "keywords": ["compression", "video", "images", "gif", "pdf", "epub", "ffmpeg", "cli"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Peraz",
+        "shortDescription": "Compress media from the terminal with results you can trust",
+        "developerName": "Arsyad",
+        "category": "Productivity",
+        "websiteURL": "https://github.com/arsyadcc/peraz",
+        "defaultPrompt": "Make the images in this folder smaller for the web"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "peraz",
+  "version": "0.1.0",
+  "description": "Compress videos, images, GIFs, PDFs, and EPUBs with the peraz CLI, and read its reports",
+  "author": {
+    "name": "Arsyad",
+    "url": "https://github.com/arsyadcc"
+  },
+  "homepage": "https://github.com/arsyadcc/peraz",
+  "repository": "https://github.com/arsyadcc/peraz",
+  "license": "GPL-3.0-or-later",
+  "keywords": ["compression", "video", "images", "gif", "pdf", "epub", "ffmpeg", "cli"]
+}

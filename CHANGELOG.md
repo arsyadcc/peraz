@@ -20,6 +20,8 @@ between alpha versions.
   `peraz ffmpeg uninstall` removes it. The builds (GPL, with x264, x265, SVT-AV1, dav1d, and
   libwebp) are published with their sources as `ffmpeg-*` releases. **Interface:** new commands.
 - Each release has `peraz-full-<platform>` archives with Peraz and the bundled FFmpeg together.
+- A plugin for Claude Code and Codex (`/plugin marketplace add arsyadcc/peraz`): a skill that
+  teaches coding agents to compress media with Peraz and read its reports.
 
 ## [0.1.0] - 2026-11-13
 

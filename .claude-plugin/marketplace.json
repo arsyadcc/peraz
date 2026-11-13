@@ -1,0 +1,17 @@
+{
+  "name": "peraz",
+  "description": "Peraz for coding agents: compress videos, images, GIFs, PDFs, and EPUBs from the terminal",
+  "owner": {
+    "name": "Arsyad",
+    "url": "https://github.com/arsyadcc"
+  },
+  "plugins": [
+    {
+      "name": "peraz",
+      "source": "./agents/peraz",
+      "description": "Teaches the agent to compress media with the peraz CLI and to read its reports",
+      "category": "productivity",
+      "tags": ["compression", "video", "images", "gif", "pdf", "cli"]
+    }
+  ]
+}

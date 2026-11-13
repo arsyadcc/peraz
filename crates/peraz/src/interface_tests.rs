@@ -141,3 +141,147 @@ fn every_environment_variable_is_documented() {
     let real = BTreeSet::from([peraz_engine::ffmpeg::FFMPEG_ENV, crate::recipes::CONFIG_ENV]);
     assert_eq!(documented, real);
 }
+
+/// The agent skill in `agents/peraz` (the Claude Code and Codex plugin): every Markdown file, or
+/// `None` when the repository is not next to the crate.
+fn skill_files() -> Option<Vec<(PathBuf, String)>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../agents/peraz/skills/peraz");
+    let mut files = Vec::new();
+    let mut dirs = vec![root];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                let text = std::fs::read_to_string(&path).ok()?;
+                files.push((path, text));
+            }
+        }
+    }
+    Some(files)
+}
+
+/// The code in Markdown: inline `code` spans and fenced blocks.
+fn code_in(text: &str) -> Vec<String> {
+    let mut code = Vec::new();
+    let mut block: Option<String> = None;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            match block.take() {
+                Some(finished) => code.push(finished),
+                None => block = Some(String::new()),
+            }
+        } else if let Some(block) = &mut block {
+            block.push_str(line);
+            block.push('\n');
+        } else {
+            code.extend(line.split('`').skip(1).step_by(2).map(str::to_owned));
+        }
+    }
+    code
+}
+
+#[test]
+fn the_agent_skill_names_only_real_flags() {
+    let Some(files) = skill_files() else { return };
+    let mut command = Cli::command();
+    command.build();
+    let mut real = BTreeSet::new();
+    real_flags(&command, &mut real);
+    for (path, text) in files {
+        // Flags after `peraz` on a line, or a snippet of flags alone (`--max-width 1280`); other
+        // programs' flags (`cargo install --locked peraz`) are not Peraz's.
+        let lines: Vec<String> = code_in(&text)
+            .iter()
+            .flat_map(|code| code.lines().map(str::to_owned).collect::<Vec<_>>())
+            .collect();
+        for line in lines {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let start = match words.iter().position(|w| *w == "peraz") {
+                Some(i) => i + 1,
+                None if words.first().is_some_and(|w| w.starts_with('-')) => 0,
+                None => continue,
+            };
+            for word in &words[start..] {
+                let word = word.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | ':'));
+                let flag = word.split('=').next().unwrap_or(word);
+                let is_long = flag.starts_with("--") && flag[2..].starts_with(char::is_alphabetic);
+                let is_short = flag.len() == 2
+                    && flag.starts_with('-')
+                    && flag[1..].starts_with(char::is_alphabetic);
+                if is_long || is_short {
+                    assert!(
+                        real.contains(flag),
+                        "{} names {flag}, which peraz does not have",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_agent_skill_names_only_real_commands() {
+    let Some(files) = skill_files() else { return };
+    let cli = Cli::command();
+    for (path, text) in files {
+        for code in code_in(&text) {
+            let words: Vec<&str> = code.split_whitespace().collect();
+            for (i, _) in words.iter().enumerate().filter(|(_, w)| **w == "peraz") {
+                // `peraz recipe show <name>` → ["recipe", "show"]; files and flags end it.
+                let names: Vec<&str> = words[i + 1..]
+                    .iter()
+                    .take_while(|w| w.chars().all(|c| c.is_ascii_lowercase()))
+                    .copied()
+                    .collect();
+                let Some(first) = names.first() else { continue };
+                let sub = cli.find_subcommand(first).unwrap_or_else(|| {
+                    panic!(
+                        "{} names `peraz {first}`, which does not exist",
+                        path.display()
+                    )
+                });
+                if sub.has_subcommands() {
+                    let second = names.get(1).copied().unwrap_or_default();
+                    assert!(
+                        sub.find_subcommand(second).is_some(),
+                        "{} names `peraz {first} {second}`, which does not exist",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The plugin manifests for Claude Code and Codex agree with each other and with this version.
+#[test]
+fn the_agent_plugin_manifests_match_this_version() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(root.join(path)).ok()?;
+        Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}")))
+    };
+    let Some(claude_plugin) = read("agents/peraz/.claude-plugin/plugin.json") else {
+        return;
+    };
+    let codex_plugin = read("agents/peraz/plugin.json").unwrap();
+    for plugin in [&claude_plugin, &codex_plugin] {
+        assert_eq!(plugin["name"], "peraz");
+        assert_eq!(
+            plugin["version"],
+            env!("CARGO_PKG_VERSION"),
+            "the plugin's version follows Peraz's: update both plugin.json files"
+        );
+    }
+    let claude_market = read(".claude-plugin/marketplace.json").unwrap();
+    let codex_market = read(".agents/plugins/marketplace.json").unwrap();
+    for source in [
+        &claude_market["plugins"][0]["source"],
+        &codex_market["plugins"][0]["source"]["path"],
+    ] {
+        assert_eq!(source, "./agents/peraz");
+    }
+}
