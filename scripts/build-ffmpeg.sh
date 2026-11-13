@@ -158,17 +158,25 @@ build_x264() {
 build_x265() {
   log x265
   used+=(x265)
-  local dir
+  local dir options=(-DENABLE_SHARED=OFF -DENABLE_CLI=OFF)
   dir=$(fetch x265)
+  # x265's SVE2 code needs a compiler that knows Armv9 (GCC 12 or newer); without one, it uses
+  # its Neon and SVE code. It picks the code for the CPU at run time either way.
+  if [[ $(uname -m) == aarch64 ]] && ! echo 'int x;' | $CC -march=armv9-a -x c -c -o /dev/null - 2>/dev/null; then
+    options+=(-DENABLE_SVE2=OFF -DENABLE_SVE2_BITPERM=OFF)
+  fi
   local b10="$dir/build-10" b8="$dir/build-8"
   mkdir -p "$b10" "$b8"
-  (cd "$b10" && cmake_static -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF -DENABLE_SHARED=OFF \
-    -DENABLE_CLI=OFF ../source && ninja)
+  (cd "$b10" && cmake_static "${options[@]}" -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF ../source \
+    && ninja)
   cp "$b10/libx265.a" "$b8/libx265_main10.a"
-  (cd "$b8" && cmake_static -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT=ON \
-    -DENABLE_SHARED=OFF -DENABLE_CLI=OFF ../source && ninja)
+  (cd "$b8" && cmake_static "${options[@]}" -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. \
+    -DLINKED_10BIT=ON ../source && ninja)
   (cd "$b8" && mv libx265.a libx265_main.a \
     && merge_archives libx265.a libx265_main.a libx265_main10.a && ninja install)
+  # On Windows, -lgcc_s would pull in libgcc_s_seh-1.dll; the static libgcc is linked anyway.
+  sed -i.bak 's/ -lgcc_s//g' "$prefix/lib/pkgconfig/x265.pc"
+  rm -f "$prefix/lib/pkgconfig/x265.pc.bak"
 }
 
 build_svt_av1() {

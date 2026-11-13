@@ -37,7 +37,7 @@ check_libraries() {
       && fail "$tool loads a library that is not part of macOS"
   else
     deps=$(readelf -d "$tool" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
-    echo "$deps" | grep -vE '^(libc|libm|libdl|libpthread|librt|libstdc\+\+|libgcc_s|ld-linux-[a-z0-9_-]+)\.so(\.[0-9]+)*$' \
+    echo "$deps" | grep -vE '^(libc|libm|libmvec|libdl|libpthread|librt|libstdc\+\+|libgcc_s|ld-linux-[a-z0-9_-]+)\.so(\.[0-9]+)*$' \
       && fail "$tool loads a library that is not part of the base system"
   fi
   echo "$(basename "$tool"): $(echo "$deps" | tr '\n' ' ')"
