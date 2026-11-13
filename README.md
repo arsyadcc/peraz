@@ -268,8 +268,8 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
 
 - macOS, Linux, or Windows
 - `ffmpeg` and `ffprobe` (Homebrew installs them with Peraz). Peraz uses `--ffmpeg <path>`,
-  `PERAZ_FFMPEG`, or `ffmpeg` on `PATH`, in that order. `peraz doctor` shows which one it found
-  and what it can encode.
+  `PERAZ_FFMPEG`, a bundled build in a `peraz-ffmpeg` folder next to `peraz`, or `ffmpeg` on
+  `PATH`, in that order. `peraz doctor` shows which one it found and what it can encode.
 - Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs;
   videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 

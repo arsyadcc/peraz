@@ -105,7 +105,7 @@ that is not smaller than the input is not kept, unless the format was changed on
 
 | Variable | Description |
 | --- | --- |
-| `PERAZ_FFMPEG` | The `ffmpeg` binary or its folder, used when `--ffmpeg` is not given. Otherwise Peraz looks on `PATH`. |
+| `PERAZ_FFMPEG` | The `ffmpeg` binary or its folder, used when `--ffmpeg` is not given. Otherwise Peraz uses the bundled build in a `peraz-ffmpeg` folder next to the `peraz` executable, if there is one, and then looks on `PATH`. |
 | `PERAZ_CONFIG_DIR` | The configuration folder, which holds `recipes/`. Default: `~/Library/Application Support/peraz` (macOS), `$XDG_CONFIG_HOME/peraz` or `~/.config/peraz` (Linux), `%APPDATA%\peraz` (Windows). |
 
 ## Exit codes

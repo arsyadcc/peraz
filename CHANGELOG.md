@@ -11,6 +11,12 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- Peraz uses a bundled FFmpeg build in a `peraz-ffmpeg` folder next to the `peraz` executable,
+  after `--ffmpeg` and `PERAZ_FFMPEG` and before `PATH`. **Interface:** `toolchain.source` in
+  `--json` output can be `bundled`.
+
 ## [0.1.0] - 2026-11-13
 
 The first stable version. It works like 0.1.0-alpha.4; what changes is the promise: the

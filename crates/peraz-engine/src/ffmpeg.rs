@@ -1,6 +1,7 @@
 //! Locating FFmpeg and detecting what it can do.
 //!
-//! Lookup order: `--ffmpeg`, then `PERAZ_FFMPEG`, then `PATH`. Encoders are detected from the
+//! Lookup order: `--ffmpeg`, then `PERAZ_FFMPEG`, then the bundled build in a `peraz-ffmpeg`
+//! folder next to the `peraz` executable, then `PATH`. Encoders are detected from the
 //! build, never assumed; a compiled-in hardware encoder still needs a trial encode to prove the
 //! hardware exists.
 
@@ -16,6 +17,10 @@ use crate::EngineError;
 /// Environment variable that points Peraz at a specific `ffmpeg` binary.
 pub const FFMPEG_ENV: &str = "PERAZ_FFMPEG";
 
+/// Folder next to the `peraz` executable that holds the bundled `ffmpeg` and `ffprobe`. It is a
+/// folder of its own so that installing Peraz never puts an `ffmpeg` on `PATH`.
+pub const BUNDLED_DIR: &str = "peraz-ffmpeg";
+
 /// Where the `ffmpeg` binary came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +29,8 @@ pub enum ToolSource {
     Flag,
     /// The `PERAZ_FFMPEG` environment variable.
     Env,
+    /// The bundled build next to the `peraz` executable.
+    Bundled,
     /// Found on `PATH`.
     Path,
 }
@@ -38,21 +45,26 @@ pub struct Toolchain {
 
 impl Toolchain {
     /// Finds FFmpeg using the process environment: `explicit` (the `--ffmpeg` flag), then
-    /// `PERAZ_FFMPEG`, then `PATH`. A bundled build will slot in before `PATH` once it exists.
+    /// `PERAZ_FFMPEG`, then the bundled build ([`bundled_dir`]), then `PATH`.
     pub fn locate(explicit: Option<&Path>) -> Result<Self, EngineError> {
         Self::locate_with(
             explicit,
             std::env::var_os(FFMPEG_ENV),
+            bundled_dir().as_deref(),
             std::env::var_os("PATH").as_deref(),
         )
     }
 
-    /// Same as [`Toolchain::locate`], with the environment passed in explicitly.
+    /// Same as [`Toolchain::locate`], with the environment and the bundled folder passed in.
     pub fn locate_with(
         explicit: Option<&Path>,
         env_ffmpeg: Option<OsString>,
+        bundled: Option<&Path>,
         path_var: Option<&OsStr>,
     ) -> Result<Self, EngineError> {
+        let bundled = bundled
+            .map(|dir| dir.join(exe_name("ffmpeg")))
+            .filter(|path| path.is_file());
         let (ffmpeg, source) = if let Some(path) = explicit {
             (existing_tool(path, "ffmpeg", "--ffmpeg")?, ToolSource::Flag)
         } else if let Some(path) = env_ffmpeg.filter(|v| !v.is_empty()) {
@@ -60,6 +72,8 @@ impl Toolchain {
                 existing_tool(Path::new(&path), "ffmpeg", FFMPEG_ENV)?,
                 ToolSource::Env,
             )
+        } else if let Some(path) = bundled {
+            (path, ToolSource::Bundled)
         } else {
             let found = find_on_path("ffmpeg", path_var).ok_or(EngineError::ToolNotFound {
                 tool: "ffmpeg",
@@ -320,6 +334,15 @@ fn error_line(stderr: &str) -> String {
         .unwrap_or_else(|| "no error message".to_owned())
 }
 
+/// The folder where a bundled build would be: [`BUNDLED_DIR`] next to the running executable,
+/// after resolving symbolic links (Homebrew and other package managers link `peraz` into a `bin`
+/// folder elsewhere).
+pub fn bundled_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    Some(exe.parent()?.join(BUNDLED_DIR))
+}
+
 fn existing_tool(path: &Path, tool: &'static str, origin: &str) -> Result<PathBuf, EngineError> {
     let path = if path.is_dir() {
         path.join(exe_name(tool))
@@ -434,18 +457,61 @@ mod tests {
 
     #[test]
     fn explicit_path_must_exist() {
-        let err = Toolchain::locate_with(Some(Path::new("/definitely/not/ffmpeg")), None, None)
-            .unwrap_err();
+        let err =
+            Toolchain::locate_with(Some(Path::new("/definitely/not/ffmpeg")), None, None, None)
+                .unwrap_err();
         assert!(err.is_environment());
         assert!(err.to_string().contains("--ffmpeg points to"));
     }
 
     #[test]
     fn missing_path_is_an_environment_error() {
-        let err = Toolchain::locate_with(None, None, Some(OsStr::new(""))).unwrap_err();
+        let err = Toolchain::locate_with(None, None, None, Some(OsStr::new(""))).unwrap_err();
         assert!(matches!(
             err,
             EngineError::ToolNotFound { tool: "ffmpeg", .. }
         ));
+    }
+
+    /// A folder with empty `ffmpeg` and `ffprobe` files, which is all lookup checks.
+    fn fake_build(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("peraz-lookup-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["ffmpeg", "ffprobe"] {
+            std::fs::write(dir.join(exe_name(tool)), b"").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn bundled_build_comes_after_env_and_before_path() {
+        let bundled = fake_build("bundled");
+        let on_path = fake_build("path");
+        let path_var = std::env::join_paths([&on_path]).unwrap();
+
+        let found = Toolchain::locate_with(None, None, Some(&bundled), Some(&path_var)).unwrap();
+        assert_eq!(found.source, ToolSource::Bundled);
+        assert_eq!(found.ffmpeg, bundled.join(exe_name("ffmpeg")));
+        assert_eq!(found.ffprobe, bundled.join(exe_name("ffprobe")));
+
+        let env = Some(on_path.clone().into_os_string());
+        let found = Toolchain::locate_with(None, env, Some(&bundled), Some(&path_var)).unwrap();
+        assert_eq!(found.source, ToolSource::Env);
+
+        // No bundled build: PATH, as before.
+        let missing = bundled.join("missing");
+        let found = Toolchain::locate_with(None, None, Some(&missing), Some(&path_var)).unwrap();
+        assert_eq!(found.source, ToolSource::Path);
+
+        std::fs::remove_dir_all(bundled).unwrap();
+        std::fs::remove_dir_all(on_path).unwrap();
+    }
+
+    #[test]
+    fn bundled_dir_is_next_to_the_executable() {
+        let dir = bundled_dir().unwrap();
+        assert_eq!(dir.file_name().unwrap(), BUNDLED_DIR);
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(dir.parent(), exe.parent());
     }
 }

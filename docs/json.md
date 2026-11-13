@@ -137,7 +137,7 @@ makes it 1.
 | `toolchain` | object | The FFmpeg programs Peraz runs. |
 | `toolchain.ffmpeg` | string | Path of `ffmpeg`. |
 | `toolchain.ffprobe` | string | Path of `ffprobe`. |
-| `toolchain.source` | string | How they were found. One of `flag`, `env`, `path`. |
+| `toolchain.source` | string | How they were found. One of `flag`, `env`, `bundled`, `path`. |
 | `ffmpeg` | object | The FFmpeg build. |
 | `ffmpeg.version` | string | FFmpeg's version. |
 | `ffmpeg.license` | string | One of `lgpl`, `gpl`, `nonfree`. |

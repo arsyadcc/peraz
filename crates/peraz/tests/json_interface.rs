@@ -327,6 +327,26 @@ fn documented_values_are_complete() {
     }
 }
 
+/// `toolchain.source` names every place Peraz finds FFmpeg.
+#[test]
+fn documented_tool_sources_are_complete() {
+    use peraz_engine::ffmpeg::ToolSource;
+    let Some(docs) = docs() else { return };
+    let sources: BTreeSet<String> = [
+        ToolSource::Flag,
+        ToolSource::Env,
+        ToolSource::Bundled,
+        ToolSource::Path,
+    ]
+    .map(|source| to_json(source).as_str().unwrap().to_owned())
+    .into_iter()
+    .collect();
+    assert_eq!(
+        Some(sources),
+        one_of(&docs["`peraz doctor --json`"]["toolchain.source"])
+    );
+}
+
 fn to_json(value: impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap()
 }

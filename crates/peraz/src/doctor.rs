@@ -87,6 +87,7 @@ fn print_human(report: &Report, caps: &Capabilities) {
     let source = match report.toolchain.source {
         ToolSource::Flag => "--ffmpeg",
         ToolSource::Env => "PERAZ_FFMPEG",
+        ToolSource::Bundled => "the bundled build",
         ToolSource::Path => "PATH",
     };
     let license = match report.ffmpeg.license {
