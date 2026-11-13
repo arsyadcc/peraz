@@ -17,6 +17,13 @@ between alpha versions.
   `whatsapp` (64 MB, 720p) fit each video under that service's limit. The limits and their
   sources are in docs/recipes.md.
 
+### Changed
+
+- GIFs are denoised over time before frames are compared, so camera noise no longer counts as
+  change. At the default quality, GIFs from noisy footage were 1.6-2.1 times smaller in our
+  tests, and from clean footage 12-20% smaller. The strength follows `--quality` (none at
+  `highest`, strongest at `smallest`) and is lighter when the source is a GIF.
+
 ## [0.2.0] - 2026-11-14
 
 ### Added

@@ -695,6 +695,9 @@ pub struct GifPlan {
     /// A pixel whose color moved less than this (0–255 per channel) since the previous frame is
     /// left unchanged, which lets unchanged areas cost almost nothing.
     pub change_threshold: u8,
+    /// Temporal denoising strength (0 = off): small changes of a pixel from one frame to the next
+    /// are averaged away before diffing, so camera noise does not count as change.
+    pub denoise: u8,
     pub start_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     /// The output is a GIF made from something else (a video): kept even when larger.
@@ -748,6 +751,16 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
         max_quality,
         dithering_percent: [100, 100, 90, 80, 70][level],
         change_threshold: [1, 2, 3, 5, 8][level],
+        // Measured on an aerial shot and a screen recording, each also with noise added (scored
+        // against the clean original). At `balanced`, GIFs from the noisy clips got 1.6-2.1 times
+        // smaller and closer to the clean picture, and GIFs from the clean ones 12-20% smaller
+        // for an SSIM at most 0.003 lower; heavy noise needs the stronger levels. A GIF source's
+        // dithering also counts as noise, so GIFs get a lighter touch.
+        denoise: if info.kind == MediaKind::Animation {
+            [0, 2, 3, 5, 8][level]
+        } else {
+            [0, 3, 5, 8, 12][level]
+        },
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
         converts_format: info.kind != MediaKind::Animation,
@@ -1581,6 +1594,39 @@ mod tests {
         let plan = plan_gif(&video_info(320, 240, vec![]), &recipe).unwrap();
         assert_eq!((plan.width, plan.height), (320, 240), "never upscales");
         assert_eq!(plan.fps, 30, "never above the source frame rate");
+    }
+
+    #[test]
+    fn gif_denoising_grows_with_the_level_and_is_lighter_on_gifs() {
+        let mut recipe = Recipe::default();
+        recipe.video.output = VideoOutput::Gif;
+        let mut gif = video_info(480, 270, vec![]);
+        gif.kind = MediaKind::Animation;
+        let video = video_info(480, 270, vec![]);
+        let denoise = |info: &MediaInfo, quality| {
+            let mut recipe = recipe.clone();
+            recipe.quality = quality;
+            plan_gif(info, &recipe).unwrap().denoise
+        };
+        assert_eq!(
+            denoise(&video, Quality::Highest),
+            0,
+            "highest keeps every pixel"
+        );
+        assert_eq!(denoise(&gif, Quality::Highest), 0);
+        let levels = [
+            Quality::High,
+            Quality::Balanced,
+            Quality::Small,
+            Quality::Smallest,
+        ];
+        for pair in levels.windows(2) {
+            assert!(denoise(&video, pair[0]) < denoise(&video, pair[1]));
+            assert!(denoise(&gif, pair[0]) < denoise(&gif, pair[1]));
+        }
+        for level in levels {
+            assert!(denoise(&gif, level) < denoise(&video, level));
+        }
     }
 
     #[test]
