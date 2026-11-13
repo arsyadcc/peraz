@@ -86,6 +86,11 @@ What happened to one input, in `compress` results and `watch` lines.
 | `document.recompressed` | integer | Pictures replaced by a smaller version. |
 | `document.kept` | integer | Pictures whose new version was not smaller. |
 | `document.skipped` | integer | Pictures left alone (formats Peraz does not rewrite). |
+| `score` | object or null | With `--target-vmaf` (videos) or `--target-ssimulacra2` (still images): the score asked for and the one measured; null otherwise. |
+| `score.metric` | string | One of `vmaf`, `ssimulacra2`. |
+| `score.target` | integer | The score asked for. |
+| `score.score` | number | The score measured on the result, against the input at the output's size; below `score.target` when no setting could reach it. |
+| `score.sampled` | boolean | `true` when measured on samples of a longer video rather than the whole of it. |
 | `elapsed_seconds` | number | Time spent on this file. |
 
 `outcome.status` decides the exit code: any `cancelled` makes it 130, otherwise any `failed`
@@ -146,6 +151,7 @@ makes it 1.
 | `hardware_video_encoders[].api` | string | The hardware API, e.g. `videotoolbox`, `nvenc`. |
 | `hwaccels[]` | array of strings | FFmpeg's hardware decoding methods. |
 | `encoders[]` | array of strings | Every encoder in this FFmpeg build. |
+| `vmaf` | boolean | FFmpeg has the `libvmaf` filter, which `--target-vmaf` needs. |
 
 ## `peraz recipe list --json` and `peraz recipe show --json`
 
@@ -177,4 +183,6 @@ makes it 1.
 | `settings.encoder` | string | One of `auto`, `software`, `hardware`. |
 | `settings.no_audio` | boolean | |
 | `settings.target_size` | string | As written, e.g. `25MB`. |
+| `settings.target_vmaf` | integer | |
+| `settings.target_ssimulacra2` | integer | |
 | `settings.fps` | integer | |

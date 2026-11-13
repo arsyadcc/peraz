@@ -17,6 +17,15 @@ between alpha versions.
   `whatsapp` (64 MB, 720p) fit each video under that service's limit. The limits and their
   sources are in docs/recipes.md.
 
+- `--target-vmaf <score>` makes each video as small as it can be while it still reaches that
+  VMAF score: the CRF is searched on samples of the video (the whole video when it is at most
+  30 seconds), then the video is encoded once. Needs FFmpeg with libvmaf. **Interface:** new flag
+  and recipe key `target_vmaf`.
+- `--target-ssimulacra2 <score>` does the same for still images, with SSIMULACRA2.
+  **Interface:** new flag and recipe key `target_ssimulacra2`.
+- **Interface:** reports have a `score` field (`metric`, `target`, `score`, `sampled`), and
+  `peraz doctor --json` a `vmaf` field saying whether FFmpeg has libvmaf.
+
 ### Changed
 
 - GIFs are denoised over time before frames are compared, so camera noise no longer counts as

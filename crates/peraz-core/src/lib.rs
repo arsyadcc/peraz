@@ -13,15 +13,16 @@ pub mod units;
 pub use media::{Alpha, AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
 pub use plan::{
     AnimatedPlan, DocumentPlan, GifPlan, ImageDecoder, ImageEncoding, ImagePlan, Pass, PlanError,
-    RateControl, SizeTarget, TrimMethod, TrimPlan, VideoPlan, plan_animated, plan_document,
-    plan_gif, plan_image, plan_trim, plan_video,
+    RateControl, ScoreTarget, SizeTarget, TrimMethod, TrimPlan, VideoPlan, plan_animated,
+    plan_document, plan_gif, plan_image, plan_trim, plan_video,
 };
 pub use recipe::{
     Clip, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
     VideoOutput, VideoRecipe,
 };
 pub use report::{
-    DocumentStats, ExistingOutput, Job, KeepReason, Outcome, OutputTarget, Plan, Report,
+    DocumentStats, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan, Report,
+    Score,
 };
 
 /// Peraz version, taken from the workspace manifest.

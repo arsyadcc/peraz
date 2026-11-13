@@ -59,6 +59,9 @@ pub struct VideoRecipe {
     pub output: VideoOutput,
     /// Fit the output in this many bytes (SI). Replaces the quality level for video.
     pub target_bytes: Option<u64>,
+    /// Reach this VMAF score (0–100) with the smallest file: the encoder setting is searched on
+    /// samples of the video. Replaces the quality level for video.
+    pub target_vmaf: Option<u8>,
     /// Only cut the clip: copy the streams when the start is on a keyframe, re-encode otherwise.
     pub trim_only: bool,
     /// With `trim_only`, move the start back to the previous keyframe so the streams can be copied.
@@ -141,6 +144,9 @@ pub struct ImageRecipe {
     /// Bounding box for the displayed picture. Never upscales; aspect ratio is kept.
     pub max_width: Option<u32>,
     pub max_height: Option<u32>,
+    /// Reach this SSIMULACRA2 score (up to 100) with the smallest file: the encoder setting is
+    /// searched. Replaces the quality level for still images.
+    pub target_ssimulacra2: Option<u8>,
 }
 
 /// Everything that decides how a file is compressed.

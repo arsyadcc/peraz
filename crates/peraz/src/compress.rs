@@ -8,8 +8,8 @@ use std::sync::{Mutex, PoisonError};
 use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, ExistingOutput, Job, KeepReason, Outcome, OutputTarget, Plan, Quality,
-    Recipe, Report, TrimPlan, VideoCodec, VideoPlan,
+    EncoderPreference, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan,
+    Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::{BuildInfo, Capabilities, FFMPEG_ENV, Toolchain};
@@ -82,6 +82,18 @@ pub struct SettingsArgs {
     /// Replaces --quality for videos; the result is verified and never larger than the target.
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub target_size: Option<String>,
+
+    /// Make each video as small as it can be while it still reaches this VMAF score (1-100;
+    /// 93 is about --quality balanced). The encoder setting is searched on samples of the video.
+    /// Replaces --quality for videos; needs FFmpeg with libvmaf.
+    #[arg(long, value_name = "SCORE", value_parser = clap::value_parser!(u8).range(1..=100), conflicts_with = "target_size")]
+    pub target_vmaf: Option<u8>,
+
+    /// Make each still image as small as it can be while it still reaches this SSIMULACRA2 score
+    /// (1-100; 90 is visually lossless, 80 very high quality, 70 high, 50 medium). Replaces
+    /// --quality for still images.
+    #[arg(long, value_name = "SCORE", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub target_ssimulacra2: Option<u8>,
 
     /// Remove all audio tracks.
     #[arg(long)]
@@ -227,6 +239,9 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         Ok(found) => found,
         Err(code) => return code,
     };
+    if let Err(code) = check_vmaf(&recipe, tools.as_ref(), &caps) {
+        return code;
+    }
 
     let target = output_target(args);
     let check_dir = check_folder(args, recipe_name.as_deref());
@@ -310,6 +325,30 @@ fn inspect(tools: Option<&Toolchain>) -> Result<(Option<BuildInfo>, Capabilities
             eprintln!("error: {e}");
             exit::ENVIRONMENT
         })
+}
+
+/// `--target-vmaf` needs FFmpeg's libvmaf filter: without it, stop before any work.
+pub(crate) fn check_vmaf(
+    recipe: &Recipe,
+    tools: Option<&Toolchain>,
+    caps: &Capabilities,
+) -> Result<(), u8> {
+    if recipe.video.target_vmaf.is_none() || recipe.video.target_bytes.is_some() {
+        return Ok(());
+    }
+    match tools {
+        Some(tools) if !caps.vmaf => {
+            eprintln!(
+                "error: --target-vmaf needs FFmpeg with the libvmaf filter, and {} has none",
+                tools.ffmpeg.display()
+            );
+            eprintln!(
+                "Point Peraz to an FFmpeg that has it with --ffmpeg (Homebrew's does), or use --quality instead."
+            );
+            Err(exit::ENVIRONMENT)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// What Peraz compresses without FFmpeg (everything it decodes and encodes in process).
@@ -482,6 +521,8 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         encoder: args.encoder,
         no_audio: args.no_audio.then_some(true),
         target_size: args.target_size.clone(),
+        target_vmaf: args.target_vmaf,
+        target_ssimulacra2: args.target_ssimulacra2,
         fps: args.fps,
         ..Settings::default()
     };
@@ -634,6 +675,24 @@ fn percent_saved(before: u64, after: u64) -> String {
     }
 }
 
+/// ` · VMAF 93.4 (target 93)`, with a warning when the target was out of reach.
+fn score_note(score: &Score) -> String {
+    let metric = match score.metric {
+        Metric::Vmaf => "VMAF",
+        Metric::Ssimulacra2 => "SSIMULACRA2",
+    };
+    let sampled = if score.sampled { ", on samples" } else { "" };
+    let missed = if score.score < f64::from(score.target) {
+        ": the best reachable"
+    } else {
+        ""
+    };
+    format!(
+        " · {metric} {:.1} (target {}{sampled}{missed})",
+        score.score, score.target
+    )
+}
+
 pub(crate) fn print_human(report: &Report) {
     let input = report.input.display();
     match &report.outcome {
@@ -653,7 +712,10 @@ pub(crate) fn print_human(report: &Report) {
                     t.attempts,
                     if t.attempts == 1 { "try" } else { "tries" }
                 ),
-                _ => String::new(),
+                _ => match &report.score {
+                    Some(score) => score_note(score),
+                    None => String::new(),
+                },
             };
             println!(
                 "  {} → {} ({}) · {encoder}{target} · {:.1} s",

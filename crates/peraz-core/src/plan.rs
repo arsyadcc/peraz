@@ -60,10 +60,15 @@ impl VideoEncoder {
     /// `vmaf_v0.6.1`) over a sample set of natural footage, screen recordings, and motion graphics,
     /// with no clip more than 3 points below it. Targets: highest 97, high 95, balanced 93,
     /// small 89, smallest 84. Each value is the most economical one that met its target.
+    /// The CRF a quality level uses (software encoders), where a score search starts.
+    pub fn crf(self, quality: Quality) -> u8 {
+        [16, 22, 24, 28, 30][quality as usize]
+    }
+
     fn quality_args(self, quality: Quality) -> Vec<String> {
         let level = quality as usize; // Highest = 0 … Smallest = 4
         let (flag, value) = match self {
-            Self::Libx264 | Self::Libx265 => ("-crf", [16, 22, 24, 28, 30][level]),
+            Self::Libx264 | Self::Libx265 => ("-crf", self.crf(quality)),
             Self::H264VideoToolbox => ("-q:v", [85, 75, 70, 60, 55][level]),
             Self::HevcVideoToolbox => ("-q:v", [85, 75, 70, 65, 60][level]),
         };
@@ -103,6 +108,8 @@ pub struct VideoPlan {
     pub audio: AudioPlan,
     /// Present when the video must fit a file size.
     pub target: Option<SizeTarget>,
+    /// Present when the video must reach a VMAF score.
+    pub score_target: Option<ScoreTarget>,
     /// FFmpeg arguments between the input and the output (single pass, or the final pass of a
     /// size-targeted encode), for transparency in reports.
     pub args: Vec<String>,
@@ -141,6 +148,8 @@ pub enum PlanError {
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
     UnsupportedImage { codec: String, hint: &'static str },
+    /// A score target was combined with hardware encoding, which has no setting to search.
+    ScoreNeedsSoftware,
 }
 
 impl std::fmt::Display for PlanError {
@@ -181,6 +190,10 @@ impl std::fmt::Display for PlanError {
             Self::UnsupportedImage { codec, hint } => {
                 write!(f, "{codec} images are not supported yet{hint}")
             }
+            Self::ScoreNeedsSoftware => write!(
+                f,
+                "--target-vmaf needs a software encoder; leave out --encoder hardware"
+            ),
         }
     }
 }
@@ -206,7 +219,14 @@ pub fn plan_video(
         return Err(PlanError::NotVideo { kind: info.kind });
     }
     let codec = video_codec(recipe.video.codec, video)?;
-    let candidates = VideoEncoder::candidates(codec, recipe.video.encoder);
+    let mut candidates = VideoEncoder::candidates(codec, recipe.video.encoder);
+    if recipe.video.target_vmaf.is_some() && recipe.video.target_bytes.is_none() {
+        // The search tunes CRF, which only the software encoders have.
+        if recipe.video.encoder == EncoderPreference::Hardware {
+            return Err(PlanError::ScoreNeedsSoftware);
+        }
+        candidates.retain(|e| !e.is_hardware());
+    }
     let encoder = candidates
         .iter()
         .copied()
@@ -236,7 +256,12 @@ pub fn plan_video(
                         .collect(),
                 }
             };
-            (scale_to, audio, RateControl::Quality(recipe.quality), None)
+            let rate = match recipe.video.target_vmaf {
+                // The search starts from the quality level's own setting.
+                Some(_) => RateControl::Crf(encoder.crf(recipe.quality)),
+                None => RateControl::Quality(recipe.quality),
+            };
+            (scale_to, audio, rate, None)
         }
         Some(target_bytes) => {
             let budget = size_budget(info, recipe, encoder, target_bytes)?;
@@ -262,6 +287,15 @@ pub fn plan_video(
         color: video.color.clone(),
         audio,
         target,
+        score_target: match (recipe.video.target_vmaf, &rate) {
+            (Some(vmaf), RateControl::Crf(crf)) => Some(ScoreTarget {
+                vmaf,
+                crf: *crf,
+                probes: 0,
+                sampled_ms: 0,
+            }),
+            _ => None,
+        },
         args: Vec::new(),
     };
     plan.args = plan.ffmpeg_args(rate, &Pass::Single);
@@ -273,6 +307,8 @@ pub fn plan_video(
 pub enum RateControl {
     /// Constant quality (CRF / `-q:v`) for a quality level.
     Quality(Quality),
+    /// This CRF value (software encoders), found by a score search.
+    Crf(u8),
     /// Average video bit rate in bits per second, for a target file size.
     Bitrate(u64),
 }
@@ -287,6 +323,19 @@ pub enum Pass {
     First { log: String },
     /// The final pass of a two-pass encode, reading the stats from `log`.
     Second { log: String },
+}
+
+/// The VMAF score a video must reach, and what the search found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScoreTarget {
+    /// The VMAF score to reach (model `vmaf_v0.6.1`, 0–100).
+    pub vmaf: u8,
+    /// The CRF used: the highest (smallest file) that reached the score, once searched.
+    pub crf: u8,
+    /// Encodes of the samples it took (filled in by the engine).
+    pub probes: u32,
+    /// Length of the samples scored, in milliseconds (filled in by the engine).
+    pub sampled_ms: u64,
 }
 
 /// The size a video must fit in, and how the bits are split.
@@ -330,6 +379,7 @@ impl VideoPlan {
         args.extend(["-c:v".into(), self.encoder.ffmpeg_name().into()]);
         match rate {
             RateControl::Quality(quality) => args.extend(self.encoder.quality_args(quality)),
+            RateControl::Crf(crf) => args.extend(["-crf".into(), crf.to_string()]),
             RateControl::Bitrate(bps) => {
                 args.extend(["-b:v".into(), format!("{}k", bps.div_ceil(1000))]);
             }
@@ -571,6 +621,9 @@ pub struct ImagePlan {
     /// The output format differs from the input's. A converted file is kept even when it is
     /// larger: the format change was the point (e.g. HEIC to JPEG for compatibility).
     pub converts_format: bool,
+    /// Search the encoder's quality setting for the smallest file with this SSIMULACRA2 score;
+    /// `encoding` then holds the setting the search starts from (and, once done, the one used).
+    pub target_ssimulacra2: Option<u8>,
 }
 
 /// How a still image is decoded.
@@ -678,6 +731,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         // A still GIF becomes PNG only when that is smaller (it is not a format asked for).
         converts_format: source != Some(format)
             && !(codec == "gif" && recipe.image.format == ImageFormat::Keep),
+        target_ssimulacra2: recipe.image.target_ssimulacra2,
     })
 }
 
@@ -1030,6 +1084,7 @@ impl DocumentPlan {
             extension,
             decoder: ImageDecoder::Native,
             converts_format: false,
+            target_ssimulacra2: None,
         }
     }
 }
@@ -1345,6 +1400,39 @@ mod tests {
             plan.args.join(" "),
             "-map 0:v:0 -map_metadata 0 -vf scale=1280:720:flags=lanczos -c:v libx265 -crf 28 \
              -tag:v hvc1 -pix_fmt yuv420p -an -movflags +faststart -f mp4"
+        );
+    }
+
+    #[test]
+    fn a_vmaf_target_searches_crf_on_software_encoders_only() {
+        let mut recipe = Recipe::default();
+        recipe.video.target_vmaf = Some(93);
+        let plan = plan_video(&video_info(1280, 720, vec![]), &recipe, |_| true).unwrap();
+        assert_eq!(plan.encoder, VideoEncoder::Libx264);
+        assert_eq!(
+            plan.score_target,
+            Some(ScoreTarget {
+                vmaf: 93,
+                crf: 24,
+                probes: 0,
+                sampled_ms: 0
+            }),
+            "starts from the quality level's CRF"
+        );
+        assert!(plan.args.join(" ").contains("-crf 24"));
+
+        let only_vt = |name: &str| name.ends_with("videotoolbox");
+        assert!(
+            matches!(
+                plan_video(&video_info(1280, 720, vec![]), &recipe, only_vt),
+                Err(PlanError::NoEncoder { .. })
+            ),
+            "no fallback to hardware, which has no CRF"
+        );
+        recipe.video.encoder = EncoderPreference::Hardware;
+        assert_eq!(
+            plan_video(&video_info(1280, 720, vec![]), &recipe, |_| true),
+            Err(PlanError::ScoreNeedsSoftware)
         );
     }
 

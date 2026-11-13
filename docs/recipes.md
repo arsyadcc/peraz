@@ -26,6 +26,8 @@ max_height = 2000
 | `encoder` | string | `auto`, `software`, `hardware` | `--encoder` |
 | `no_audio` | boolean | `true` removes all audio tracks. | `--no-audio` |
 | `target_size` | string | A size such as `"25MB"` (SI units). Videos only. | `--target-size` |
+| `target_vmaf` | integer | 1–100. Videos only; not with `target_size`. | `--target-vmaf` |
+| `target_ssimulacra2` | integer | 1–100. Still images only. | `--target-ssimulacra2` |
 | `fps` | integer | 1–50. GIFs and animated WebP/AVIF. | `--fps` |
 
 Every key except `version` is optional, and a key that is not set takes the default. Unknown

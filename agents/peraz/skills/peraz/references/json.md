@@ -32,6 +32,7 @@ A report (also one JSON line per file from `peraz watch --json`):
 | `outcome.message` | `skipped` and `failed` only: why. |
 | `encoder` | What encoded it, as text, e.g. `libx265, HDR kept`. |
 | `document` | PDF and EPUB only: `images`, `recompressed`, `kept`, `skipped` (pictures inside). |
+| `score` | With `--target-vmaf` or `--target-ssimulacra2`: `metric` (`vmaf`, `ssimulacra2`), `target`, the measured `score` (below `target` when out of reach), and `sampled` (scored on samples of a long video); otherwise null. |
 | `elapsed_seconds` | Time spent on this file. |
 
 With `--check` nothing is kept: `outcome.output` names a temporary file that no longer exists.

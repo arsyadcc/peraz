@@ -24,6 +24,8 @@ struct Report<'a> {
     hardware_video_encoders: Vec<HardwareEncoder<'a>>,
     hwaccels: &'a [String],
     encoders: Vec<&'a str>,
+    /// FFmpeg's libvmaf filter is there, which `--target-vmaf` needs.
+    vmaf: bool,
 }
 
 #[derive(Serialize)]
@@ -74,6 +76,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             .collect(),
         hwaccels: &caps.hwaccels,
         encoders: caps.encoders.keys().map(String::as_str).collect(),
+        vmaf: caps.vmaf,
     };
     if args.json {
         print_json(report);
@@ -122,6 +125,14 @@ fn print_human(report: &Report, caps: &Capabilities) {
                 .filter(|(name, _)| caps.has_encoder(name))
                 .map(|(name, lic)| format!("{name} ({lic})"))
         )
+    );
+    println!(
+        "metrics  {}",
+        if report.vmaf {
+            "libvmaf (--target-vmaf works)"
+        } else {
+            "no libvmaf (--target-vmaf needs it)"
+        }
     );
     println!(
         "\nHardware encoders are compiled in; whether this machine can use them is checked on first use."

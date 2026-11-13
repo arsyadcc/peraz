@@ -73,6 +73,8 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--trim-only` | | Only cut the clip, without compressing: the streams are copied when the start is on a keyframe. |
 | `--snap-to-keyframe` | | With `--trim-only`: move the start back to the keyframe so the clip can always be copied. |
 | `--target-size` | size | Fit each video in this size, e.g. `25MB` (SI units: 1 MB = 1,000,000 bytes). Replaces `--quality` for videos. |
+| `--target-vmaf` | 1–100 | Make each video as small as it can be while it still scores this VMAF. Replaces `--quality` for videos. Needs FFmpeg with libvmaf and a software encoder; cannot be combined with `--target-size`. |
+| `--target-ssimulacra2` | 1–100 | Make each still image as small as it can be while it still scores this SSIMULACRA2. Replaces `--quality` for still images. |
 | `--no-audio` | | Remove all audio tracks. |
 | `-j`, `--jobs` | number | How many files to work on at once. Default: one per logical core. |
 | `--json` | | Print [JSON](json.md) instead of text. |

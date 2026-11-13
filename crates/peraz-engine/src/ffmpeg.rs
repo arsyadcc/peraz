@@ -111,9 +111,11 @@ impl Toolchain {
     pub fn capabilities(&self) -> Result<Capabilities, EngineError> {
         let encoders = run(&self.ffmpeg, "ffmpeg", &["-hide_banner", "-encoders"])?;
         let hwaccels = run(&self.ffmpeg, "ffmpeg", &["-hide_banner", "-hwaccels"])?;
+        let filters = run(&self.ffmpeg, "ffmpeg", &["-hide_banner", "-filters"])?;
         Ok(Capabilities {
             encoders: parse_encoders(&encoders),
             hwaccels: parse_hwaccels(&hwaccels),
+            vmaf: has_filter(&filters, "libvmaf"),
         })
     }
 }
@@ -186,6 +188,8 @@ pub struct Encoder {
 pub struct Capabilities {
     pub encoders: BTreeMap<String, Encoder>,
     pub hwaccels: Vec<String>,
+    /// The `libvmaf` filter is compiled in, which `--target-vmaf` needs.
+    pub vmaf: bool,
 }
 
 impl Capabilities {
@@ -215,6 +219,14 @@ const HARDWARE_SUFFIXES: &[&str] = &[
     "v4l2m2m",
     "mediacodec",
 ];
+
+/// Whether `ffmpeg -filters` output lists the filter `name` (lines look like
+/// ` .. libvmaf           VV->V      Calculate the VMAF between two video streams.`).
+pub fn has_filter(output: &str, name: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(name))
+}
 
 /// Parses `ffmpeg -encoders` output.
 pub fn parse_encoders(output: &str) -> BTreeMap<String, Encoder> {
@@ -408,10 +420,19 @@ mod tests {
 ";
 
     #[test]
+    fn finds_filters_by_name() {
+        let filters = "Filters:\n  T.. = Timeline support\n ------\n .. libvmaf           VV->V      Calculate the VMAF between two video streams.\n .. vmafmotion        V->V       Calculate the VMAF Motion score.\n";
+        assert!(has_filter(filters, "libvmaf"));
+        assert!(!has_filter(filters, "vmaf"));
+        assert!(!has_filter(filters, "Calculate"));
+    }
+
+    #[test]
     fn parses_encoders_and_hardware_apis() {
         let caps = Capabilities {
             encoders: parse_encoders(ENCODERS),
             hwaccels: vec![],
+            vmaf: false,
         };
         assert_eq!(caps.encoders.len(), 5);
         assert_eq!(caps.encoders["aac"].kind, EncoderKind::Audio);

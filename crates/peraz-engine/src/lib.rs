@@ -15,6 +15,7 @@ pub mod heif;
 pub mod image;
 pub mod pdf;
 pub mod probe;
+mod score;
 
 pub use error::EngineError;
 pub use peraz_core::VERSION;

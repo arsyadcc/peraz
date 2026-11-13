@@ -124,6 +124,9 @@ peraz doctor                             # which FFmpeg is used and what it can 
   upscaling, optional audio removal, and hardware encoding with VideoToolbox on macOS.
 - **Target size** — `--target-size 25MB` computes the bit rates, runs two passes, measures the
   result, and tries again if it is over. Sizes use SI units (1 MB = 1,000,000 bytes).
+- **Target quality** — `--target-vmaf 93` (videos) and `--target-ssimulacra2 80` (pictures) make
+  each file as small as it can be while it still measures that visual quality, and the report
+  shows the score.
 - **Trim** — cut a clip by time. When the cut lands on a keyframe the streams are copied:
   instant and lossless.
 - **Images** — JPEG (mozjpeg), PNG (palette + oxipng, with a lossless fallback), WebP, and AVIF.
@@ -167,6 +170,8 @@ peraz clip.mov                             # → clip-1.mp4 (H.264, balanced qua
 peraz -q small --codec hevc *.mp4          # smaller files
 peraz --encoder hardware --max-width 1280 --no-audio clip.mov
 peraz --target-size 25MB long-video.mov    # fits, verified (two-pass with x264/x265)
+peraz --target-vmaf 93 clip.mov            # smallest file that still scores VMAF 93
+peraz --target-ssimulacra2 80 photos/*     # smallest pictures that still score 80
 peraz --start 0:12 --duration 10 clip.mov  # compress just that part
 peraz --trim-only --start 0:12 --duration 10 clip.mov  # cut only: lossless when possible
 peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
@@ -220,7 +225,8 @@ changes on purpose, the result is kept even if it is larger, and the report show
 ### GIFs and animation
 
 GIFs are encoded by Peraz itself: a palette per frame (imagequant) with dithering, unchanged
-pixels left transparent, frames cropped to what changed, and identical frames merged. Default
+pixels left transparent, frames cropped to what changed, and identical frames merged; light
+temporal denoising first keeps camera noise from counting as change. Default
 GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `--max-width` and
 `--fps` override it.
 
@@ -233,6 +239,27 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 PDF and EPUB files keep their text, layout, and links: only the pictures inside are
 recompressed (photos with mozjpeg, graphics as palette images), and a picture is replaced only
 when the new version is smaller. Encrypted PDFs and DRM-protected EPUBs are skipped.
+
+### Target quality
+
+Instead of a quality level, ask for a measured quality and Peraz searches for the smallest file
+that reaches it:
+
+- **Videos, `--target-vmaf <1-100>`**: the CRF of x264/x265 is searched, and each try is
+  scored with [VMAF](https://github.com/Netflix/vmaf) (model `vmaf_v0.6.1`) against the source
+  at the output's size. Videos up to 30 seconds are scored whole; longer ones on four
+  5-second samples spread over the video, so the search takes about the same time for any
+  length (around five encodes of those samples), then the whole video is encoded once.
+  `balanced` aims at about VMAF 93. Needs FFmpeg with libvmaf (`peraz doctor` says) and a
+  software encoder.
+- **Pictures, `--target-ssimulacra2 <1-100>`**: the encoder's quality setting is searched, and
+  each try is scored with [SSIMULACRA2](https://github.com/cloudinary/ssimulacra2) against the
+  picture at the output's size. On its scale, 90 is visually lossless, 80 very high quality
+  (hard to tell apart side by side), 70 high, and 50 medium. AVIF tries take longest.
+
+The report shows the score (`score` in `--json`). When no setting reaches the target, the
+closest one is used and the report says so. `--target-vmaf` cannot be combined with
+`--target-size`, and neither changes the pictures inside PDFs and EPUBs.
 
 ### Batches
 
@@ -256,6 +283,8 @@ codec = "h264"                   # h264, hevc
 encoder = "auto"                 # auto, software, hardware
 no_audio = false
 target_size = "25MB"             # SI units; videos only
+target_vmaf = 93                 # videos: smallest file with this VMAF score
+target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2 score
 fps = 12                         # GIF and animated WebP/AVIF
 ```
 

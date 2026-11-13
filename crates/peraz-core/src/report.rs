@@ -134,6 +134,28 @@ pub struct DocumentStats {
     pub skipped: u32,
 }
 
+/// Which visual quality metric a score is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Metric {
+    /// VMAF (model `vmaf_v0.6.1`), 0–100, for videos.
+    Vmaf,
+    /// SSIMULACRA2, up to 100, for still images.
+    Ssimulacra2,
+}
+
+/// The visual quality a score target asked for, and what the result measured.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Score {
+    pub metric: Metric,
+    /// The score asked for.
+    pub target: u8,
+    /// The score measured on the result, against the input (at the output's size).
+    pub score: f64,
+    /// Measured on samples of the video rather than the whole of it.
+    pub sampled: bool,
+}
+
 /// What happened to one input.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
@@ -147,6 +169,8 @@ pub struct Report {
     pub encoder: Option<String>,
     /// For PDF and EPUB: what happened to the pictures inside.
     pub document: Option<DocumentStats>,
+    /// With a score target: the score asked for and the score measured.
+    pub score: Option<Score>,
     pub elapsed_seconds: f64,
 }
 

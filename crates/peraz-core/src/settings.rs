@@ -14,6 +14,8 @@
 //! encoder = "auto"                 # auto, software, hardware
 //! no_audio = false
 //! target_size = "25MB"             # SI units; videos only
+//! target_vmaf = 93                 # videos: smallest file with this VMAF score
+//! target_ssimulacra2 = 80          # still images: smallest file with this SSIMULACRA2 score
 //! fps = 12                         # GIF and animated WebP/AVIF frame rate
 //! ```
 //!
@@ -55,6 +57,10 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_vmaf: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_ssimulacra2: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
 }
 
@@ -75,6 +81,8 @@ impl Default for Settings {
             encoder: None,
             no_audio: None,
             target_size: None,
+            target_vmaf: None,
+            target_ssimulacra2: None,
             fps: None,
         }
     }
@@ -158,6 +166,24 @@ impl Settings {
         if let Some(size) = &self.target_size {
             parse_size(size).map_err(|e| SettingsError(format!("target_size: {e}")))?;
         }
+        if self.target_size.is_some() && self.target_vmaf.is_some() {
+            return Err(SettingsError(
+                "target_size and target_vmaf cannot be combined: a video either fits a size or reaches a score"
+                    .to_owned(),
+            ));
+        }
+        for (key, value) in [
+            ("target_vmaf", self.target_vmaf),
+            ("target_ssimulacra2", self.target_ssimulacra2),
+        ] {
+            if let Some(score) = value
+                && !(1..=100).contains(&score)
+            {
+                return Err(SettingsError(format!(
+                    "{key} must be between 1 and 100, not {score}"
+                )));
+            }
+        }
         // The same range as `--fps`: GIF frames last at least 1/50 s.
         if let Some(fps) = self.fps
             && !(1..=50).contains(&fps)
@@ -191,6 +217,8 @@ impl Settings {
             encoder: self.encoder.or(below.encoder),
             no_audio: self.no_audio.or(below.no_audio),
             target_size: self.target_size.or_else(|| below.target_size.clone()),
+            target_vmaf: self.target_vmaf.or(below.target_vmaf),
+            target_ssimulacra2: self.target_ssimulacra2.or(below.target_ssimulacra2),
             fps: self.fps.or(below.fps),
         }
     }
@@ -218,6 +246,7 @@ impl Settings {
                 remove_audio: self.no_audio.unwrap_or(false),
                 output: format.video,
                 target_bytes,
+                target_vmaf: self.target_vmaf,
                 trim_only: false,
                 snap_to_keyframe: false,
             },
@@ -225,6 +254,7 @@ impl Settings {
                 format: format.image,
                 max_width: self.max_width,
                 max_height: self.max_height,
+                target_ssimulacra2: self.target_ssimulacra2,
             },
             gif: GifRecipe { fps: self.fps },
             clip: Clip {
@@ -320,6 +350,24 @@ mod tests {
             (whatsapp.max_width, whatsapp.max_height),
             (Some(1280), Some(1280))
         );
+    }
+
+    #[test]
+    fn score_targets_are_checked() {
+        let both = Settings::from_toml("version = 1\ntarget_size = \"5MB\"\ntarget_vmaf = 90\n")
+            .unwrap_err();
+        assert!(both.0.contains("cannot be combined"), "{both}");
+        for bad in ["target_vmaf = 0", "target_ssimulacra2 = 101"] {
+            let error = Settings::from_toml(&format!("version = 1\n{bad}\n")).unwrap_err();
+            assert!(error.0.contains("between 1 and 100"), "{error}");
+        }
+        let recipe =
+            Settings::from_toml("version = 1\ntarget_vmaf = 95\ntarget_ssimulacra2 = 80\n")
+                .unwrap()
+                .to_recipe(None, None)
+                .unwrap();
+        assert_eq!(recipe.video.target_vmaf, Some(95));
+        assert_eq!(recipe.image.target_ssimulacra2, Some(80));
     }
 
     #[test]

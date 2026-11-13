@@ -68,6 +68,7 @@ pub fn compress_in(
         plan: None,
         encoder: None,
         document: None,
+        score: None,
         elapsed_seconds: 0.0,
     };
     report.outcome = if cancel.load(Ordering::SeqCst) {
@@ -148,48 +149,7 @@ fn run(
             make_trim(batch, tools, caps, job, &info, progress, cancel, report)
         }
         MediaKind::Video | MediaKind::Animation => {
-            let plan = match plan_video(&info, &job.recipe, |name| caps.has_encoder(name)) {
-                Ok(plan) => plan,
-                Err(e) => return failed(e.to_string()),
-            };
-            report.plan = Some(Plan::Video(plan.clone()));
-            report.encoder = Some(plan.encoder_label());
-            let output = match choose_output(batch, job, "mp4") {
-                Ok(output) => output,
-                Err(outcome) => return outcome,
-            };
-            if plan.target.is_some() {
-                return encode_to_target(
-                    tools, job, &info, plan, &output, progress, cancel, report,
-                );
-            }
-            let partial = partial_path(&output);
-            let duration = job
-                .recipe
-                .clip
-                .seconds(info.duration_seconds)
-                .unwrap_or(0.0);
-            let seek = clip_args(job.recipe.clip);
-            let sink = Sink {
-                before_input: &seek,
-                file: Some(&partial),
-                workdir: None,
-            };
-            if let Err(error) = encode(
-                tools, &job.input, &sink, &plan.args, duration, progress, cancel,
-            ) {
-                let _ = std::fs::remove_file(&partial);
-                return match error {
-                    EncodeError::Cancelled => Outcome::Cancelled,
-                    EncodeError::Failed(message) => failed(message),
-                };
-            }
-            finish(
-                &partial,
-                &output,
-                info.size_bytes,
-                info.kind == MediaKind::Animation,
-            )
+            make_video(batch, tools, caps, job, &info, progress, cancel, report)
         }
         other => Outcome::Skipped {
             message: format!("{} compression is not available yet", kind_name(other)),
@@ -221,7 +181,7 @@ fn make_image(
     report: &mut Report,
 ) -> Outcome {
     let failed = |message: String| Outcome::Failed { message };
-    let plan = match plan_image(info, &job.recipe) {
+    let mut plan = match plan_image(info, &job.recipe) {
         Ok(plan) => plan,
         Err(e @ PlanError::UnsupportedImage { .. }) => {
             return Outcome::Skipped {
@@ -242,7 +202,27 @@ fn make_image(
             None => Err(NEEDS_FFMPEG.to_owned()),
         },
     };
-    let encoded = match decoded.and_then(|d| encode_image(d, &plan)) {
+    let encoded = match (decoded, plan.target_ssimulacra2) {
+        (Err(message), _) => Err(message),
+        (Ok(d), None) => encode_image(d, &plan),
+        (Ok(d), Some(target)) => crate::score::encode_image_to_ssimulacra2(
+            tools, d, &mut plan, target, cancel,
+        )
+        .map(|(encoded, score)| {
+            report.score = score.map(|score| peraz_core::Score {
+                metric: peraz_core::Metric::Ssimulacra2,
+                target,
+                score: (score * 100.0).round() / 100.0,
+                sampled: false,
+            });
+            report.plan = Some(Plan::Image(plan.clone()));
+            encoded
+        }),
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Outcome::Cancelled;
+    }
+    let encoded = match encoded {
         Ok(encoded) => encoded,
         Err(message) => return failed(message),
     };
@@ -420,8 +400,68 @@ fn make_animated(
     finish(&partial, &output, info.size_bytes, true)
 }
 
+/// Compresses a video (or a GIF into MP4): at a quality level, a file size, or a VMAF score.
+#[allow(clippy::too_many_arguments)]
+fn make_video(
+    batch: &Batch,
+    tools: &Toolchain,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let failed = |message: String| Outcome::Failed { message };
+    let plan = match plan_video(info, &job.recipe, |name| caps.has_encoder(name)) {
+        Ok(plan) => plan,
+        Err(e) => return failed(e.to_string()),
+    };
+    report.plan = Some(Plan::Video(plan.clone()));
+    report.encoder = Some(plan.encoder_label());
+    let output = match choose_output(batch, job, "mp4") {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    if plan.target.is_some() {
+        return encode_to_target(tools, job, info, plan, &output, progress, cancel, report);
+    }
+    if plan.score_target.is_some() {
+        return crate::score::encode_to_vmaf(
+            tools, job, info, plan, &output, progress, cancel, report,
+        );
+    }
+    let partial = partial_path(&output);
+    let duration = job
+        .recipe
+        .clip
+        .seconds(info.duration_seconds)
+        .unwrap_or(0.0);
+    let seek = clip_args(job.recipe.clip);
+    let sink = Sink {
+        before_input: &seek,
+        file: Some(&partial),
+        workdir: None,
+    };
+    if let Err(error) = encode(
+        tools, &job.input, &sink, &plan.args, duration, progress, cancel,
+    ) {
+        let _ = std::fs::remove_file(&partial);
+        return match error {
+            EncodeError::Cancelled => Outcome::Cancelled,
+            EncodeError::Failed(message) => failed(message),
+        };
+    }
+    finish(
+        &partial,
+        &output,
+        info.size_bytes,
+        info.kind == MediaKind::Animation,
+    )
+}
+
 /// `-ss`/`-t` input options for a clip, placed before `-i` so FFmpeg seeks quickly.
-fn clip_args(clip: Clip) -> Vec<String> {
+pub(crate) fn clip_args(clip: Clip) -> Vec<String> {
     let seconds = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
     let mut args = Vec::new();
     if let Some(ms) = clip.start_ms.filter(|ms| *ms > 0) {
@@ -548,6 +588,22 @@ fn keyframes_before(tools: &Toolchain, input: &Path, start_ms: u64) -> Vec<u64> 
 /// Counter that keeps two-pass work folders unique within one process.
 static WORKDIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A new, empty work folder in the system's temporary folder; the caller removes it.
+pub(crate) fn make_workdir() -> Result<PathBuf, Outcome> {
+    let workdir = std::env::temp_dir().join(format!(
+        "peraz-{}-{}-{}",
+        std::process::id(),
+        WORKDIRS.fetch_add(1, Ordering::SeqCst),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&workdir).map_err(|e| Outcome::Failed {
+        message: format!("cannot create a work folder: {e}"),
+    })?;
+    Ok(workdir)
+}
+
 /// Most encodes a size target may take: the first try plus corrections.
 const MAX_TARGET_ATTEMPTS: u32 = 4;
 
@@ -579,19 +635,10 @@ fn encode_to_target(
         .clip
         .seconds(info.duration_seconds)
         .unwrap_or(0.0);
-    let workdir = std::env::temp_dir().join(format!(
-        "peraz-{}-{}-{}",
-        std::process::id(),
-        WORKDIRS.fetch_add(1, Ordering::SeqCst),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    if let Err(e) = std::fs::create_dir_all(&workdir) {
-        return Outcome::Failed {
-            message: format!("cannot create a work folder: {e}"),
-        };
-    }
+    let workdir = match make_workdir() {
+        Ok(dir) => dir,
+        Err(outcome) => return outcome,
+    };
     let outcome = run_target_passes(
         tools,
         job,
@@ -713,7 +760,7 @@ fn run_target_passes(
 
 /// Keeps the encoded file only when it is smaller than the input ("never worse"), unless the
 /// format changed on purpose (`converted`), where a larger file is still the requested result.
-fn finish(partial: &Path, output: &Path, input_bytes: u64, converted: bool) -> Outcome {
+pub(crate) fn finish(partial: &Path, output: &Path, input_bytes: u64, converted: bool) -> Outcome {
     let output_bytes = match std::fs::metadata(partial) {
         Ok(m) => m.len(),
         Err(e) => {
@@ -837,7 +884,7 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
 }
 
 /// A hidden sibling of the output, so a crash never leaves a half-written file under the final name.
-fn partial_path(output: &Path) -> PathBuf {
+pub(crate) fn partial_path(output: &Path) -> PathBuf {
     const SUFFIX: &str = ".peraz-partial";
     let name = output
         .file_name()
@@ -856,14 +903,14 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(format!(".{short}{hash}{SUFFIX}"))
 }
 
-fn file_url(path: &Path) -> Result<OsString, String> {
+pub(crate) fn file_url(path: &Path) -> Result<OsString, String> {
     let absolute = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut url = OsString::from("file:");
     url.push(absolute.as_os_str());
     Ok(url)
 }
 
-enum EncodeError {
+pub(crate) enum EncodeError {
     Cancelled,
     Failed(String),
 }
@@ -875,16 +922,16 @@ impl From<String> for EncodeError {
 }
 
 /// Where an encode writes.
-struct Sink<'a> {
+pub(crate) struct Sink<'a> {
     /// Arguments placed before `-i` (input seeking: `-ss`, `-t`).
-    before_input: &'a [String],
+    pub before_input: &'a [String],
     /// The output file, or `None` for an analysis pass that writes nothing.
-    file: Option<&'a Path>,
+    pub file: Option<&'a Path>,
     /// FFmpeg's working directory (holds two-pass statistics), or `None` for the current one.
-    workdir: Option<&'a Path>,
+    pub workdir: Option<&'a Path>,
 }
 
-fn encode(
+pub(crate) fn encode(
     tools: &Toolchain,
     input: &Path,
     sink: &Sink,

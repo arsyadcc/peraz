@@ -30,12 +30,11 @@ pub struct Decoded {
 
 /// Encodes a decoded picture according to `plan`.
 pub fn encode_image(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage, String> {
-    // mozjpeg and imagequant report some failures by panicking; keep them contained to this file.
-    std::panic::catch_unwind(move || encode_image_inner(decoded, plan))
-        .unwrap_or_else(|_| Err("the image encoder crashed on this file".to_owned()))
+    encode_prepared(&prepare(decoded, plan), plan)
 }
 
-fn encode_image_inner(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage, String> {
+/// Fits a decoded picture in the plan's box: the pixels the encoder gets.
+pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
     let Decoded { mut image, icc } = decoded;
     if let Some((w, h)) = fit_within(
         (image.width(), image.height()),
@@ -44,6 +43,20 @@ fn encode_image_inner(decoded: Decoded, plan: &ImagePlan) -> Result<EncodedImage
     ) {
         image = image.resize_exact(w, h, FilterType::Lanczos3);
     }
+    Decoded { image, icc }
+}
+
+/// Encodes a picture that [`prepare`] made ready, according to `plan`.
+pub fn encode_prepared(prepared: &Decoded, plan: &ImagePlan) -> Result<EncodedImage, String> {
+    // mozjpeg and imagequant report some failures by panicking; keep them contained to this file.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        encode_image_inner(prepared, plan)
+    }))
+    .unwrap_or_else(|_| Err("the image encoder crashed on this file".to_owned()))
+}
+
+fn encode_image_inner(prepared: &Decoded, plan: &ImagePlan) -> Result<EncodedImage, String> {
+    let Decoded { image, icc } = prepared;
     let (width, height) = (image.width(), image.height());
     let (bytes, encoder) = match plan.encoding {
         ImageEncoding::Jpeg { quality } => {

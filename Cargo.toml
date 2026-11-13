@@ -39,6 +39,8 @@ flate2 = "1"
 quick-xml = "0.42"
 toml = "1"
 ravif = { version = "0.13", default-features = false, features = ["threading"] }
+# `--target-ssimulacra2`: scores a still image against its source.
+ssimulacra2 = { version = "0.5", default-features = false, features = ["rayon"] }
 # `peraz ffmpeg install`: HTTPS with the system's certificates, and the build's .tar.xz archive.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

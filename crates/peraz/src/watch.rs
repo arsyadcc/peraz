@@ -20,7 +20,9 @@ use peraz_core::{ExistingOutput, Job, OutputTarget, Report};
 use peraz_engine::batch::Batch;
 use serde::Serialize;
 
-use crate::compress::{SettingsArgs, install_cancel_handler, print_human, recipe, run_parallel};
+use crate::compress::{
+    SettingsArgs, check_vmaf, install_cancel_handler, print_human, recipe, run_parallel,
+};
 use crate::{SCHEMA_VERSION, exit, locate};
 
 /// How long a file must stay unchanged before it is compressed.
@@ -103,6 +105,9 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             return exit::ENVIRONMENT;
         }
     };
+    if let Err(code) = check_vmaf(&recipe, Some(&tools), &caps) {
+        return code;
+    }
     let cancel = install_cancel_handler();
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let workers = args.jobs.map_or(cores, |n| n as usize).max(1);

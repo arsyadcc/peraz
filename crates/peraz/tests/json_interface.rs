@@ -153,7 +153,12 @@ fn printed_json_matches_the_docs() {
         config.join("recipes/mine.toml"),
         "version = 1\ndescription = \"Mine\"\nquality = \"small\"\nformat = \"webp\"\n\
          max_width = 800\nmax_height = 600\ncodec = \"hevc\"\nencoder = \"software\"\n\
-         no_audio = true\ntarget_size = \"5MB\"\nfps = 10\n",
+         no_audio = true\ntarget_size = \"5MB\"\ntarget_ssimulacra2 = 80\nfps = 10\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config.join("recipes/scored.toml"),
+        "version = 1\ntarget_vmaf = 93\n",
     )
     .unwrap();
     let recipe_file = temp.join("file.toml");
@@ -162,7 +167,12 @@ fn printed_json_matches_the_docs() {
     // Recipes need nothing installed.
     let (list, _) = run(&["recipe", "list", "--json"], &config);
     check(&docs, &list, RECIPES, &[("recipes[].", "Recipe")]);
-    for name in ["mine", recipe_file.to_str().unwrap(), "web-images"] {
+    for name in [
+        "mine",
+        "scored",
+        recipe_file.to_str().unwrap(),
+        "web-images",
+    ] {
         let (mut show, _) = run(&["recipe", "show", name, "--json"], &config);
         // A recipe, with `schema_version` added at the top level.
         let version = show.as_object_mut().unwrap().remove("schema_version");
@@ -199,7 +209,7 @@ fn printed_json_matches_the_docs() {
     let out = temp.join("out");
     std::fs::create_dir_all(&out).unwrap();
     let out = out.to_str().unwrap();
-    let runs: [&[&str]; 3] = [
+    let runs: [&[&str]; 4] = [
         // compressed, failed, and a document
         &[
             "--out-dir",
@@ -218,6 +228,14 @@ fn printed_json_matches_the_docs() {
         ],
         // --check writes nothing, so it takes no --out-dir
         &["--check", "fixtures/image-opaque.png"],
+        // score: ssimulacra2
+        &[
+            "--out-dir",
+            out,
+            "--target-ssimulacra2",
+            "70",
+            "fixtures/image-photo.jpg",
+        ],
     ];
     for args in runs {
         let mut all = vec!["compress", "--json"];
@@ -225,7 +243,30 @@ fn printed_json_matches_the_docs() {
         let (json, _) = run(&all, &config);
         check(&docs, &json, COMPRESS, &[("results[].", "Report")]);
     }
+    if doctor["vmaf"] == Value::Bool(true) {
+        check_vmaf_report(&docs, out, &config);
+    } else {
+        eprintln!("skipped: --target-vmaf needs FFmpeg with libvmaf");
+    }
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// A `--target-vmaf` run reports its score as documented.
+fn check_vmaf_report(docs: &Docs, out: &str, config: &Path) {
+    let (json, _) = run(
+        &[
+            "compress",
+            "--json",
+            "--out-dir",
+            out,
+            "--target-vmaf",
+            "90",
+            "fixtures/video-720p-noaudio.mp4",
+        ],
+        config,
+    );
+    check(docs, &json, COMPRESS, &[("results[].", "Report")]);
+    assert_eq!(json["results"][0]["score"]["metric"], "vmaf");
 }
 
 /// The *One of* lists name every value the code can produce, no more.
@@ -295,6 +336,9 @@ fn documented_values_are_complete() {
         names(&kinds, ""),
         listed("`peraz probe --json`", "files[].media.kind")
     );
+
+    let metrics = [peraz_core::Metric::Vmaf, peraz_core::Metric::Ssimulacra2].map(to_json);
+    assert_eq!(names(&metrics, ""), listed("Report", "score.metric"));
 
     let alpha = [Alpha::Present, Alpha::Absent, Alpha::Unknown].map(to_json);
     assert_eq!(
