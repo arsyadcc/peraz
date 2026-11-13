@@ -78,6 +78,14 @@ The plugin is a skill in [agents/peraz](agents/peraz); Peraz itself must be inst
 agents that read Agent Skills can use
 [agents/peraz/skills/peraz](agents/peraz/skills/peraz) directly.
 
+What the plugin does: it holds only instructions (Markdown and JSON), with no code, hooks, or MCP
+servers, and it sends nothing anywhere. The agent runs `peraz` commands in your terminal, under
+its usual permission prompts. Originals stay untouched, and the skill tells the agent to replace
+or delete them only when you ask. If Peraz or FFmpeg is missing, the agent offers to install it:
+Peraz with Homebrew, Cargo, or the installers on the releases page, and FFmpeg with
+`peraz ffmpeg install`, which downloads the FFmpeg build from this repository's `ffmpeg-*`
+release (about 25 MB) and checks its SHA-256 before use.
+
 ### Shell completions
 
 Homebrew installs them for you. Otherwise, `peraz completions <shell>` prints the script for

@@ -11,6 +11,8 @@ between alpha versions.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
 ### Added
 
 - Peraz uses a bundled FFmpeg build in a `peraz-ffmpeg` folder next to the `peraz` executable,
@@ -145,7 +147,8 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/arsyadcc/peraz/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.4...v0.1.0
 [0.1.0-alpha.4]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.2...v0.1.0-alpha.3

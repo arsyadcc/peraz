@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "peraz",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Compress videos, images, GIFs, PDFs, and EPUBs with the peraz CLI, and read its reports",
   "author": {
     "name": "Arsyad",
