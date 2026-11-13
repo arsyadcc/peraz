@@ -181,6 +181,7 @@ peraz report.pdf book.epub                 # recompress the pictures inside
 peraz --json --out-dir out/ media/*        # machine-readable report
 peraz --jobs 1 *.mov                       # one at a time, with live progress
 peraz --recipe web-images photos/*         # named settings (see Recipes)
+peraz --recipe discord clip.mov            # fit an upload limit: discord, email, github, whatsapp
 peraz recipe list
 peraz watch ~/Screenshots --recipe web-images --out-dir ~/Screenshots/small
 peraz probe video.mp4 photo.heic           # inspect media
@@ -265,6 +266,10 @@ prints one as TOML. Your recipes live in `<config dir>/recipes/<name>.toml`, whe
 dir is `PERAZ_CONFIG_DIR`, or `~/Library/Application Support/peraz` (macOS),
 `$XDG_CONFIG_HOME/peraz` or `~/.config/peraz` (Linux), `%APPDATA%\peraz` (Windows). A recipe
 with the same name as a built-in one replaces it.
+
+The `discord`, `email`, `github`, and `whatsapp` recipes fit each video under that service's
+upload limit; [docs/recipes.md](docs/recipes.md#upload-limits) lists the limits and when they were
+checked.
 
 ### Project recipes and CI
 

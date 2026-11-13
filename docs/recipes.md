@@ -49,3 +49,20 @@ Later places replace earlier ones with the same name:
 Without `--recipe`, `peraz compress` and `peraz watch` use the nearest `peraz.toml` in the
 current folder or its parents, unless `--ignore-project-recipe` is given. Flags on the command
 line override the recipe's values.
+
+## Upload limits
+
+These built-in recipes fit each video under a service's upload limit with `target_size`, so the
+video is shrunk only as far as it has to be. The limit is per file: send several files to one
+email and their total counts. Pictures get the usual compression and are not fitted to the limit.
+Limits change; these were checked on 2026-11-14.
+
+| Recipe | Target | Limit it fits | Source |
+| --- | --- | --- | --- |
+| `discord` | 20 MB | 20 MB per file without Nitro (since 2026-08-13) | [Discord's announcement, reported by Dexerto](https://www.dexerto.com/entertainment/discord-raises-free-upload-limit-to-20mb-after-lowering-it-two-years-ago-3398251/) |
+| `email` | 14 MB | 20 MB in Outlook (25 MB in Gmail) for all attachments; base64 makes a file about a third larger on the way | [Outlook](https://learn.microsoft.com/en-us/troubleshoot/outlook/message-body/attachment-size-exceeds-the-allowable-limit-error), [Gmail](https://support.google.com/mail/answer/6584) |
+| `github` | 10 MB | 10 MB per video in issues and pull requests of repositories on free plans | [GitHub Docs](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files) |
+| `whatsapp` | 64 MB, 720p | 64 MB on slower connections (100 MB on faster ones), sent at up to 720p | [WhatsApp Help Center](https://faq.whatsapp.com/web/chats/how-to-send-media/?locale=en_US) |
+
+For another limit, use `--target-size` (Discord with Nitro, or GitHub on a paid plan, for
+example), or write your own recipe with the same name to replace one of these.

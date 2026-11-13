@@ -11,6 +11,12 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- Built-in recipes for upload limits: `discord` (20 MB), `email` (14 MB), `github` (10 MB), and
+  `whatsapp` (64 MB, 720p) fit each video under that service's limit. The limits and their
+  sources are in docs/recipes.md.
+
 ## [0.2.0] - 2026-11-14
 
 ### Added

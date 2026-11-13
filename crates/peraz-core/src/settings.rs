@@ -264,6 +264,23 @@ pub const BUILTIN_RECIPES: &[BuiltinRecipe] = &[
         name: "gif-preview",
         toml: "version = 1\ndescription = \"Short previews as GIF: 480 px, 12 fps\"\nquality = \"balanced\"\nformat = \"gif\"\nmax_width = 480\nfps = 12\n",
     },
+    // Upload limits, checked 2026-11-14; docs/recipes.md lists the sources. Update both together.
+    BuiltinRecipe {
+        name: "discord",
+        toml: "version = 1\ndescription = \"Videos for Discord without Nitro: at most 20 MB each\"\ntarget_size = \"20MB\"\n",
+    },
+    BuiltinRecipe {
+        name: "email",
+        toml: "version = 1\ndescription = \"Videos to attach to an email: at most 14 MB each, under a 20 MB limit once encoded\"\ntarget_size = \"14MB\"\n",
+    },
+    BuiltinRecipe {
+        name: "github",
+        toml: "version = 1\ndescription = \"Videos for GitHub issues and pull requests on free plans: at most 10 MB each\"\ntarget_size = \"10MB\"\n",
+    },
+    BuiltinRecipe {
+        name: "whatsapp",
+        toml: "version = 1\ndescription = \"Videos for WhatsApp chats: at most 64 MB and 720p each\"\ntarget_size = \"64MB\"\nmax_width = 1280\nmax_height = 1280\n",
+    },
 ];
 
 #[cfg(test)]
@@ -282,6 +299,27 @@ mod tests {
             );
             settings.to_recipe(None, None).unwrap();
         }
+    }
+
+    #[test]
+    fn upload_recipes_fit_their_limits() {
+        let target = |name: &str| {
+            let builtin = BUILTIN_RECIPES.iter().find(|b| b.name == name).unwrap();
+            Settings::from_toml(builtin.toml)
+                .unwrap()
+                .to_recipe(None, None)
+                .unwrap()
+                .video
+        };
+        assert_eq!(target("discord").target_bytes, Some(20_000_000));
+        assert_eq!(target("email").target_bytes, Some(14_000_000));
+        assert_eq!(target("github").target_bytes, Some(10_000_000));
+        let whatsapp = target("whatsapp");
+        assert_eq!(whatsapp.target_bytes, Some(64_000_000));
+        assert_eq!(
+            (whatsapp.max_width, whatsapp.max_height),
+            (Some(1280), Some(1280))
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ result, and `--out-dir <folder>` for a batch so the results land together.
 | Pictures for a website | `peraz --json --recipe web-images <files>` (WebP, at most 2000 px) |
 | A specific image format | `peraz --json --format webp <files>` (`jpeg`, `png`, `webp`, `avif`) |
 | Smaller dimensions | `--max-width 1280` and/or `--max-height 720` (never scales up) |
+| A video for Discord, email, GitHub, or WhatsApp | `peraz --json --recipe discord video.mov` (or `email`, `github`, `whatsapp`) |
 | A video under a size limit | `peraz --json --target-size 25MB video.mov` (SI units: 1 MB = 1,000,000 bytes) |
 | Part of a video | `--start 0:12 --duration 10`; add `--trim-only` to cut without re-encoding |
 | A GIF from a video | `peraz --json --format gif --start 12 --duration 4 clip.mp4` |
