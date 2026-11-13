@@ -343,7 +343,7 @@ pub(crate) fn check_vmaf(
                 tools.ffmpeg.display()
             );
             eprintln!(
-                "Point Peraz to an FFmpeg that has it with --ffmpeg (Homebrew's does), or use --quality instead."
+                "Run `peraz ffmpeg install` to get a build that has it, point Peraz to another one with --ffmpeg, or use --quality instead."
             );
             Err(exit::ENVIRONMENT)
         }

@@ -19,8 +19,9 @@ between alpha versions.
 
 - `--target-vmaf <score>` makes each video as small as it can be while it still reaches that
   VMAF score: the CRF is searched on samples of the video (the whole video when it is at most
-  30 seconds), then the video is encoded once. Needs FFmpeg with libvmaf. **Interface:** new flag
-  and recipe key `target_vmaf`.
+  30 seconds), then the video is encoded once. Needs FFmpeg with libvmaf, which the bundled build
+  (`ffmpeg-9.0.2-2`, from `peraz ffmpeg install`) now includes. **Interface:** new flag and
+  recipe key `target_vmaf`.
 - `--target-ssimulacra2 <score>` does the same for still images, with SSIMULACRA2.
   **Interface:** new flag and recipe key `target_ssimulacra2`.
 - **Interface:** reports have a `score` field (`metric`, `target`, `score`, `sampled`), and

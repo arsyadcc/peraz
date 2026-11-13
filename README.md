@@ -250,8 +250,8 @@ that reaches it:
   at the output's size. Videos up to 30 seconds are scored whole; longer ones on four
   5-second samples spread over the video, so the search takes about the same time for any
   length (around five encodes of those samples), then the whole video is encoded once.
-  `balanced` aims at about VMAF 93. Needs FFmpeg with libvmaf (`peraz doctor` says) and a
-  software encoder.
+  `balanced` aims at about VMAF 93. Needs FFmpeg with libvmaf (`peraz doctor` says; the bundled
+  build has it) and a software encoder.
 - **Pictures, `--target-ssimulacra2 <1-100>`**: the encoder's quality setting is searched, and
   each try is scored with [SSIMULACRA2](https://github.com/cloudinary/ssimulacra2) against the
   picture at the output's size. On its scale, 90 is visually lossless, 80 very high quality
