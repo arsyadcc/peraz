@@ -17,8 +17,13 @@ url="$repo/releases/download/$tag/$asset"
 
 sha=$(curl -fsSL "$url.sha256" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')
 [[ $sha =~ ^[0-9A-F]{64}$ ]] || { echo "No checksum for $asset in $tag" >&2; exit 1; }
-date=$(curl -fsSL "https://api.github.com/repos/arsyadcc/peraz/releases/tags/$tag" |
-  sed -n 's/^  "published_at": "\([0-9-]*\)T.*/\1/p')
+# Signed-in `gh` avoids the API's low limit for anonymous requests.
+if command -v gh >/dev/null; then
+  date=$(gh api "repos/arsyadcc/peraz/releases/tags/$tag" -q '.published_at[:10]')
+else
+  date=$(curl -fsSL "https://api.github.com/repos/arsyadcc/peraz/releases/tags/$tag" |
+    sed -n 's/^  "published_at": "\([0-9-]*\)T.*/\1/p')
+fi
 [[ $date =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "No release date for $tag" >&2; exit 1; }
 
 dir="$out/manifests/a/Arsyadcc/Peraz/$version"
