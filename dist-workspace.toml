@@ -22,10 +22,8 @@ tap = "arsyadcc/homebrew-tap"
 # `brew install arsyadcc/tap/peraz`
 formula = "peraz"
 publish-jobs = ["homebrew"]
-# Alpha and beta versions go to Homebrew too
-publish-prereleases = true
-# Show alpha releases as the latest release on GitHub (otherwise they are hidden pre-releases)
-force-latest = true
+# Alpha and beta versions stay off the Homebrew tap, which keeps the stable source formula
+publish-prereleases = false
 # Release builds use SIMD for JPEG (mozjpeg) and AVIF (rav1e); nasm is needed on x86 to build them
 features = ["simd"]
 # Extra build steps (puts NASM on PATH on Windows), relative to .github/workflows

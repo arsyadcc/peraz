@@ -23,8 +23,9 @@ peraz-icon.png → peraz-icon-1.png
 ```
 
 > [!NOTE]
-> Peraz is in **alpha**. Expect rough edges. The `--json` output and exit codes are already
-> versioned, so scripts built on them keep working.
+> The command-line flags, the `--json` output, exit codes, and the recipe format are a stable
+> interface: from 0.1.0 on, only a new major version breaks them. See [docs/cli.md](docs/cli.md)
+> and [docs/json.md](docs/json.md).
 
 ## Installation
 
@@ -46,11 +47,9 @@ your package manager, then check with `peraz doctor`.
 **With Cargo** (Rust 1.99 or newer), from [crates.io](https://crates.io/crates/peraz):
 
 ```sh
-cargo install --locked peraz --version '^0.1.0-alpha'   # add --features simd for faster JPEG and AVIF (needs nasm on x86)
-cargo install --locked --path crates/peraz              # from a clone of this repository
+cargo install --locked peraz                 # add --features simd for faster JPEG and AVIF (needs nasm on x86)
+cargo install --locked --path crates/peraz   # from a clone of this repository
 ```
-
-Cargo only installs alpha versions when asked for one, hence `--version` until Peraz 0.1.0.
 
 ### Shell completions
 

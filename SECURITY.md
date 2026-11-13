@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Peraz is in alpha. Security fixes go into the next release; only the latest release is
-supported, so please update before reporting.
+Security fixes go into the next release; only the latest release is supported, so please update
+before reporting.
 
 | Version              | Supported |
 |----------------------|-----------|

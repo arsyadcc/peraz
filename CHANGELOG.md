@@ -5,11 +5,27 @@ All notable changes to Peraz are recorded here. The format follows
 [Semantic Versioning](https://semver.org/).
 
 Changes to the interface that scripts depend on (command-line flags, the `--json` output, exit
-codes, and the recipe format) are marked **Interface**. Until 0.1.0 they can still change between
-alpha versions; from 0.1.0 on, a breaking change needs a new major version (or a new
-`schema_version` for `--json`).
+codes, and the recipe format) are marked **Interface**. From 0.1.0 on, a breaking change to them
+needs a new major version (or a new `schema_version` for `--json`); before 0.1.0 they changed
+between alpha versions.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-13
+
+The first stable version. It works like 0.1.0-alpha.4; what changes is the promise: the
+command-line flags, the `--json` output (`schema_version` 1), exit codes, and the recipe format
+described in [docs/](https://github.com/arsyadcc/peraz/tree/main/docs) stay compatible until a
+new major version. The [README](https://github.com/arsyadcc/peraz#readme) shows what Peraz does,
+and the alpha versions below list every change on the way here.
+
+### Changed
+
+- The Homebrew tap builds stable versions from source (`brew install arsyadcc/tap/peraz`), with
+  the same formula that is tested in CI on macOS and Linux. It links Homebrew's libdeflate.
+- `cargo install --locked peraz` installs 0.1.0 without `--version`.
+- Later alpha and beta versions are marked as pre-releases on GitHub and are not published to the
+  Homebrew tap, so the latest release and `brew upgrade` stay on stable versions.
 
 ## [0.1.0-alpha.4] - 2026-11-13
 
@@ -117,7 +133,8 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.4...v0.1.0
 [0.1.0-alpha.4]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.1...v0.1.0-alpha.2

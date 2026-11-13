@@ -1,6 +1,7 @@
 # Runs after each successful release, once dist has pushed its formula to the tap.
-# - Alpha and beta versions keep dist's formula, which installs the prebuilt binaries; it has no
-#   hook for shell completions, so this adds the line that installs them.
+# - Alpha and beta versions: dist no longer publishes them to the tap (from 0.1.0 on). For older
+#   tags, dist's formula installs the prebuilt binaries but has no hook for shell completions, so
+#   this adds the line that installs them; the source formula already has it.
 # - Stable versions replace it with packaging/homebrew/peraz.rb, which builds from the release's
 #   source tarball (the formula that can go to homebrew-core).
 name: Homebrew tap
