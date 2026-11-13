@@ -2,11 +2,15 @@
 # Builds the FFmpeg that Peraz bundles: `ffmpeg` and `ffprobe`, linked statically against the
 # encoder libraries Peraz uses, with nothing from the build machine's own libraries.
 #
-#   scripts/build-ffmpeg.sh [out-dir]          (default: target/ffmpeg)
+#   scripts/build-ffmpeg.sh [out-dir]                       (default: target/ffmpeg)
+#   PERAZ_FFMPEG_TARGET=windows scripts/build-ffmpeg.sh     (Windows x64, cross-built on Linux)
 #
-# Needs a C/C++ compiler, make, cmake, meson, ninja, and pkg-config (pkgconf). Every source is
-# pinned by version and SHA-256 below; the downloads are kept in <out-dir>/../ffmpeg-work/sources
-# and copied to <out-dir>/sources, which is the corresponding source for the binaries (GPL).
+# Builds for the machine it runs on (macOS or Linux), or for Windows x64 with MinGW-w64.
+# Needs a C/C++ compiler, make, cmake, meson, ninja, pkg-config, and nasm on x86_64.
+#
+# Every source is pinned by version and SHA-256 below. <out-dir>/sources gets the exact archives
+# the binaries were built from (the corresponding source the GPL asks for), <out-dir>/licenses
+# their license texts.
 #
 # This is a GPL build (x264, x265). No --enable-nonfree: the result can be redistributed.
 set -euo pipefail
@@ -19,40 +23,66 @@ SOURCES=(
   "svt-av1|4.3.0|https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v4.3.0/SVT-AV1-v4.3.0.tar.bz2|9223ce06e6172ad41357ed23b3b00f036e03794b86b0e20ea9ccb3f648b8955d"
   "dav1d|1.5.4|https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2|2abfb0c89212e6e4733a54e0ae509ec00a5b845a6360946f918806e14aedb011"
   "libwebp|1.6.0|https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz|e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+  "zlib|1.4|https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz|4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c"
+  "nv-codec-headers|13.1.15.0|https://github.com/FFmpeg/nv-codec-headers/releases/download/n13.1.15.0/nv-codec-headers-13.1.15.0.tar.gz|52532ceade3d5c1af62624986f13cf01b63c910576b08c0c278756c5e4b41ad0"
+  "amf-headers|1.5.3|https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.3/AMF-headers-v1.5.3.tar.gz|0f521ad98041f8001147cded4a660127f18b1c27a801a5cd691bda1fa48381be"
 )
 
 out=$(mkdir -p "${1:-target/ffmpeg}" && cd "${1:-target/ffmpeg}" && pwd)
 work="$out/../ffmpeg-work"
 prefix="$work/prefix"
+rm -rf "$work/build" "$prefix"
 mkdir -p "$work/sources" "$work/build" "$prefix"
 
-os=$(uname -s)
-case "$os" in
-  Darwin)
-    jobs=$(sysctl -n hw.ncpu)
-    export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
-    sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
-    ;;
+case "${PERAZ_FFMPEG_TARGET:-$(uname -s)}" in
+  Darwin) system=macos ;;
+  Linux) system=linux ;;
+  windows) system=windows ;;
   *)
-    echo "Not supported yet: $os" >&2
+    echo "Unsupported target: ${PERAZ_FFMPEG_TARGET:-$(uname -s)}" >&2
     exit 1
     ;;
 esac
+
+cross="" exe=""
+case "$system" in
+  macos)
+    jobs=$(sysctl -n hw.ncpu)
+    export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
+    export CC=clang CXX=clang++ AR=ar STRIP=strip
+    sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
+    ;;
+  linux | windows)
+    jobs=$(nproc)
+    export CC=gcc CXX=g++ AR=ar STRIP=strip
+    sha256() { sha256sum "$1" | cut -d' ' -f1; }
+    ;;
+esac
+if [[ $system == windows ]]; then
+  cross=x86_64-w64-mingw32 exe=.exe
+  export CC=$cross-gcc CXX=$cross-g++ AR=$cross-ar STRIP=$cross-strip
+fi
 
 # Only libraries built here are visible to pkg-config, never the build machine's own.
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 unset PKG_CONFIG_PATH
 export CFLAGS="-O2" CXXFLAGS="-O2"
+[[ $system == linux ]] && CFLAGS+=" -fPIC" CXXFLAGS+=" -fPIC"
 
-log() { printf '\n==> %s\n' "$*"; }
+used=()
+log() { printf '\n==> %s\n' "$*" >&2; }
 
 # Downloads, verifies, and unpacks a source; prints the unpacked directory.
 fetch() {
-  local name=$1 entry n version url sum file dir
+  local name=$1 entry n version url sum file dir found=""
   for entry in "${SOURCES[@]}"; do
     IFS='|' read -r n version url sum <<<"$entry"
-    [[ $n == "$name" ]] && break
+    if [[ $n == "$name" ]]; then
+      found=$entry
+      break
+    fi
   done
+  [[ -n $found ]] || { echo "Unknown source: $name" >&2; exit 1; }
   file="$work/sources/$(basename "$url")"
   [[ -f $file ]] || curl -fsSL --retry 3 -o "$file" "$url"
   if [[ $(sha256 "$file") != "$sum" ]]; then
@@ -66,22 +96,68 @@ fetch() {
 }
 
 cmake_static() {
-  cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-    -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
+  local args=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix"
+    -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+  if [[ -n $cross ]]; then
+    args+=(-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64
+      -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_RC_COMPILER="$cross-windres"
+      -DCMAKE_FIND_ROOT_PATH="$prefix" -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+      -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY)
+  fi
+  cmake "${args[@]}" "$@"
+}
+
+# Merges static libraries into one.
+merge_archives() {
+  local output=$1
+  shift
+  if [[ $system == macos ]]; then
+    libtool -static -o "$output" "$@"
+  else
+    {
+      echo "CREATE $output"
+      local lib
+      for lib in "$@"; do echo "ADDLIB $lib"; done
+      echo "SAVE"
+      echo "END"
+    } | "$AR" -M
+  fi
+}
+
+build_zlib() {
+  log zlib
+  used+=(zlib)
+  local dir
+  dir=$(fetch zlib)
+  (
+    cd "$dir"
+    for src in adler32 compress crc32 deflate gzclose gzlib gzread gzwrite infback inffast \
+      inflate inftrees trees uncompr zutil; do
+      $CC $CFLAGS -c "$src.c" -o "$src.o"
+    done
+    "$AR" rcs libz.a ./*.o
+    mkdir -p "$prefix/include" "$prefix/lib/pkgconfig"
+    cp zlib.h zconf.h "$prefix/include/"
+    cp libz.a "$prefix/lib/"
+    printf 'prefix=%s\nName: zlib\nDescription: zlib\nVersion: 1.4\nLibs: -L%s/lib -lz\nCflags: -I%s/include\n' \
+      "$prefix" "$prefix" "$prefix" > "$prefix/lib/pkgconfig/zlib.pc"
+  )
 }
 
 build_x264() {
   log x264
-  local dir
+  used+=(x264)
+  local dir args=(--prefix="$prefix" --enable-static --enable-pic --disable-cli)
   dir=$(fetch x264)
-  (cd "$dir" && ./configure --prefix="$prefix" --enable-static --enable-pic --disable-cli \
-    && make -j"$jobs" && make install)
+  [[ -n $cross ]] && args+=(--host="$cross" --cross-prefix="$cross-")
+  (cd "$dir" && ./configure "${args[@]}" && make -j"$jobs" && make install)
 }
 
 # x265 as one library with 8-bit and 10-bit encoders (10-bit keeps HDR video).
 build_x265() {
   log x265
+  used+=(x265)
   local dir
   dir=$(fetch x265)
   local b10="$dir/build-10" b8="$dir/build-8"
@@ -92,11 +168,12 @@ build_x265() {
   (cd "$b8" && cmake_static -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT=ON \
     -DENABLE_SHARED=OFF -DENABLE_CLI=OFF ../source && ninja)
   (cd "$b8" && mv libx265.a libx265_main.a \
-    && libtool -static -o libx265.a libx265_main.a libx265_main10.a && ninja install)
+    && merge_archives libx265.a libx265_main.a libx265_main10.a && ninja install)
 }
 
 build_svt_av1() {
   log SVT-AV1
+  used+=(svt-av1)
   local dir
   dir=$(fetch svt-av1)
   mkdir -p "$dir/build"
@@ -105,15 +182,33 @@ build_svt_av1() {
 
 build_dav1d() {
   log dav1d
-  local dir
+  used+=(dav1d)
+  local dir args=(--prefix="$prefix" --libdir=lib --buildtype=release --default-library=static
+    -Denable_tools=false -Denable_tests=false)
   dir=$(fetch dav1d)
-  (cd "$dir" && meson setup build --prefix="$prefix" --libdir=lib --buildtype=release \
-    --default-library=static -Denable_tools=false -Denable_tests=false \
-    && ninja -C build && ninja -C build install)
+  if [[ -n $cross ]]; then
+    cat > "$dir/cross.ini" <<EOF
+[binaries]
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+windres = '$cross-windres'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF
+    args+=(--cross-file="$dir/cross.ini")
+  fi
+  (cd "$dir" && meson setup build "${args[@]}" && ninja -C build && ninja -C build install)
 }
 
 build_libwebp() {
   log libwebp
+  used+=(libwebp)
   local dir
   dir=$(fetch libwebp)
   mkdir -p "$dir/build"
@@ -123,50 +218,95 @@ build_libwebp() {
     -DWEBP_BUILD_EXTRAS=OFF .. && ninja && ninja install)
 }
 
+# NVIDIA and AMD encoders: headers only, the drivers' libraries are loaded at run time.
+install_gpu_headers() {
+  log "NVENC and AMF headers"
+  used+=(nv-codec-headers amf-headers)
+  local dir
+  dir=$(fetch nv-codec-headers)
+  make -C "$dir" PREFIX="$prefix" install
+  dir=$(fetch amf-headers)
+  mkdir -p "$prefix/include"
+  cp -R "$dir/AMF" "$prefix/include/"
+}
+
 build_ffmpeg() {
   log FFmpeg
+  used+=(ffmpeg)
   local dir
   dir=$(fetch ffmpeg)
-  local platform=()
-  case "$os" in
-    Darwin) platform=(--enable-videotoolbox --enable-zlib --enable-bzlib --enable-iconv --extra-libs=-liconv) ;;
+  local args=(--prefix="$prefix" --pkg-config=pkg-config --pkg-config-flags=--static
+    --extra-cflags="-I$prefix/include" --disable-shared --enable-static --enable-gpl
+    --disable-autodetect --disable-doc --disable-ffplay --disable-network --disable-devices
+    --enable-indev=lavfi
+    --enable-zlib --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libdav1d
+    --enable-libwebp)
+  case "$system" in
+    macos)
+      args+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-videotoolbox
+        --enable-bzlib --enable-iconv --extra-libs=-liconv)
+      ;;
+    linux)
+      args+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-ffnvcodec --enable-nvenc
+        --enable-amf --extra-libs="-lpthread -lm -ldl")
+      ;;
+    windows)
+      args+=(--extra-ldflags="-L$prefix/lib -static" --target-os=mingw32 --arch=x86_64
+        --cross-prefix="$cross-" --enable-cross-compile --enable-w32threads --enable-ffnvcodec
+        --enable-nvenc --enable-amf)
+      ;;
   esac
-  (cd "$dir" && ./configure --prefix="$prefix" --pkg-config-flags=--static \
-    --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib" \
-    --disable-shared --enable-static --enable-gpl --disable-autodetect \
-    --disable-doc --disable-ffplay --disable-network --disable-devices \
-    --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libdav1d --enable-libwebp \
-    "${platform[@]}" \
-    && make -j"$jobs" && make install)
+  (cd "$dir" && ./configure "${args[@]}" && make -j"$jobs" && make install)
+}
+
+# The license comment at the top of a header file.
+header_license() {
+  sed -n '1,/\*\//p' "$1"
 }
 
 collect() {
   log "Collecting into $out"
-  rm -rf "$out/sources" "$out/licenses"
+  rm -rf "$out/sources" "$out/licenses" "$out"/ffmpeg* "$out"/ffprobe*
   mkdir -p "$out/sources" "$out/licenses"
-  local tool
+  local tool name entry n version url sum
   for tool in ffmpeg ffprobe; do
-    cp "$prefix/bin/$tool" "$out/$tool"
-    strip "$out/$tool"
+    cp "$prefix/bin/$tool$exe" "$out/$tool$exe"
+    "$STRIP" "$out/$tool$exe"
   done
-  cp "$work"/sources/* "$out/sources/"
-  cp "$work/build/ffmpeg/COPYING.GPLv3" "$out/licenses/ffmpeg-COPYING.GPLv3"
-  cp "$work/build/ffmpeg/LICENSE.md" "$out/licenses/ffmpeg-LICENSE.md"
-  cp "$work/build/x264/COPYING" "$out/licenses/x264-COPYING"
-  cp "$work/build/x265/COPYING" "$out/licenses/x265-COPYING"
-  cp "$work/build/svt-av1/LICENSE.md" "$out/licenses/svt-av1-LICENSE.md"
-  cp "$work/build/svt-av1/PATENTS.md" "$out/licenses/svt-av1-PATENTS.md"
-  cp "$work/build/dav1d/COPYING" "$out/licenses/dav1d-COPYING"
-  cp "$work/build/libwebp/COPYING" "$out/licenses/libwebp-COPYING"
-  cp "$work/build/libwebp/PATENTS" "$out/licenses/libwebp-PATENTS"
-  printf '%s\n' "${SOURCES[@]}" | awk -F'|' '{print $1, $2, $4}' > "$out/sources/SOURCES.txt"
+  local b="$work/build"
+  cp "$b/ffmpeg/COPYING.GPLv3" "$out/licenses/ffmpeg-COPYING.GPLv3"
+  cp "$b/ffmpeg/LICENSE.md" "$out/licenses/ffmpeg-LICENSE.md"
+  cp "$b/x264/COPYING" "$out/licenses/x264-COPYING"
+  cp "$b/x265/COPYING" "$out/licenses/x265-COPYING"
+  cp "$b/svt-av1/LICENSE.md" "$out/licenses/svt-av1-LICENSE.md"
+  cp "$b/svt-av1/PATENTS.md" "$out/licenses/svt-av1-PATENTS.md"
+  cp "$b/dav1d/COPYING" "$out/licenses/dav1d-COPYING"
+  cp "$b/libwebp/COPYING" "$out/licenses/libwebp-COPYING"
+  cp "$b/libwebp/PATENTS" "$out/licenses/libwebp-PATENTS"
+  if [[ $system != macos ]]; then
+    cp "$b/zlib/LICENSE" "$out/licenses/zlib-LICENSE"
+    header_license "$b/nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h" \
+      > "$out/licenses/nv-codec-headers-LICENSE"
+    header_license "$b/amf-headers/AMF/core/Platform.h" > "$out/licenses/amf-headers-LICENSE"
+  fi
+  for name in "${used[@]}"; do
+    for entry in "${SOURCES[@]}"; do
+      IFS='|' read -r n version url sum <<<"$entry"
+      if [[ $n == "$name" ]]; then
+        cp "$work/sources/$(basename "$url")" "$out/sources/"
+        echo "$n $version $(basename "$url") $sum" >> "$out/sources/SOURCES.txt"
+      fi
+    done
+  done
 }
 
+[[ $system != macos ]] && build_zlib
 build_x264
 build_x265
 build_svt_av1
 build_dav1d
 build_libwebp
+[[ $system != macos ]] && install_gpu_headers
 build_ffmpeg
 collect
-"$out/ffmpeg" -hide_banner -version | head -1
+log "Done: $out/ffmpeg$exe"

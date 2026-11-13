@@ -1,0 +1,107 @@
+# Builds the FFmpeg that Peraz bundles (scripts/build-ffmpeg.sh) for every release target, checks
+# it with scripts/test-ffmpeg-build.sh, and keeps the binaries, licenses, and sources as workflow
+# artifacts. Building takes a while and macOS runners are scarce, so this runs only when the
+# scripts or this workflow change, and by hand.
+name: FFmpeg
+
+on:
+  pull_request:
+    paths:
+      - scripts/build-ffmpeg.sh
+      - scripts/test-ffmpeg-build.sh
+      - .github/workflows/ffmpeg.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/build-ffmpeg.sh
+      - scripts/test-ffmpeg-build.sh
+      - .github/workflows/ffmpeg.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          # The oldest supported Ubuntu, so the binaries run on older glibc versions too.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          # Cross-built with MinGW-w64, then tested on Windows below.
+          - target: x86_64-pc-windows-msvc
+            os: ubuntu-24.04
+            cross: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      PERAZ_FFMPEG_TARGET: ${{ matrix.cross }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm pkg-config \
+            ${{ matrix.cross && 'mingw-w64' || '' }}
+          pipx install meson
+          pipx install ninja
+          pipx install cmake
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install nasm pkgconf
+          pipx install meson
+          pipx install ninja
+          pipx install cmake
+      - name: Cache source archives
+        uses: actions/cache@v4
+        with:
+          path: target/ffmpeg-work/sources
+          key: ffmpeg-sources-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          restore-keys: ffmpeg-sources-
+      - name: Build
+        run: scripts/build-ffmpeg.sh target/ffmpeg
+      - name: Test
+        run: scripts/test-ffmpeg-build.sh ${{ matrix.cross && '--libraries-only' || '' }} target/ffmpeg
+      - name: Package
+        run: |
+          mkdir -p dist/peraz-ffmpeg
+          cp target/ffmpeg/ffmpeg* target/ffmpeg/ffprobe* dist/peraz-ffmpeg/
+          cp -R target/ffmpeg/licenses dist/peraz-ffmpeg/
+          tar -C dist -cJf "peraz-ffmpeg-${{ matrix.target }}.tar.xz" peraz-ffmpeg
+          tar -C target/ffmpeg -cf "peraz-ffmpeg-sources-${{ matrix.target }}.tar" sources
+          ls -l peraz-ffmpeg-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peraz-ffmpeg-${{ matrix.target }}
+          path: |
+            peraz-ffmpeg-${{ matrix.target }}.tar.xz
+            peraz-ffmpeg-sources-${{ matrix.target }}.tar
+
+  test-windows:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: peraz-ffmpeg-x86_64-pc-windows-msvc
+      - name: Test
+        run: |
+          tar -xJf peraz-ffmpeg-x86_64-pc-windows-msvc.tar.xz
+          scripts/test-ffmpeg-build.sh peraz-ffmpeg
