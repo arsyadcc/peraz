@@ -6,7 +6,7 @@
 #   PERAZ_FFMPEG_TARGET=windows scripts/build-ffmpeg.sh     (Windows x64, cross-built on Linux)
 #
 # Builds for the machine it runs on (macOS or Linux), or for Windows x64 with MinGW-w64.
-# Needs a C/C++ compiler, make, cmake, meson, ninja, pkg-config, and nasm on x86_64.
+# Needs a C/C++ compiler, make, cmake, meson, ninja, pkg-config, xxd, and nasm on x86_64.
 #
 # Every source is pinned by version and SHA-256 below. <out-dir>/sources gets the exact archives
 # the binaries were built from (the corresponding source the GPL asks for), <out-dir>/licenses
@@ -22,6 +22,7 @@ SOURCES=(
   "x265|4.3|https://github.com/Multicorewareinc/x265/releases/download/4.3/x265_4.3.tar.gz|83c53e4c8bbb8f1e33ed59e10a7d621d1d7801ca853910c3eb41f038b8ffb121"
   "svt-av1|4.3.0|https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v4.3.0/SVT-AV1-v4.3.0.tar.bz2|9223ce06e6172ad41357ed23b3b00f036e03794b86b0e20ea9ccb3f648b8955d"
   "dav1d|1.5.4|https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2|2abfb0c89212e6e4733a54e0ae509ec00a5b845a6360946f918806e14aedb011"
+  "libvmaf|3.2.1|https://github.com/Netflix/vmaf/archive/refs/tags/v3.2.1.tar.gz|5df7386911bc15fd1ca783132528748d219768ae4fc5f8e0b61184f041648092"
   "libwebp|1.6.0|https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz|e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
   "zlib|1.4|https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz|4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c"
   "nv-codec-headers|13.1.15.0|https://github.com/FFmpeg/nv-codec-headers/releases/download/n13.1.15.0/nv-codec-headers-13.1.15.0.tar.gz|52532ceade3d5c1af62624986f13cf01b63c910576b08c0c278756c5e4b41ad0"
@@ -188,14 +189,12 @@ build_svt_av1() {
   (cd "$dir/build" && cmake_static -DBUILD_APPS=OFF -DBUILD_TESTING=OFF .. && ninja && ninja install)
 }
 
-build_dav1d() {
-  log dav1d
-  used+=(dav1d)
-  local dir args=(--prefix="$prefix" --libdir=lib --buildtype=release --default-library=static
-    -Denable_tools=false -Denable_tests=false)
-  dir=$(fetch dav1d)
+# A static meson build into the prefix, cross-compiled for Windows when needed. Runs in the
+# current directory; the arguments go to `meson setup`.
+meson_static() {
+  local args=(--prefix="$prefix" --libdir=lib --buildtype=release --default-library=static)
   if [[ -n $cross ]]; then
-    cat > "$dir/cross.ini" <<EOF
+    cat > cross.ini <<EOF
 [binaries]
 c = '$CC'
 cpp = '$CXX'
@@ -209,9 +208,33 @@ cpu_family = 'x86_64'
 cpu = 'x86_64'
 endian = 'little'
 EOF
-    args+=(--cross-file="$dir/cross.ini")
+    args+=(--cross-file=cross.ini)
   fi
-  (cd "$dir" && meson setup build "${args[@]}" && ninja -C build && ninja -C build install)
+  meson setup build "${args[@]}" "$@" && ninja -C build && ninja -C build install
+}
+
+build_dav1d() {
+  log dav1d
+  used+=(dav1d)
+  local dir
+  dir=$(fetch dav1d)
+  (cd "$dir" && meson_static -Denable_tools=false -Denable_tests=false)
+}
+
+# VMAF scoring for `--target-vmaf`, with its models built in (which needs xxd).
+build_libvmaf() {
+  log libvmaf
+  used+=(libvmaf)
+  command -v xxd >/dev/null || { echo "xxd is needed to build the VMAF models in" >&2; exit 1; }
+  local dir
+  dir=$(fetch libvmaf)
+  (cd "$dir/libvmaf" && meson_static -Denable_tests=false -Denable_docs=false \
+    -Denable_tools=false -Dbuilt_in_models=true -Denable_float=false)
+  # Part of libvmaf is C++, but its pkg-config file does not name the C++ runtime, so FFmpeg's
+  # static link check fails without this.
+  local cxx_runtime=-lstdc++
+  [[ $system == macos ]] && cxx_runtime=-lc++
+  echo "Libs.private: $cxx_runtime" >> "$prefix/lib/pkgconfig/libvmaf.pc"
 }
 
 build_libwebp() {
@@ -248,7 +271,7 @@ build_ffmpeg() {
     --disable-autodetect --disable-doc --disable-ffplay --disable-network --disable-devices
     --enable-indev=lavfi
     --enable-zlib --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libdav1d
-    --enable-libwebp)
+    --enable-libwebp --enable-libvmaf)
   case "$system" in
     macos)
       args+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-videotoolbox
@@ -289,6 +312,7 @@ collect() {
   cp "$b/svt-av1/LICENSE.md" "$out/licenses/svt-av1-LICENSE.md"
   cp "$b/svt-av1/PATENTS.md" "$out/licenses/svt-av1-PATENTS.md"
   cp "$b/dav1d/COPYING" "$out/licenses/dav1d-COPYING"
+  cp "$b/libvmaf/LICENSE" "$out/licenses/libvmaf-LICENSE"
   cp "$b/libwebp/COPYING" "$out/licenses/libwebp-COPYING"
   cp "$b/libwebp/PATENTS" "$out/licenses/libwebp-PATENTS"
   if [[ $system != macos ]]; then
@@ -314,6 +338,7 @@ build_x265
 build_svt_av1
 build_dav1d
 build_libwebp
+build_libvmaf
 [[ $system != macos ]] && install_gpu_headers
 build_ffmpeg
 collect

@@ -58,7 +58,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nasm pkg-config \
+          sudo apt-get install -y --no-install-recommends nasm pkg-config xxd \
             ${{ matrix.cross && 'mingw-w64' || '' }}
           pipx install meson
           pipx install ninja

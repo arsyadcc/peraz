@@ -13,7 +13,7 @@ if [[ ${1:-} == --libraries-only ]]; then
   only_libraries=1
   shift
 fi
-dir=${1:-target/ffmpeg}
+dir=$(cd "${1:-target/ffmpeg}" && pwd)
 exe=""
 [[ -f $dir/ffmpeg.exe ]] && exe=.exe
 
@@ -64,6 +64,8 @@ for encoder in libx264 libx265 libsvtav1 libwebp libwebp_anim aac gif png mjpeg;
 done
 decoders=$("$ff" -hide_banner -decoders)
 grep -qE '^ [A-Z.]{6} libdav1d ' <<<"$decoders" || fail "decoder libdav1d is missing"
+filters=$("$ff" -hide_banner -filters)
+grep -qE '^ [A-Z.]+ libvmaf ' <<<"$filters" || fail "filter libvmaf is missing"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -74,6 +76,10 @@ src=(-v error -f lavfi -i testsrc2=size=320x240:rate=30 -t 1)
 "$ff" "${src[@]}" -frames:v 1 -c:v libwebp "$tmp/still.webp"
 "$ff" -v error -f lavfi -i sine=duration=1 -c:a aac "$tmp/audio.m4a"
 "$ff" -v error -c:v libdav1d -i "$tmp/av1.mp4" -f null -
+# VMAF with the built-in model `--target-vmaf` names: a file against itself scores near 100.
+(cd "$tmp" && "$ff" -v error -i h264.mp4 -i h264.mp4 \
+  -lavfi "libvmaf=model=version=vmaf_v0.6.1:log_fmt=json:log_path=vmaf.json" -f null -)
+grep -q '"vmaf"' "$tmp/vmaf.json" || fail "libvmaf wrote no score"
 
 pix_fmt=$("$probe" -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$tmp/hevc10.mp4")
 [[ ${pix_fmt%$'\r'} == yuv420p10le ]] || fail "10-bit HEVC came out as $pix_fmt"
