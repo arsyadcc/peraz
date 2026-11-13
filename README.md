@@ -41,8 +41,16 @@ formula in full like this trusts it. If you added the tap with `brew tap arsyadc
 
 **Installers:** the [latest release](https://github.com/arsyadcc/peraz/releases/latest) has a shell
 installer for macOS and Linux and a PowerShell installer for Windows. These install `peraz` only:
-images, PDFs, and EPUBs work right away; for videos, GIFs, HEIC, and AVIF, install FFmpeg with
-your package manager, then check with `peraz doctor`.
+images, PDFs, and EPUBs work right away. For videos, GIFs, HEIC, and AVIF, get the FFmpeg build
+Peraz is tested with, or install FFmpeg with your package manager, then check with
+`peraz doctor`:
+
+```sh
+peraz ffmpeg install      # downloads it into a peraz-ffmpeg folder next to peraz
+```
+
+**Archives:** each release also has `peraz-full-<platform>` archives, with `peraz` and that
+FFmpeg build together, ready to unpack and run.
 
 **With Cargo** (Rust 1.99 or newer), from [crates.io](https://crates.io/crates/peraz):
 
@@ -267,9 +275,13 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
 ## Requirements
 
 - macOS, Linux, or Windows
-- `ffmpeg` and `ffprobe` (Homebrew installs them with Peraz). Peraz uses `--ffmpeg <path>`,
-  `PERAZ_FFMPEG`, a bundled build in a `peraz-ffmpeg` folder next to `peraz`, or `ffmpeg` on
-  `PATH`, in that order. `peraz doctor` shows which one it found and what it can encode.
+- `ffmpeg` and `ffprobe` (Homebrew installs them with Peraz, and `peraz ffmpeg install`
+  downloads a build). Peraz uses `--ffmpeg <path>`, `PERAZ_FFMPEG`, a bundled build in a
+  `peraz-ffmpeg` folder next to `peraz`, or `ffmpeg` on `PATH`, in that order. `peraz doctor`
+  shows which one it found and what it can encode.
+- The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, and libwebp, made by
+  [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
+  [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
 - Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs;
   videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 

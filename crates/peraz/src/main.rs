@@ -6,6 +6,7 @@
 mod completions;
 mod compress;
 mod doctor;
+mod ffmpeg;
 #[cfg(test)]
 mod interface_tests;
 mod probe;
@@ -68,6 +69,9 @@ enum Command {
     Doctor(doctor::Args),
     /// Compress new files as they appear in folders.
     Watch(watch::Args),
+    /// Install or remove the FFmpeg build Peraz is tested with, next to peraz.
+    #[command(subcommand)]
+    Ffmpeg(ffmpeg::Command),
     /// List and show recipes (named sets of settings for --recipe).
     #[command(subcommand)]
     Recipe(recipes::Command),
@@ -84,6 +88,7 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::run(ffmpeg, args),
         Command::Recipe(command) => recipes::run(command),
         Command::Watch(args) => watch::run(ffmpeg, args),
+        Command::Ffmpeg(command) => ffmpeg::run(command),
         Command::Completions(args) => completions::run(args),
     };
     ExitCode::from(code)

@@ -1,0 +1,9 @@
+# The bundled FFmpeg build: `peraz ffmpeg install` downloads it, and the peraz-full archives of a
+# Peraz release include it. It is a release of this repository, published by
+# .github/workflows/ffmpeg.yml from an ffmpeg-* tag; below is the SHA-256 of each archive in it.
+tag ffmpeg-9.0.2-1
+aarch64-apple-darwin 73bddea767d59ca92dc1405c04e871b7040039ca6886b9f47ce9039df13f158d
+x86_64-apple-darwin 11ccc0092212e356c72292954d09e63612a74b46302f9fb6fa37fbf4a2474fd0
+aarch64-unknown-linux-gnu 15bfebd5801b89d2f9d67859782f48111bef37cabaf218d2d8ac32819d217b16
+x86_64-unknown-linux-gnu e2e9b66fcfa508249730320ee7b9573fd310b4145d4d7acd1e373f244e62028e
+x86_64-pc-windows-msvc 8bcb1929b57d3778243f4883a9e01a7823f2caf51aab7b5bb4b1ff8b677acd5e

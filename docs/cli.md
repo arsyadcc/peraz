@@ -16,6 +16,18 @@ any input needs FFmpeg, the run stops before any work with exit code `3` and nam
 An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
 `peraz probe`, `peraz doctor`, and `peraz watch` need FFmpeg.
 
+## Bundled FFmpeg
+
+`peraz ffmpeg install` downloads the FFmpeg build that this version of Peraz is tested with, for
+the platform it runs on, from the Peraz repository's
+[`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-). The download is
+checked against a SHA-256 built into `peraz` and unpacked into a `peraz-ffmpeg` folder next to the
+`peraz` executable (after resolving symbolic links), which Peraz uses unless `--ffmpeg` or
+`PERAZ_FFMPEG` names another FFmpeg. Run it again after updating Peraz: it does nothing when the
+build is already there. It needs permission to write to the executable's folder; when it cannot,
+or the download fails, it exits with code `3` and changes nothing. The `peraz-full` release
+archives come with the same folder.
+
 ## Commands
 
 | Command | What it does |
@@ -24,6 +36,8 @@ An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always
 | `peraz probe <FILES>...` | Show what Peraz knows about media files. |
 | `peraz doctor` | Show which FFmpeg Peraz uses and what it can encode. |
 | `peraz watch <FOLDERS>...` | Compress new files as they appear in folders. |
+| `peraz ffmpeg install` | Download the FFmpeg build Peraz is tested with into a `peraz-ffmpeg` folder next to `peraz` ([details](#bundled-ffmpeg)). |
+| `peraz ffmpeg uninstall` | Remove the `peraz-ffmpeg` folder next to `peraz`. |
 | `peraz recipe list` | List the built-in recipes and yours. |
 | `peraz recipe show <NAME>` | Print a recipe as TOML. |
 | `peraz completions <SHELL>` | Print a shell completion script: `bash`, `zsh`, `fish`, `powershell`, or `elvish`. |
@@ -86,6 +100,12 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--json` | | Print [JSON](json.md) instead of text. |
+
+### `ffmpeg install` only
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--force` | | Download and install the build again, even if it is already installed. |
 
 ### `recipe list` and `recipe show`
 

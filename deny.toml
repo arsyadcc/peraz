@@ -3,6 +3,15 @@
 
 [graph]
 all-features = true
+# The platforms Peraz is released for (dist-workspace.toml); dependencies used only elsewhere,
+# such as WebAssembly, are not shipped.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
 
 [licenses]
 confidence-threshold = 0.9

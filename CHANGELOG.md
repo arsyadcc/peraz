@@ -16,6 +16,10 @@ between alpha versions.
 - Peraz uses a bundled FFmpeg build in a `peraz-ffmpeg` folder next to the `peraz` executable,
   after `--ffmpeg` and `PERAZ_FFMPEG` and before `PATH`. **Interface:** `toolchain.source` in
   `--json` output can be `bundled`.
+- `peraz ffmpeg install` downloads the FFmpeg build Peraz is tested with into that folder, and
+  `peraz ffmpeg uninstall` removes it. The builds (GPL, with x264, x265, SVT-AV1, dav1d, and
+  libwebp) are published with their sources as `ffmpeg-*` releases. **Interface:** new commands.
+- Each release has `peraz-full-<platform>` archives with Peraz and the bundled FFmpeg together.
 
 ## [0.1.0] - 2026-11-13
 

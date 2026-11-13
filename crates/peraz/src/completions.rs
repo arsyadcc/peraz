@@ -203,9 +203,9 @@ mod tests {
         // The generated function is wrapped by one that knows the `compress` shortcut.
         assert_eq!(raw.matches("\n_peraz() {\n").count(), 1);
         assert_eq!(zsh.matches("\n_peraz_generated() {\n").count(), 1);
-        assert!(
-            zsh.contains("local -a commands=(compress probe doctor watch recipe completions help)")
-        );
+        assert!(zsh.contains(
+            "local -a commands=(compress probe doctor watch ffmpeg recipe completions help)"
+        ));
 
         let fish = script(Shell::Fish);
         assert_eq!(fish.matches("recipe list --names").count(), 3, "{fish}");

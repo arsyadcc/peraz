@@ -1,0 +1,74 @@
+# Makes the peraz-full-<target> archives of a Peraz release: the release's own archive with the
+# bundled FFmpeg (crates/peraz/src/ffmpeg-release.txt names the build) in a peraz-ffmpeg folder
+# next to peraz. It runs when the Release workflow has published a release; by hand, it builds
+# the archives for a published tag and uploads them only when asked.
+name: Full archives
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Peraz release tag, for example v0.2.0
+        required: true
+      upload:
+        description: Add the archives to the release (otherwise keep them as workflow artifacts)
+        type: boolean
+        default: false
+
+jobs:
+  full-archives:
+    # Release also runs on pull requests, where it publishes nothing.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      UPLOAD: ${{ github.event_name == 'workflow_run' || inputs.upload }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Assemble
+        run: |
+          pinned=crates/peraz/src/ffmpeg-release.txt
+          ffmpeg_tag=$(awk '$1 == "tag" { print $2 }' "$pinned")
+          mkdir -p downloads out
+          gh release download "$TAG" -D downloads -p 'peraz-*.tar.xz' -p 'peraz-*.zip' -p 'peraz-*.sha256'
+          gh release download "$ffmpeg_tag" -D downloads -p 'peraz-ffmpeg-*.tar.xz'
+          (cd downloads && for sum in peraz-*.sha256; do sha256sum -c "$sum"; done)
+          grep -vE '^(#|tag |$)' "$pinned" | while read -r target sum; do
+            echo "$sum  downloads/peraz-ffmpeg-$target.tar.xz" | sha256sum -c
+            name="peraz-full-$target"
+            dir="out/$name"
+            mkdir -p "$dir"
+            if [[ $target == *windows* ]]; then
+              unzip -q "downloads/peraz-$target.zip" -d "$dir"
+            else
+              tar -xJf "downloads/peraz-$target.tar.xz" -C "$dir" --strip-components=1
+            fi
+            tar -xJf "downloads/peraz-ffmpeg-$target.tar.xz" -C "$dir"
+            # `peraz ffmpeg install` reads this to know the build is already there.
+            echo "$ffmpeg_tag" > "$dir/peraz-ffmpeg/RELEASE"
+            if [[ $target == *windows* ]]; then
+              (cd out && zip -qr -9 "$name.zip" "$name" && sha256sum "$name.zip" > "$name.zip.sha256")
+            else
+              (cd out && tar -cJf "$name.tar.xz" "$name" && sha256sum "$name.tar.xz" > "$name.tar.xz.sha256")
+            fi
+            rm -rf "$dir"
+          done
+          ls -l out
+      - name: Upload to the release
+        if: env.UPLOAD == 'true'
+        run: gh release upload "$TAG" out/* --clobber
+      - if: env.UPLOAD != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peraz-full
+          path: out/*

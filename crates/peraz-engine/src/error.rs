@@ -6,7 +6,7 @@ use std::process::ExitStatus;
 pub enum EngineError {
     /// A required external tool could not be found.
     #[error(
-        "{tool} not found ({searched}). Install FFmpeg, or point Peraz to it with --ffmpeg or PERAZ_FFMPEG"
+        "{tool} not found ({searched}). Run `peraz ffmpeg install` to download the build Peraz is tested with, install FFmpeg yourself, or point Peraz to it with --ffmpeg or PERAZ_FFMPEG"
     )]
     ToolNotFound {
         tool: &'static str,

@@ -39,6 +39,12 @@ flate2 = "1"
 quick-xml = "0.42"
 toml = "1"
 ravif = { version = "0.13", default-features = false, features = ["threading"] }
+# `peraz ffmpeg install`: HTTPS with the system's certificates, and the build's .tar.xz archive.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.11"
+tar = { version = "0.4", default-features = false }
+lzma-rs = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
