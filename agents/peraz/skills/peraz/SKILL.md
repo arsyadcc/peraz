@@ -25,7 +25,7 @@ Run `peraz doctor --json`.
   can encode.
 - **Exit `3`**: FFmpeg was not found. JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs still
   work without it. For video, GIFs, HEIC, and AVIF, offer `peraz ffmpeg install`, which downloads
-  the FFmpeg build Peraz is tested with (about 25 MB) next to `peraz`. On a Peraz without that
+  the FFmpeg build Peraz is tested with (25-35 MB) next to `peraz`. On a Peraz without that
   command, install FFmpeg with the system's package manager.
 - **`peraz` not found**: offer to install it, then check again:
   - macOS or Linux with Homebrew: `brew install arsyadcc/tap/peraz` (includes FFmpeg);

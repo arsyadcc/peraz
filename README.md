@@ -84,7 +84,7 @@ its usual permission prompts. Originals stay untouched, and the skill tells the 
 or delete them only when you ask. If Peraz or FFmpeg is missing, the agent offers to install it:
 Peraz with Homebrew, Cargo, or the installers on the releases page, and FFmpeg with
 `peraz ffmpeg install`, which downloads the FFmpeg build from this repository's `ffmpeg-*`
-release (about 25 MB) and checks its SHA-256 before use.
+release (25-35 MB, depending on the platform) and checks its SHA-256 before use.
 
 ### Shell completions
 

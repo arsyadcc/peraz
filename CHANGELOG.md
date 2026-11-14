@@ -11,6 +11,8 @@ between alpha versions.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
 ### Added
 
 - Built-in recipes for upload limits: `discord` (20 MB), `email` (14 MB), `github` (10 MB), and
@@ -175,7 +177,8 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/arsyadcc/peraz/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arsyadcc/peraz/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.4...v0.1.0
 [0.1.0-alpha.4]: https://github.com/arsyadcc/peraz/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
