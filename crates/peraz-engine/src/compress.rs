@@ -9,11 +9,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use peraz_core::plan::fit_within;
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    Clip, ExistingOutput, ImageDecoder, Job, KeepReason, MediaInfo, MediaKind, Outcome, Pass, Plan,
-    PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput, plan_animated,
-    plan_document, plan_gif, plan_image, plan_trim, plan_video,
+    Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
+    Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput,
+    plan_animated, plan_document, plan_gif, plan_image, plan_trim, plan_video,
 };
 
 use crate::batch::{Batch, Lane};
@@ -202,6 +203,21 @@ fn make_image(
             None => Err(NEEDS_FFMPEG.to_owned()),
         },
     };
+    // A JPEG becoming JPEG XL is also recompressed losslessly, when its pixels stay as they are.
+    let recompress = matches!(
+        plan.encoding,
+        ImageEncoding::Jxl {
+            from_jpeg: true,
+            ..
+        }
+    ) && decoded.as_ref().is_ok_and(|d| {
+        fit_within(
+            (d.image.width(), d.image.height()),
+            plan.max_width,
+            plan.max_height,
+        )
+        .is_none()
+    });
     let encoded = match (decoded, plan.target_ssimulacra2) {
         (Err(message), _) => Err(message),
         (Ok(d), None) => encode_image(d, &plan),
@@ -222,10 +238,20 @@ fn make_image(
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
-    let encoded = match encoded {
+    let mut encoded = match encoded {
         Ok(encoded) => encoded,
         Err(message) => return failed(message),
     };
+    if recompress
+        && let Some(lossless) = recompress_jpeg(&job.input)
+        && lossless.len() < encoded.bytes.len()
+    {
+        encoded.bytes = lossless;
+        "cjxl lossless JPEG recompression".clone_into(&mut encoded.encoder);
+        if let Some(score) = &mut report.score {
+            score.score = 100.0;
+        }
+    }
     report.encoder = Some(encoded.encoder);
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
@@ -602,6 +628,28 @@ pub(crate) fn make_workdir() -> Result<PathBuf, Outcome> {
         message: format!("cannot create a work folder: {e}"),
     })?;
     Ok(workdir)
+}
+
+/// A JPEG recompressed losslessly into JPEG XL, or `None` when cjxl cannot (some JPEGs, such as
+/// arithmetic-coded ones, are not supported): the lossy encode is kept then.
+fn recompress_jpeg(input: &Path) -> Option<Vec<u8>> {
+    use image::ImageDecoder as _;
+    let jpeg = std::fs::read(input).ok()?;
+    let orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&jpeg))
+        .ok()?
+        .orientation()
+        .ok()?;
+    let exif =
+        (1..=8).find(|&n| image::metadata::Orientation::from_exif(n) == Some(orientation))?;
+    crate::jxl::recompress_jpeg(&jpeg, exif).ok()
+}
+
+/// [`make_workdir`] for code that reports errors as text.
+pub(crate) fn work_folder() -> Result<PathBuf, String> {
+    make_workdir().map_err(|outcome| match outcome {
+        Outcome::Failed { message } => message,
+        _ => "cannot create a work folder".to_owned(),
+    })
 }
 
 /// Most encodes a size target may take: the first try plus corrections.

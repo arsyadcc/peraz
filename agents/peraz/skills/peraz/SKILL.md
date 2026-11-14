@@ -1,6 +1,6 @@
 ---
 name: peraz
-description: Compress media with the `peraz` CLI. Use when asked to make videos, images, GIFs, PDFs, or EPUBs smaller; convert images to WebP, AVIF, or JPEG; turn a video into a GIF or a GIF into an MP4; fit a video under a size limit; trim a clip; check in CI that a project's images are compressed; or inspect a media file.
+description: Compress media with the `peraz` CLI. Use when asked to make videos, images, GIFs, PDFs, or EPUBs smaller; convert images to WebP, AVIF, JPEG XL, or JPEG; turn a video into a GIF or a GIF into an MP4; fit a video under a size limit; trim a clip; check in CI that a project's images are compressed; or inspect a media file.
 ---
 
 # Peraz
@@ -44,7 +44,8 @@ result, and `--out-dir <folder>` for a batch so the results land together.
 | Smaller files, same formats | `peraz --json <files>` |
 | Even smaller, visibly lossy | `peraz --json -q small <files>` (`-q`: `highest`, `high`, `balanced` (default), `small`, `smallest`) |
 | Pictures for a website | `peraz --json --recipe web-images <files>` (WebP, at most 2000 px) |
-| A specific image format | `peraz --json --format webp <files>` (`jpeg`, `png`, `webp`, `avif`) |
+| A specific image format | `peraz --json --format webp <files>` (`jpeg`, `png`, `webp`, `avif`, `jxl`) |
+| JPEGs smaller with no quality loss | `peraz --json --format jxl -q highest <files>` (JPEG XL; needs `cjxl`, which `peraz ffmpeg install` brings; check that the viewer supports JPEG XL) |
 | Smaller dimensions | `--max-width 1280` and/or `--max-height 720` (never scales up) |
 | A video for Discord, email, GitHub, or WhatsApp | `peraz --json --recipe discord video.mov` (or `email`, `github`, `whatsapp`) |
 | A video under a size limit | `peraz --json --target-size 25MB video.mov` (SI units: 1 MB = 1,000,000 bytes) |

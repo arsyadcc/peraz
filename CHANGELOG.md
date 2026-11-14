@@ -24,6 +24,11 @@ between alpha versions.
   recipe key `target_vmaf`.
 - `--target-ssimulacra2 <score>` does the same for still images, with SSIMULACRA2.
   **Interface:** new flag and recipe key `target_ssimulacra2`.
+- `--format jxl` writes JPEG XL with libjxl's `cjxl`, run as a separate program like FFmpeg (from
+  the bundled build, `PATH`, or `PERAZ_CJXL`). A JPEG is also recompressed losslessly when it is
+  not resized, and the smaller of the two files is kept. The bundled build `ffmpeg-9.0.2-3`
+  includes `cjxl` and `djxl` from libjxl 0.12.0. **Interface:** new format value `jxl`, exit code
+  `3` when `cjxl` is missing, and `peraz doctor --json` a `jxl` field.
 - **Interface:** reports have a `score` field (`metric`, `target`, `score`, `sampled`), and
   `peraz doctor --json` a `vmaf` field saying whether FFmpeg has libvmaf.
 

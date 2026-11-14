@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use peraz_engine::ffmpeg::{BuildInfo, BuildLicense, Capabilities, ToolSource, Toolchain};
+use peraz_engine::jxl::JxlTools;
 use serde::Serialize;
 
 use crate::compress::WITHOUT_FFMPEG;
@@ -26,6 +27,15 @@ struct Report<'a> {
     encoders: Vec<&'a str>,
     /// FFmpeg's libvmaf filter is there, which `--target-vmaf` needs.
     vmaf: bool,
+    /// libjxl's tools, which `--format jxl` needs; `null` when not found.
+    jxl: Option<Jxl<'a>>,
+}
+
+#[derive(Serialize)]
+struct Jxl<'a> {
+    cjxl: &'a Path,
+    djxl: Option<&'a Path>,
+    version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +87,11 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         hwaccels: &caps.hwaccels,
         encoders: caps.encoders.keys().map(String::as_str).collect(),
         vmaf: caps.vmaf,
+        jxl: JxlTools::locate().map(|jxl| Jxl {
+            cjxl: &jxl.cjxl,
+            djxl: jxl.djxl.as_deref(),
+            version: jxl.version(),
+        }),
     };
     if args.json {
         print_json(report);
@@ -134,6 +149,14 @@ fn print_human(report: &Report, caps: &Capabilities) {
             "no libvmaf (--target-vmaf needs it)"
         }
     );
+    match &report.jxl {
+        Some(jxl) => println!(
+            "jpeg xl  {} ({})",
+            jxl.cjxl.display(),
+            jxl.version.as_deref().unwrap_or("unknown version")
+        ),
+        None => println!("jpeg xl  no cjxl (--format jxl needs it)"),
+    }
     println!(
         "\nHardware encoders are compiled in; whether this machine can use them is checked on first use."
     );

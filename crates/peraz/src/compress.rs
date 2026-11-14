@@ -8,11 +8,12 @@ use std::sync::{Mutex, PoisonError};
 use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan,
-    Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoPlan,
+    EncoderPreference, ExistingOutput, ImageFormat, Job, KeepReason, Metric, Outcome, OutputTarget,
+    Plan, Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::{BuildInfo, Capabilities, FFMPEG_ENV, Toolchain};
+use peraz_engine::jxl::{CJXL_ENV, JxlTools};
 use serde::Serialize;
 
 use crate::{exit, print_json, recipes};
@@ -51,7 +52,7 @@ pub struct SettingsArgs {
     #[arg(long, value_name = "PIXELS")]
     pub max_height: Option<u32>,
 
-    /// Output format: keep (default), jpeg, png, webp, avif, gif, mp4. For videos and GIFs,
+    /// Output format: keep (default), jpeg, png, webp, avif, jxl, gif, mp4. For videos and GIFs,
     /// webp/avif make animated images, gif makes a GIF, and mp4 turns a GIF into a video.
     #[arg(long, value_parser = parse_format)]
     pub format: Option<String>,
@@ -239,7 +240,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         Ok(found) => found,
         Err(code) => return code,
     };
-    if let Err(code) = check_vmaf(&recipe, tools.as_ref(), &caps) {
+    if let Err(code) = check_tools(&recipe, tools.as_ref(), &caps) {
         return code;
     }
 
@@ -327,12 +328,20 @@ fn inspect(tools: Option<&Toolchain>) -> Result<(Option<BuildInfo>, Capabilities
         })
 }
 
-/// `--target-vmaf` needs FFmpeg's libvmaf filter: without it, stop before any work.
-pub(crate) fn check_vmaf(
+/// Stops before any work when the recipe needs a tool that is missing: `--format jxl` needs
+/// libjxl's cjxl, and `--target-vmaf` FFmpeg's libvmaf filter.
+pub(crate) fn check_tools(
     recipe: &Recipe,
     tools: Option<&Toolchain>,
     caps: &Capabilities,
 ) -> Result<(), u8> {
+    if recipe.image.format == ImageFormat::Jxl && JxlTools::locate().is_none() {
+        eprintln!("error: --format jxl needs cjxl from libjxl, which was not found");
+        eprintln!(
+            "Run `peraz ffmpeg install` to get a build that has it, install libjxl's tools, or point Peraz to cjxl with {CJXL_ENV}."
+        );
+        return Err(exit::ENVIRONMENT);
+    }
     if recipe.video.target_vmaf.is_none() || recipe.video.target_bytes.is_some() {
         return Ok(());
     }

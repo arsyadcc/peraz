@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: brew install ffmpeg
+      - run: brew install ffmpeg jpeg-xl
       - run: ffmpeg -version | head -1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # sips makes the HEIC samples, so only this job tests HEIC end to end.

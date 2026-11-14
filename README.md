@@ -43,7 +43,7 @@ formula in full like this trusts it. If you added the tap with `brew tap arsyadc
 installer for macOS and Linux and a PowerShell installer for Windows. These install `peraz` only:
 images, PDFs, and EPUBs work right away. For videos, GIFs, HEIC, and AVIF, get the FFmpeg build
 Peraz is tested with, or install FFmpeg with your package manager, then check with
-`peraz doctor`:
+`peraz doctor`. The FFmpeg build also has libjxl's `cjxl` and `djxl`, for JPEG XL output:
 
 ```sh
 peraz ffmpeg install      # downloads it into a peraz-ffmpeg folder next to peraz
@@ -129,7 +129,8 @@ peraz doctor                             # which FFmpeg is used and what it can 
   shows the score.
 - **Trim** — cut a clip by time. When the cut lands on a keyframe the streams are copied:
   instant and lossless.
-- **Images** — JPEG (mozjpeg), PNG (palette + oxipng, with a lossless fallback), WebP, and AVIF.
+- **Images** — JPEG (mozjpeg), PNG (palette + oxipng, with a lossless fallback), WebP, AVIF,
+  and JPEG XL, which also shrinks JPEGs losslessly.
   EXIF orientation is applied, the color profile is kept, and other metadata, including GPS
   location, is removed.
 - **iPhone photos** — HEIC and AVIF input, upright and with their colors, converted to JPEG by
@@ -154,7 +155,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Kind | Input | Output |
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
-| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF | JPEG, PNG, WebP, AVIF |
+| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF | JPEG, PNG, WebP, AVIF, JPEG XL |
 | Animation | GIF, video | GIF, animated WebP, animated AVIF, MP4 |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
@@ -177,6 +178,7 @@ peraz --trim-only --start 0:12 --duration 10 clip.mov  # cut only: lossless when
 peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
 peraz --format jpeg --max-width 2000 *.png
 peraz --format webp *.png *.jpg            # or --format avif (smallest, slower)
+peraz --format jxl -q highest *.jpg        # JPEG XL: JPEGs about 20% smaller, pixels unchanged
 peraz IMG_0042.HEIC                        # → IMG_0042-1.jpg, upright, colors kept
 peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12 fps)
 peraz -q small reaction.gif                # smaller GIF, same timing
@@ -221,6 +223,13 @@ Every output format, AVIF and WebP included, carries the color profile, so wide-
 (Display P3) stay wide-gamut. HEIC photos become JPEG by default (use `--format` for WebP,
 AVIF, or PNG); transparent HEIC and AVIF pictures keep their transparency. When the format
 changes on purpose, the result is kept even if it is larger, and the report shows the increase.
+
+`--format jxl` writes JPEG XL with libjxl's `cjxl` (from `peraz ffmpeg install`, your package
+manager, or `PERAZ_CJXL`). At the same quality level it scores like JPEG on SSIMULACRA2 at
+smaller sizes, and keeps transparency. A JPEG is also recompressed losslessly, when it is not
+resized: the result holds the JPEG's exact data (`djxl` gives the same JPEG back) and is typically
+about 20% smaller. Peraz keeps whichever of the two is smaller, so at `highest` it is usually the
+lossless one. Safari shows JPEG XL; check where your pictures will be viewed before choosing it.
 
 ### GIFs and animation
 
@@ -276,7 +285,7 @@ A recipe is a named set of settings, written in TOML with the same keys as the f
 version = 1                      # recipe format version
 description = "Pictures for our website"
 quality = "balanced"             # highest, high, balanced, small, smallest
-format = "webp"                  # keep, jpeg, png, webp, avif, gif, mp4
+format = "webp"                  # keep, jpeg, png, webp, avif, jxl, gif, mp4
 max_width = 2000                 # pixels; never scales up
 max_height = 2000
 codec = "h264"                   # h264, hevc

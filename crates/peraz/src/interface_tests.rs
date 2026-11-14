@@ -138,7 +138,11 @@ fn every_environment_variable_is_documented() {
     let documented: BTreeSet<&str> = first_cells(&section(&text, "Environment variables"))
         .into_iter()
         .collect();
-    let real = BTreeSet::from([peraz_engine::ffmpeg::FFMPEG_ENV, crate::recipes::CONFIG_ENV]);
+    let real = BTreeSet::from([
+        peraz_engine::ffmpeg::FFMPEG_ENV,
+        peraz_engine::jxl::CJXL_ENV,
+        crate::recipes::CONFIG_ENV,
+    ]);
     assert_eq!(documented, real);
 }
 

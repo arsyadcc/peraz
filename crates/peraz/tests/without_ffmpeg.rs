@@ -37,6 +37,7 @@ fn peraz(dir: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PATH", dir.join("bin"))
         .env_remove("PERAZ_FFMPEG")
+        .env_remove("PERAZ_CJXL")
         .env("PERAZ_CONFIG_DIR", dir.join("config"))
         .output()
         .unwrap()
@@ -83,6 +84,32 @@ fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     assert!(message.contains("ffmpeg not found"), "{message}");
     assert!(message.contains("notes.txt needs FFmpeg"), "{message}");
     assert!(!dir.0.join("out/photo-1.png").exists());
+}
+
+#[test]
+fn jpeg_xl_without_cjxl_stops_the_run_before_any_work() {
+    let dir = setup("jxl");
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "jxl",
+            "--out-dir",
+            "out",
+            "photo.png",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(ENVIRONMENT),
+        "{}",
+        stderr(&output)
+    );
+    let message = stderr(&output);
+    assert!(message.contains("--format jxl needs cjxl"), "{message}");
+    assert!(message.contains("PERAZ_CJXL"), "{message}");
+    assert!(!dir.0.join("out/photo-1.jxl").exists());
 }
 
 #[test]

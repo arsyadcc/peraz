@@ -8,7 +8,7 @@ A recipe is a named set of settings in TOML, with the same keys as the flags:
 version = 1                      # required: the recipe format version
 description = "Pictures for our website"
 quality = "balanced"             # highest, high, balanced, small, smallest
-format = "webp"                  # keep, jpeg, png, webp, avif, gif, mp4
+format = "webp"                  # keep, jpeg, png, webp, avif, jxl, gif, mp4
 max_width = 2000                 # pixels; never scales up
 max_height = 2000
 codec = "h264"                   # h264, hevc

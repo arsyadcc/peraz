@@ -16,6 +16,10 @@ any input needs FFmpeg, the run stops before any work with exit code `3` and nam
 An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
 `peraz probe`, `peraz doctor`, and `peraz watch` need FFmpeg.
 
+`--format jxl` needs libjxl's `cjxl` instead (and `djxl` with `--target-ssimulacra2`), found
+through `PERAZ_CJXL`, the bundled build, or `PATH`; without it the run stops before any work with
+exit code `3`.
+
 ## Bundled FFmpeg
 
 `peraz ffmpeg install` downloads the FFmpeg build that this version of Peraz is tested with, for
@@ -26,7 +30,7 @@ checked against a SHA-256 built into `peraz` and unpacked into a `peraz-ffmpeg` 
 `PERAZ_FFMPEG` names another FFmpeg. Run it again after updating Peraz: it does nothing when the
 build is already there. It needs permission to write to the executable's folder; when it cannot,
 or the download fails, it exits with code `3` and changes nothing. The `peraz-full` release
-archives come with the same folder.
+archives come with the same folder. The build also holds libjxl's `cjxl` and `djxl`, for JPEG XL.
 
 ## Commands
 
@@ -66,7 +70,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--encoder` | `auto`, `software`, `hardware` | Default `auto`: software if available, else hardware. |
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
 | `--max-height` | pixels | Scale down to at most this height; never scales up. |
-| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `gif`, `mp4` | Output format. Default `keep`. For videos and GIFs, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
+| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | Output format. Default `keep`. `jxl` (JPEG XL) applies to still images only. For videos and GIFs, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
 | `--fps` | 1–50 | Frame rate of GIFs and animated WebP/AVIF; never above the source. |
 | `--start` | time | Start this far into a video: seconds (`12.5`) or `[h:]m:ss`. |
 | `--duration` | time | Use at most this much of a video. |
@@ -128,6 +132,7 @@ that is not smaller than the input is not kept, unless the format was changed on
 | Variable | Description |
 | --- | --- |
 | `PERAZ_FFMPEG` | The `ffmpeg` binary or its folder, used when `--ffmpeg` is not given. Otherwise Peraz uses the bundled build in a `peraz-ffmpeg` folder next to the `peraz` executable, if there is one, and then looks on `PATH`. |
+| `PERAZ_CJXL` | The `cjxl` binary for JPEG XL output. Otherwise Peraz uses the one in the bundled build, then looks on `PATH`. `djxl` is looked up next to it, then on `PATH`. |
 | `PERAZ_CONFIG_DIR` | The configuration folder, which holds `recipes/`. Default: `~/Library/Application Support/peraz` (macOS), `$XDG_CONFIG_HOME/peraz` or `~/.config/peraz` (Linux), `%APPDATA%\peraz` (Windows). |
 
 ## Exit codes
@@ -137,7 +142,7 @@ that is not smaller than the input is not kept, unless the format was changed on
 | `0` | Success, including files kept or skipped. |
 | `1` | At least one input failed. |
 | `2` | Invalid usage. |
-| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)). |
+| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), or `cjxl` not found with `--format jxl`. |
 | `4` | `--check` found files that could be smaller. |
 | `130` | Cancelled with Ctrl-C or SIGTERM; the current file's partial output is removed. |
 

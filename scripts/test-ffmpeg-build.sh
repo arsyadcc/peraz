@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks a bundled FFmpeg build from scripts/build-ffmpeg.sh: the encoders Peraz uses are there
-# and work, and the binaries load only libraries every machine has.
+# and work, cjxl and djxl make and read JPEG XL, and the binaries load only libraries every
+# machine has.
 #
 #   scripts/test-ffmpeg-build.sh [dir]     (default: target/ffmpeg)
 #
@@ -43,7 +44,7 @@ check_libraries() {
   echo "$(basename "$tool"): $(echo "$deps" | tr '\n' ' ')"
 }
 
-for tool in ffmpeg ffprobe; do
+for tool in ffmpeg ffprobe cjxl djxl; do
   [[ -f $dir/$tool$exe ]] || fail "$dir/$tool$exe is missing"
   check_libraries "$dir/$tool$exe"
 done
@@ -80,6 +81,17 @@ src=(-v error -f lavfi -i testsrc2=size=320x240:rate=30 -t 1)
 (cd "$tmp" && "$ff" -v error -i h264.mp4 -i h264.mp4 \
   -lavfi "libvmaf=model=version=vmaf_v0.6.1:log_fmt=json:log_path=vmaf.json" -f null -)
 grep -q '"vmaf"' "$tmp/vmaf.json" || fail "libvmaf wrote no score"
+
+# JPEG XL: a PNG with transparency, and a JPEG recompressed losslessly and rebuilt exactly.
+cjxl="$dir/cjxl$exe" djxl="$dir/djxl$exe"
+"$cjxl" --version | head -n 1
+"$ff" "${src[@]}" -frames:v 1 -vf format=rgba "$tmp/still.png"
+"$ff" "${src[@]}" -frames:v 1 -q:v 3 "$tmp/still.jpg"
+"$cjxl" "$tmp/still.png" "$tmp/still.jxl" -q 80 --quiet
+"$djxl" "$tmp/still.jxl" "$tmp/back.png" --quiet
+"$cjxl" "$tmp/still.jpg" "$tmp/from-jpeg.jxl" --lossless_jpeg=1 --quiet
+"$djxl" "$tmp/from-jpeg.jxl" "$tmp/back.jpg" --quiet
+cmp -s "$tmp/still.jpg" "$tmp/back.jpg" || fail "djxl did not rebuild the same JPEG"
 
 pix_fmt=$("$probe" -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$tmp/hevc10.mp4")
 [[ ${pix_fmt%$'\r'} == yuv420p10le ]] || fail "10-bit HEVC came out as $pix_fmt"

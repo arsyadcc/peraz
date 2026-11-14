@@ -13,6 +13,7 @@ pub mod ffmpeg;
 pub mod gif;
 pub mod heif;
 pub mod image;
+pub mod jxl;
 pub mod pdf;
 pub mod probe;
 mod score;

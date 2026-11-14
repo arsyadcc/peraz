@@ -284,6 +284,87 @@ fn converts_transparent_png_to_jpeg_on_white_and_resizes() {
     assert!(corner.0.iter().all(|c| *c > 240), "{corner:?}");
 }
 
+/// A JPEG XL file: a bare codestream, or the container (needed for JPEG reconstruction data).
+fn is_jxl(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0x0A]) || bytes.starts_with(b"\0\0\0\x0CJXL \r\n\x87\n")
+}
+
+#[test]
+fn converts_to_jpeg_xl_and_recompresses_jpegs_losslessly() {
+    let Some(env) = setup("jxl") else { return };
+    let Some(jxl) = peraz_engine::jxl::JxlTools::locate() else {
+        eprintln!("skipped: no cjxl");
+        return;
+    };
+    let run = |input: &str, output: &str, quality: Quality| {
+        let output = env.out.join(output);
+        let mut job = job(env.fixtures.join(input), output.clone(), quality);
+        job.recipe.image.format = ImageFormat::Jxl;
+        let report = compress(
+            Some(&env.tools),
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{input}: {:?}",
+            report.outcome
+        );
+        let bytes = std::fs::read(&output).unwrap();
+        assert!(is_jxl(&bytes), "{input}: JPEG XL signature");
+        (output, report.encoder.unwrap())
+    };
+
+    // At the highest level, a JPEG may be kept losslessly or encoded at q90, whichever is smaller
+    // (it depends on the picture and the libjxl version).
+    let source = env.fixtures.join("image-orientation6.jpg");
+    let (_, encoder) = run("image-orientation6.jpg", "turned.jxl", Quality::Highest);
+    assert!(
+        ["cjxl lossless JPEG recompression", "cjxl q90"].contains(&encoder.as_str()),
+        "{encoder}"
+    );
+    // The lossless recompression itself: djxl gives back the same JPEG data, with the metadata
+    // gone but the orientation kept.
+    let lossless = env.out.join("lossless.jxl");
+    let bytes = peraz_engine::jxl::recompress_jpeg(&std::fs::read(&source).unwrap(), 6).unwrap();
+    assert!(is_jxl(&bytes));
+    std::fs::write(&lossless, bytes).unwrap();
+    // Smaller settings encode the pixels instead.
+    let (_, encoder) = run("image-orientation6.jpg", "small.jxl", Quality::Smallest);
+    assert_eq!(encoder, "cjxl q60");
+    // A picture with transparency keeps it.
+    let (alpha, encoder) = run("image-alpha.png", "alpha.jxl", Quality::Balanced);
+    assert_eq!(encoder, "cjxl q78");
+
+    let Some(djxl) = &jxl.djxl else {
+        eprintln!("skipped the read-back checks: no djxl");
+        return;
+    };
+    let back = env.out.join("back.jpg");
+    let status = std::process::Command::new(djxl)
+        .args([&lossless, &back])
+        .arg("--quiet")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let pixels = |path: &Path| image::open(path).unwrap().to_rgb8();
+    assert_eq!(pixels(&back), pixels(&source), "same JPEG pixels");
+    let upright = peraz_engine::image::decode_native(&back).unwrap().image;
+    assert_eq!((upright.width(), upright.height()), (800, 600));
+
+    let back = env.out.join("alpha.png");
+    let status = std::process::Command::new(djxl)
+        .args([&alpha, &back])
+        .arg("--quiet")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let decoded = image::open(&back).unwrap().to_rgba8();
+    assert!(decoded.pixels().any(|p| p[3] == 0), "transparency kept");
+}
+
 #[test]
 fn converts_to_webp_and_avif() {
     let Some(env) = setup("modern") else { return };

@@ -152,6 +152,10 @@ makes it 1.
 | `hwaccels[]` | array of strings | FFmpeg's hardware decoding methods. |
 | `encoders[]` | array of strings | Every encoder in this FFmpeg build. |
 | `vmaf` | boolean | FFmpeg has the `libvmaf` filter, which `--target-vmaf` needs. |
+| `jxl` | object or null | libjxl's tools, which `--format jxl` needs; null when `cjxl` was not found. |
+| `jxl.cjxl` | string | Path of `cjxl`. |
+| `jxl.djxl` | string or null | Path of `djxl`, which `--target-ssimulacra2` needs to read JPEG XL back. |
+| `jxl.version` | string or null | libjxl's version, e.g. `0.12.0`. |
 
 ## `peraz recipe list --json` and `peraz recipe show --json`
 
@@ -176,7 +180,7 @@ makes it 1.
 | `settings.version` | integer | The recipe format version. |
 | `settings.description` | string | |
 | `settings.quality` | string | One of `highest`, `high`, `balanced`, `small`, `smallest`. |
-| `settings.format` | string | One of `keep`, `jpeg`, `jpg`, `png`, `webp`, `avif`, `gif`, `mp4`. |
+| `settings.format` | string | One of `keep`, `jpeg`, `jpg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4`. |
 | `settings.max_width` | integer | |
 | `settings.max_height` | integer | |
 | `settings.codec` | string | One of `h264`, `hevc`. |

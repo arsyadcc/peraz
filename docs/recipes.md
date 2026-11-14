@@ -19,7 +19,7 @@ max_height = 2000
 | `version` | integer | `1` | |
 | `description` | string | Shown by `peraz recipe list`. | |
 | `quality` | string | `highest`, `high`, `balanced`, `small`, `smallest` | `--quality` |
-| `format` | string | `keep`, `jpeg` (or `jpg`), `png`, `webp`, `avif`, `gif`, `mp4` | `--format` |
+| `format` | string | `keep`, `jpeg` (or `jpg`), `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | `--format` |
 | `max_width` | integer | Pixels; never scales up. | `--max-width` |
 | `max_height` | integer | Pixels; never scales up. | `--max-height` |
 | `codec` | string | `h264`, `hevc` | `--codec` |

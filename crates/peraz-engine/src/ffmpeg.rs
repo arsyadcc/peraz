@@ -371,14 +371,14 @@ fn existing_tool(path: &Path, tool: &'static str, origin: &str) -> Result<PathBu
     }
 }
 
-fn find_on_path(tool: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+pub(crate) fn find_on_path(tool: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
     let name = exe_name(tool);
     std::env::split_paths(path_var?)
         .map(|dir| dir.join(&name))
         .find(|candidate| candidate.is_file())
 }
 
-fn exe_name(tool: &str) -> String {
+pub(crate) fn exe_name(tool: &str) -> String {
     if cfg!(windows) {
         format!("{tool}.exe")
     } else {

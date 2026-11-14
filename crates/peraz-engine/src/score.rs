@@ -407,6 +407,7 @@ fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
         ImageEncoding::Jpeg { .. } => ImageEncoding::Jpeg { quality },
         ImageEncoding::Webp { .. } => ImageEncoding::Webp { quality },
         ImageEncoding::Avif { .. } => ImageEncoding::Avif { quality },
+        ImageEncoding::Jxl { from_jpeg, .. } => ImageEncoding::Jxl { quality, from_jpeg },
         ImageEncoding::Png { .. } if quality >= 100 => ImageEncoding::Png {
             min_quality: 100,
             max_quality: 100,
@@ -423,7 +424,8 @@ fn quality_of(encoding: ImageEncoding) -> u8 {
     match encoding {
         ImageEncoding::Jpeg { quality }
         | ImageEncoding::Webp { quality }
-        | ImageEncoding::Avif { quality } => quality,
+        | ImageEncoding::Avif { quality }
+        | ImageEncoding::Jxl { quality, .. } => quality,
         ImageEncoding::Png { max_quality, .. } => max_quality,
     }
 }
@@ -493,22 +495,22 @@ fn linear_input(image: &image::DynamicImage) -> Result<ssimulacra2::Rgb, String>
     .map_err(|e| format!("SSIMULACRA2: {e}"))
 }
 
-/// Reads back an image Peraz just encoded. AVIF goes through FFmpeg, like AVIF inputs.
+/// Reads back an image Peraz just encoded. AVIF goes through FFmpeg, like AVIF inputs, and
+/// JPEG XL through djxl.
 fn decode_encoded(
     tools: Option<&Toolchain>,
     bytes: &[u8],
     extension: &str,
 ) -> Result<image::DynamicImage, String> {
-    if extension != "avif" {
-        return image::load_from_memory(bytes).map_err(|e| format!("cannot read back: {e}"));
+    match extension {
+        "avif" => {}
+        "jxl" => return crate::jxl::decode(bytes),
+        _ => return image::load_from_memory(bytes).map_err(|e| format!("cannot read back: {e}")),
     }
     let tools = tools.ok_or(
         "--target-ssimulacra2 with AVIF output needs FFmpeg, to read each try back".to_owned(),
     )?;
-    let workdir = make_workdir().map_err(|outcome| match outcome {
-        Outcome::Failed { message } => message,
-        _ => "cannot create a work folder".to_owned(),
-    })?;
+    let workdir = crate::compress::work_folder()?;
     let file = workdir.join("probe.avif");
     let decoded = std::fs::write(&file, bytes)
         .map_err(|e| format!("cannot write a work file: {e}"))

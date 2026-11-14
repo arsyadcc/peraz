@@ -21,7 +21,7 @@ use peraz_engine::batch::Batch;
 use serde::Serialize;
 
 use crate::compress::{
-    SettingsArgs, check_vmaf, install_cancel_handler, print_human, recipe, run_parallel,
+    SettingsArgs, check_tools, install_cancel_handler, print_human, recipe, run_parallel,
 };
 use crate::{SCHEMA_VERSION, exit, locate};
 
@@ -105,7 +105,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             return exit::ENVIRONMENT;
         }
     };
-    if let Err(code) = check_vmaf(&recipe, Some(&tools), &caps) {
+    if let Err(code) = check_tools(&recipe, Some(&tools), &caps) {
         return code;
     }
     let cancel = install_cancel_handler();

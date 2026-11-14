@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the FFmpeg that Peraz bundles: `ffmpeg` and `ffprobe`, linked statically against the
-# encoder libraries Peraz uses, with nothing from the build machine's own libraries.
+# encoder libraries Peraz uses, with nothing from the build machine's own libraries. Next to them
+# go libjxl's `cjxl` and `djxl`, for JPEG XL output.
 #
 #   scripts/build-ffmpeg.sh [out-dir]                       (default: target/ffmpeg)
 #   PERAZ_FFMPEG_TARGET=windows scripts/build-ffmpeg.sh     (Windows x64, cross-built on Linux)
@@ -24,6 +25,11 @@ SOURCES=(
   "dav1d|1.5.4|https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2|2abfb0c89212e6e4733a54e0ae509ec00a5b845a6360946f918806e14aedb011"
   "libvmaf|3.2.1|https://github.com/Netflix/vmaf/archive/refs/tags/v3.2.1.tar.gz|5df7386911bc15fd1ca783132528748d219768ae4fc5f8e0b61184f041648092"
   "libwebp|1.6.0|https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz|e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+  "libjxl|0.12.0|https://github.com/libjxl/libjxl/archive/refs/tags/v0.12.0.tar.gz|03e9be69a30be4011f559da75328b6d7cea8ad921fabfbd551ce10bf45cdc992"
+  "highway|1.2.0|https://github.com/google/highway/archive/refs/tags/1.2.0.tar.gz|7e0be78b8318e8bdbf6fa545d2ecb4c90f947df03f7aadc42c1967f019e63343"
+  "brotli|1.2.0|https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz|816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec"
+  "skcms|96d9171c94b937a1b5f0293de7309ac16311b722|https://github.com/google/skcms/archive/96d9171c94b937a1b5f0293de7309ac16311b722.tar.gz|9bb4b5bba0b7c04f6c2bce9ff713d61e23c9a20c4945161ae16290498ad74627"
+  "libpng|1.6.47|https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.47.tar.gz|631a4c58ea6c10c81f160c4b21fa8495b715d251698ebc2552077e8450f30454"
   "zlib|1.4|https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz|4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c"
   "nv-codec-headers|13.1.15.0|https://github.com/FFmpeg/nv-codec-headers/releases/download/n13.1.15.0/nv-codec-headers-13.1.15.0.tar.gz|52532ceade3d5c1af62624986f13cf01b63c910576b08c0c278756c5e4b41ad0"
   "amf-headers|1.5.3|https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.3/AMF-headers-v1.5.3.tar.gz|0f521ad98041f8001147cded4a660127f18b1c27a801a5cd691bda1fa48381be"
@@ -84,7 +90,9 @@ fetch() {
     fi
   done
   [[ -n $found ]] || { echo "Unknown source: $name" >&2; exit 1; }
+  # GitHub archives are named after the tag or commit alone: prefix them with the project.
   file="$work/sources/$(basename "$url")"
+  [[ $url == https://github.com/*/archive/* ]] && file="$work/sources/$name-$(basename "$url")"
   [[ -f $file ]] || curl -fsSL --retry 3 -o "$file" "$url"
   if [[ $(sha256 "$file") != "$sum" ]]; then
     echo "Checksum mismatch for $file" >&2
@@ -237,6 +245,48 @@ build_libvmaf() {
   echo "Libs.private: $cxx_runtime" >> "$prefix/lib/pkgconfig/libvmaf.pc"
 }
 
+# libpng for cjxl and djxl, which read and write PNG.
+build_libpng() {
+  log libpng
+  used+=(libpng)
+  local dir zlib=()
+  dir=$(fetch libpng)
+  [[ $system != macos ]] && zlib=(-DZLIB_INCLUDE_DIR="$prefix/include" -DZLIB_LIBRARY="$prefix/lib/libz.a")
+  mkdir -p "$dir/build"
+  (cd "$dir/build" && cmake_static -DPNG_SHARED=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF \
+    -DPNG_FRAMEWORK=OFF -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" ${zlib[@]+"${zlib[@]}"} .. \
+    && ninja && ninja install)
+}
+
+# libjxl's cjxl and djxl, with the libraries its release archive leaves out (highway, brotli,
+# skcms) unpacked where its build expects them.
+build_libjxl() {
+  log libjxl
+  used+=(libjxl highway brotli skcms)
+  local dir dep zlib=() static=()
+  dir=$(fetch libjxl)
+  for dep in highway brotli skcms; do
+    rm -rf "$dir/third_party/$dep"
+    mv "$(fetch "$dep")" "$dir/third_party/$dep"
+  done
+  [[ $system != macos ]] && zlib=(-DZLIB_INCLUDE_DIR="$prefix/include" -DZLIB_LIBRARY="$prefix/lib/libz.a")
+  # MinGW's C++ runtime and threads library are linked in, so the tools need no extra DLLs.
+  [[ $system == windows ]] && static=(-DCMAKE_EXE_LINKER_FLAGS=-static)
+  mkdir -p "$dir/build"
+  (cd "$dir/build" && cmake_static -DCMAKE_PREFIX_PATH="$prefix" ${zlib[@]+"${zlib[@]}"} ${static[@]+"${static[@]}"} \
+    -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DJPEGXL_VERSION=0.12.0 \
+    -DBUILD_TESTING=OFF -DJPEGXL_ENABLE_TOOLS=ON -DJPEGXL_ENABLE_JPEGLI=OFF \
+    -DJPEGXL_ENABLE_SJPEG=OFF -DJPEGXL_ENABLE_OPENEXR=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF \
+    -DJPEGXL_ENABLE_EXAMPLES=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF \
+    -DJPEGXL_ENABLE_JNI=OFF -DJPEGXL_ENABLE_PLUGINS=OFF -DJPEGXL_ENABLE_VIEWERS=OFF \
+    -DJPEGXL_ENABLE_DEVTOOLS=OFF -DJPEGXL_ENABLE_FUZZERS=OFF -DJPEGXL_ENABLE_SKCMS=ON \
+    -DJPEGXL_FORCE_SYSTEM_BROTLI=OFF -DJPEGXL_FORCE_SYSTEM_HWY=OFF \
+    -DCMAKE_DISABLE_FIND_PACKAGE_GIF=ON -DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON \
+    -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON .. && ninja cjxl djxl)
+  mkdir -p "$prefix/bin"
+  cp "$dir/build/tools/cjxl$exe" "$dir/build/tools/djxl$exe" "$prefix/bin/"
+}
+
 build_libwebp() {
   log libwebp
   used+=(libwebp)
@@ -297,10 +347,10 @@ header_license() {
 
 collect() {
   log "Collecting into $out"
-  rm -rf "$out/sources" "$out/licenses" "$out"/ffmpeg* "$out"/ffprobe*
+  rm -rf "$out/sources" "$out/licenses" "$out"/ffmpeg* "$out"/ffprobe* "$out"/cjxl* "$out"/djxl*
   mkdir -p "$out/sources" "$out/licenses"
-  local tool name entry n version url sum
-  for tool in ffmpeg ffprobe; do
+  local tool name entry n version url sum file
+  for tool in ffmpeg ffprobe cjxl djxl; do
     cp "$prefix/bin/$tool$exe" "$out/$tool$exe"
     "$STRIP" "$out/$tool$exe"
   done
@@ -315,6 +365,12 @@ collect() {
   cp "$b/libvmaf/LICENSE" "$out/licenses/libvmaf-LICENSE"
   cp "$b/libwebp/COPYING" "$out/licenses/libwebp-COPYING"
   cp "$b/libwebp/PATENTS" "$out/licenses/libwebp-PATENTS"
+  cp "$b/libjxl/LICENSE" "$out/licenses/libjxl-LICENSE"
+  cp "$b/libjxl/PATENTS" "$out/licenses/libjxl-PATENTS"
+  cp "$b/libjxl/third_party/highway/LICENSE" "$out/licenses/highway-LICENSE"
+  cp "$b/libjxl/third_party/brotli/LICENSE" "$out/licenses/brotli-LICENSE"
+  cp "$b/libjxl/third_party/skcms/LICENSE" "$out/licenses/skcms-LICENSE"
+  cp "$b/libpng/LICENSE" "$out/licenses/libpng-LICENSE"
   if [[ $system != macos ]]; then
     cp "$b/zlib/LICENSE" "$out/licenses/zlib-LICENSE"
     header_license "$b/nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h" \
@@ -325,8 +381,10 @@ collect() {
     for entry in "${SOURCES[@]}"; do
       IFS='|' read -r n version url sum <<<"$entry"
       if [[ $n == "$name" ]]; then
-        cp "$work/sources/$(basename "$url")" "$out/sources/"
-        echo "$n $version $(basename "$url") $sum" >> "$out/sources/SOURCES.txt"
+        file=$(basename "$url")
+        [[ $url == https://github.com/*/archive/* ]] && file="$n-$file"
+        cp "$work/sources/$file" "$out/sources/"
+        echo "$n $version $file $sum" >> "$out/sources/SOURCES.txt"
       fi
     done
   done
@@ -339,6 +397,8 @@ build_svt_av1
 build_dav1d
 build_libwebp
 build_libvmaf
+build_libpng
+build_libjxl
 [[ $system != macos ]] && install_gpu_headers
 build_ffmpeg
 collect
