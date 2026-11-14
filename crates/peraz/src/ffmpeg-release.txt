@@ -1,9 +1,9 @@
 # The bundled FFmpeg build: `peraz ffmpeg install` downloads it, and the peraz-full archives of a
 # Peraz release include it. It is a release of this repository, published by
 # .github/workflows/ffmpeg.yml from an ffmpeg-* tag; below is the SHA-256 of each archive in it.
-tag ffmpeg-9.0.2-2
-aarch64-apple-darwin e0275ee765c8213d3f1bbf8d1fd6b9e4b6956076c89617e61f9170cb40bad66a
-x86_64-apple-darwin 390f91acb3b8ff427ff1c1abf5419046075b305664caaa2d3a712538d48040f4
-aarch64-unknown-linux-gnu 25c813200a53aa1cb97e6c3ed99b8f68984035098a9184c94365b0998abad3c8
-x86_64-unknown-linux-gnu f912828885b0827bcc01ff366a2e612e2ddb6f958ccf8145955f7710513f59b0
-x86_64-pc-windows-msvc 2e41077aec44448f958d50d95da3f19090a11e0b9f13fd1c5866e408454c5c8d
+tag ffmpeg-9.0.2-3
+aarch64-apple-darwin 5000904f209cfc6b96c2a153327ef6d5e07bfc35fecf9894275568869d9cd952
+x86_64-apple-darwin 3b85c3c87fa0ee08cffe41c0ce84e1fbfdb8fff1b351aea1b7b2fdea61de292e
+aarch64-unknown-linux-gnu cc713e230ff53f48cf57f2fefe020e08d7cea9156a08459a2dbcaf6879998d2e
+x86_64-unknown-linux-gnu 4b54b1fd431d5af261fe8912ae3039d81713acf847d86a484a3bbc8e5763080c
+x86_64-pc-windows-msvc cc448d6b726a672e66957b03cb05f36f5e48bcdc8fe10e6b9284959f424764ec
