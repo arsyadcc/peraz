@@ -8,8 +8,9 @@ use std::sync::{Mutex, PoisonError};
 use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, ExistingOutput, ImageFormat, Job, KeepReason, Metric, Outcome, OutputTarget,
-    Plan, Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoPlan,
+    EncoderPreference, ExistingOutput, ImageFormat, Job, KeepReason, MediaKind, Metric, Outcome,
+    OutputTarget, Plan, Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoOutput,
+    VideoPlan,
 };
 use peraz_engine::batch::Batch;
 use peraz_engine::ffmpeg::{BuildInfo, Capabilities, FFMPEG_ENV, Toolchain};
@@ -232,7 +233,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             return exit::USAGE;
         }
     };
-    let tools = match find_ffmpeg(ffmpeg, &args.files) {
+    let tools = match find_ffmpeg(ffmpeg, &args.files, &recipe) {
         Ok(tools) => tools,
         Err(code) => return code,
     };
@@ -388,9 +389,13 @@ fn check_jpeg_xl_inputs(files: &[PathBuf]) -> Result<(), u8> {
 pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, WebP, BMP, TIFF, and JPEG XL images, PDFs, and EPUBs";
 
 /// Finds FFmpeg. Without one, the run goes on only when FFmpeg was not chosen explicitly (with
-/// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz reads itself; otherwise it stops
-/// before any work with the environment exit code.
-fn find_ffmpeg(ffmpeg: Option<&Path>, files: &[PathBuf]) -> Result<Option<Toolchain>, u8> {
+/// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz compresses itself; otherwise it
+/// stops before any work with the environment exit code.
+fn find_ffmpeg(
+    ffmpeg: Option<&Path>,
+    files: &[PathBuf],
+    recipe: &Recipe,
+) -> Result<Option<Toolchain>, u8> {
     let error = match Toolchain::locate(ffmpeg) {
         Ok(tools) => return Ok(Some(tools)),
         Err(e) => e,
@@ -401,9 +406,17 @@ fn find_ffmpeg(ffmpeg: Option<&Path>, files: &[PathBuf]) -> Result<Option<Toolch
         return Err(exit::ENVIRONMENT);
     }
     // An unreadable input is reported per file, like with FFmpeg.
-    let needs_ffmpeg = files
-        .iter()
-        .find(|file| matches!(peraz_engine::probe::probe_without_ffmpeg(file), Ok(None)));
+    // An animated JPEG XL stays JPEG XL without FFmpeg; other animation formats need it.
+    let needs_ffmpeg =
+        files.iter().find(
+            |file| match peraz_engine::probe::probe_without_ffmpeg(file) {
+                Ok(None) => true,
+                Ok(Some(info)) => {
+                    info.kind == MediaKind::Animation && recipe.video.output != VideoOutput::Keep
+                }
+                Err(_) => false,
+            },
+        );
     let Some(file) = needs_ffmpeg else {
         return Ok(None);
     };

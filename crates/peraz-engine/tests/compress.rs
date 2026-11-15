@@ -871,6 +871,78 @@ fn recompresses_a_gif_and_keeps_its_timing() {
 }
 
 #[test]
+fn compresses_animated_jpeg_xl_and_converts_it() {
+    let Some(env) = setup("jxl-animation") else {
+        return;
+    };
+    if peraz_engine::jxl::djxl().is_err() {
+        eprintln!("skipped: no djxl");
+        return;
+    }
+    // Two seconds of video at 15 fps, as a high-quality animated JPEG XL.
+    let frames = env.out.join("frames.apng");
+    let made = std::process::Command::new(&env.tools.ffmpeg)
+        .args(["-v", "error", "-t", "2", "-i"])
+        .arg(env.fixtures.join("video-720p-noaudio.mp4"))
+        .args(["-vf", "fps=15,scale=320:-2", "-f", "apng", "-plays", "0"])
+        .arg(&frames)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let input = env.out.join("animation.jxl");
+    let bytes = peraz_engine::jxl::encode_animation(&frames, 95, &env.out).unwrap();
+    std::fs::write(&input, bytes).unwrap();
+    let info = probe(&env.tools, &input).unwrap();
+    assert_eq!(
+        (info.kind, info.container.as_str()),
+        (MediaKind::Animation, "jpegxl")
+    );
+
+    let run = |output: &str, format: VideoOutput| {
+        let output = env.out.join(output);
+        let mut job = job(input.clone(), output.clone(), Quality::Balanced);
+        job.recipe.video.output = format;
+        let report = compress(
+            Some(&env.tools),
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{format:?}: {:?}",
+            report.outcome
+        );
+        (output, report)
+    };
+    // By default it stays an animated JPEG XL, smaller, with every frame.
+    let (kept, report) = run("again.jxl", VideoOutput::Keep);
+    assert!(
+        matches!(report.plan, Some(Plan::Image(_))),
+        "{:?}",
+        report.plan
+    );
+    let header = peraz_engine::jxl_header::sniff(&kept).unwrap().unwrap();
+    assert!(header.animated);
+    assert_eq!((header.width, header.height), (320, 180));
+    let again = probe(&env.tools, &kept).unwrap();
+    assert_eq!(again.kind, MediaKind::Animation);
+    // Other formats go through the frames djxl decodes, with the same length.
+    let (gif, _) = run("converted.gif", VideoOutput::Gif);
+    let (_, _, _, centiseconds) = gif_frames(&gif);
+    assert!(
+        (195..=205).contains(&centiseconds),
+        "still 2 s long, got {centiseconds} cs"
+    );
+    // An APNG's RGB color description is not handed to the YUV encoder.
+    let (mp4, _) = run("converted.mp4", VideoOutput::Mp4);
+    let video = probe(&env.tools, &mp4).unwrap();
+    let seconds = video.duration_seconds.unwrap();
+    assert!((1.9..=2.1).contains(&seconds), "{seconds}");
+}
+
+#[test]
 fn fits_a_size_target_and_never_exceeds_it() {
     let Some(env) = setup("target") else { return };
     let output = env.out.join("fit.mp4");

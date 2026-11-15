@@ -191,6 +191,51 @@ pub fn reconstruct_jpeg(input: &Path) -> Result<Option<Vec<u8>>, String> {
     result.map(Some)
 }
 
+/// Decodes an animated JPEG XL input into `frames.apng` in `workdir`, with `djxl`: whole frames,
+/// their timing, the loop count, and the orientation applied. Returns the APNG's path.
+pub fn decode_animation(input: &Path, workdir: &Path) -> Result<PathBuf, String> {
+    let djxl = djxl()?;
+    let output = workdir.join("frames.apng");
+    let status = command(djxl)
+        .arg(input)
+        .arg(&output)
+        .arg("--quiet")
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", djxl.display()))?;
+    if status.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    let line = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+    Err(format!(
+        "cannot decode {}: the animation is damaged, incomplete, or not supported ({})",
+        input.display(),
+        line.trim()
+    ))
+}
+
+/// Encodes an animation (an APNG) as animated JPEG XL at a `cjxl` quality setting, keeping its
+/// timing and loop count. Metadata is not carried over, as for every output.
+pub fn encode_animation(frames: &Path, quality: u8, workdir: &Path) -> Result<Vec<u8>, String> {
+    let tools = tools()?;
+    let output = workdir.join("out.jxl");
+    run_cjxl(
+        &tools.cjxl,
+        frames,
+        &output,
+        &[
+            "-q",
+            &quality.to_string(),
+            "-x",
+            "strip=exif",
+            "-x",
+            "strip=xmp",
+            "-x",
+            "strip=jumbf",
+        ],
+    )
+}
+
 /// A JPEG with its metadata removed as for every output (see [`strip_jpeg_metadata`]); the
 /// compressed picture data stays exactly as it is.
 pub fn without_metadata(jpeg: &[u8], orientation: u8) -> Option<Vec<u8>> {

@@ -17,8 +17,19 @@ between alpha versions.
   `PATH`, next to `cjxl`) and stay JPEG XL unless `--format` says otherwise. They need no FFmpeg.
   A JPEG XL made losslessly from a JPEG is read as that JPEG, rebuilt exactly: with `--format
   jpeg` its original data is kept (metadata removed) when that is smaller than a new encode, and
-  as JPEG XL it can be recompressed losslessly again. Animated JPEG XL is skipped. **Interface:** exit code `3` when an input is JPEG XL and `djxl` is
-  missing; `peraz watch` picks up `.jxl` files.
+  as JPEG XL it can be recompressed losslessly again. **Interface:** exit code `3` when an input
+  is JPEG XL and `djxl` is missing; `peraz watch` picks up `.jxl` files.
+- Animated JPEG XL inputs: `djxl` decodes the frames, and by default `cjxl` encodes them again as
+  animated JPEG XL, kept only when smaller, with no FFmpeg needed. `--format gif`, `webp`, `avif`,
+  and `mp4` convert them with FFmpeg, and without FFmpeg the run stops before any work with exit
+  code `3`. `--max-width` and `--max-height` fail for an animation that stays JPEG XL, because
+  `cjxl` cannot scale it. **Interface:** the report's `plan.type` is `image` (with the `jxl`
+  encoding) when the animation stays JPEG XL.
+
+### Fixed
+
+- `--format mp4` from an APNG failed: its RGB color description was passed to the YUV video
+  encoder. APNG inputs also report their length now, so progress and `--target-size` work.
 
 ## [0.3.0] - 2026-11-14
 

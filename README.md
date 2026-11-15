@@ -156,7 +156,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
 | Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL | JPEG, PNG, WebP, AVIF, JPEG XL |
-| Animation | GIF, video | GIF, animated WebP, animated AVIF, MP4 |
+| Animation | GIF, animated JPEG XL, video | GIF, animated WebP, animated AVIF, animated JPEG XL, MP4 |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
 Encrypted PDFs and DRM-protected EPUBs are skipped.
@@ -233,7 +233,7 @@ lossless one. Safari shows JPEG XL; check where your pictures will be viewed bef
 JPEG XL inputs are read with `djxl` and stay JPEG XL unless you choose another format, for example
 `--format jpeg` for pictures that must open everywhere. A JPEG XL made losslessly from a JPEG
 turns back into that exact JPEG (metadata removed) when that is smaller than a new encode, which
-it usually is at `highest`. Animated JPEG XL is not supported yet.
+it usually is at `highest`.
 
 ### GIFs and animation
 
@@ -246,6 +246,11 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 `--format webp` and `--format avif` turn videos and GIFs into animated WebP or AVIF (same
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
 `--format mp4` turns a GIF into an H.264 video.
+
+An animated JPEG XL stays animated JPEG XL by default: `djxl` decodes its frames and `cjxl`
+encodes them again at the quality level, kept only when smaller (no FFmpeg needed). The same
+`--format gif`, `webp`, `avif`, and `mp4` convert it. `cjxl` cannot scale an animation, so
+`--max-width` and `--max-height` need one of those formats.
 
 ### PDF and EPUB
 

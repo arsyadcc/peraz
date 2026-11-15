@@ -62,10 +62,59 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
         }
         other => other?,
     };
-    parse_probe_json(&json, size).map_err(|e| EngineError::BadOutput {
+    let mut info = parse_probe_json(&json, size).map_err(|e| EngineError::BadOutput {
         tool: "ffprobe",
         message: e.to_string(),
-    })
+    })?;
+    // ffprobe reports no length for an APNG; its frames carry their timing.
+    if info.container == "apng"
+        && info.duration_seconds.is_none()
+        && let Some((seconds, frames)) = frame_timing(tools, &url)
+    {
+        info.duration_seconds = Some(seconds);
+        if let Some(video) = info.video.as_mut() {
+            video.frame_count.get_or_insert(frames);
+        }
+    }
+    Ok(info)
+}
+
+/// The length in seconds and the frame count of the first video stream, from its packets.
+fn frame_timing(tools: &Toolchain, url: &std::ffi::OsStr) -> Option<(f64, u64)> {
+    let output = command(&tools.ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,duration_time",
+            "-of",
+            "csv=p=0",
+            "-i",
+        ])
+        .arg(url)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_frame_timing(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Reads `pts_time,duration_time` lines: the end of the last frame, and how many there are.
+fn parse_frame_timing(text: &str) -> Option<(f64, u64)> {
+    let mut end = 0.0_f64;
+    let mut frames = 0;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut fields = line.trim().split(',').map(str::parse::<f64>);
+        let (Some(Ok(pts)), Some(Ok(duration))) = (fields.next(), fields.next()) else {
+            return None;
+        };
+        end = end.max(pts + duration);
+        frames += 1;
+    }
+    (frames > 0 && end > 0.0).then_some((end, frames))
 }
 
 /// Converts `ffprobe -print_format json -show_format -show_streams [-show_stream_groups]`
@@ -514,6 +563,16 @@ fn classify_head(head: &[u8]) -> Option<MediaKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_timing_is_the_end_of_the_last_frame() {
+        let text = "0.000000,0.066000\n0.066000,0.066000\n0.132000,0.500000\n";
+        let (seconds, frames) = parse_frame_timing(text).unwrap();
+        assert!((seconds - 0.632).abs() < 1e-9);
+        assert_eq!(frames, 3);
+        assert_eq!(parse_frame_timing(""), None);
+        assert_eq!(parse_frame_timing("N/A,N/A\n"), None);
+    }
 
     #[test]
     fn recognizes_pdf_and_epub_headers() {

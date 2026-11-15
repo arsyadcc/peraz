@@ -150,6 +150,8 @@ pub enum PlanError {
     UnsupportedImage { codec: String, hint: &'static str },
     /// A score target was combined with hardware encoding, which has no setting to search.
     ScoreNeedsSoftware,
+    /// An animated JPEG XL that stays JPEG XL cannot be scaled down.
+    AnimatedJxlResize,
 }
 
 impl std::fmt::Display for PlanError {
@@ -193,6 +195,10 @@ impl std::fmt::Display for PlanError {
             Self::ScoreNeedsSoftware => write!(
                 f,
                 "--target-vmaf needs a software encoder; leave out --encoder hardware"
+            ),
+            Self::AnimatedJxlResize => write!(
+                f,
+                "an animated JPEG XL cannot be scaled down as JPEG XL; choose --format webp, avif, gif, or mp4, or leave out --max-width and --max-height"
             ),
         }
     }
@@ -284,7 +290,13 @@ pub fn plan_video(
         encoder,
         scale_to,
         pixel_format,
-        color: video.color.clone(),
+        // An RGB source (an APNG) has no YUV matrix to carry over: the encoder's own default
+        // conversion applies, as for GIFs.
+        color: if video.color.matrix.as_deref() == Some("gbr") {
+            ColorInfo::default()
+        } else {
+            video.color.clone()
+        },
         audio,
         target,
         score_target: match (recipe.video.target_vmaf, &rate) {
@@ -660,6 +672,10 @@ fn source_format(codec: &str) -> Option<ImageFormat> {
     }
 }
 
+/// `cjxl` quality per level. Its scale follows libjpeg's: at the same setting, SSIMULACRA2 scores
+/// were within a point of mozjpeg's on photos, at about 10% smaller files.
+const JXL_QUALITY: [u8; 5] = [90, 85, 78, 70, 60];
+
 /// Plans the compression of a still image.
 pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
     let (Some(picture), MediaKind::Image) = (&info.video, info.kind) else {
@@ -728,11 +744,9 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
             },
             "avif",
         ),
-        // cjxl's quality scale follows libjpeg's: at the same setting, SSIMULACRA2 scores were
-        // within a point of mozjpeg's on photos, at about 10% smaller files.
         ImageFormat::Jxl => (
             ImageEncoding::Jxl {
-                quality: [90, 85, 78, 70, 60][level],
+                quality: JXL_QUALITY[level],
                 from_jpeg: codec == "mjpeg",
             },
             "jxl",
@@ -835,7 +849,46 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
         },
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
-        converts_format: info.kind != MediaKind::Animation,
+        // Only a GIF made from a GIF is the same format.
+        converts_format: !(info.kind == MediaKind::Animation && picture.codec == "gif"),
+    })
+}
+
+/// Plans re-encoding an animated JPEG XL as JPEG XL with `cjxl`, which reads the animation from
+/// the APNG `djxl` makes. This is the default for animated JPEG XL (the video output is `keep`).
+pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
+    let (Some(picture), MediaKind::Animation, VideoOutput::Keep) =
+        (&info.video, info.kind, recipe.video.output)
+    else {
+        return Err(PlanError::NotAnimation { kind: info.kind });
+    };
+    if picture.codec != "jpegxl" {
+        return Err(PlanError::NotAnimation { kind: info.kind });
+    }
+    // cjxl only downsamples by whole factors; a bounding box it cannot meet is refused, not
+    // ignored.
+    if fit_within(
+        picture.display_size(),
+        recipe.video.max_width,
+        recipe.video.max_height,
+    )
+    .is_some()
+    {
+        return Err(PlanError::AnimatedJxlResize);
+    }
+    let level = recipe.quality as usize;
+    Ok(ImagePlan {
+        encoding: ImageEncoding::Jxl {
+            quality: JXL_QUALITY[level],
+            from_jpeg: false,
+        },
+        max_width: None,
+        max_height: None,
+        flatten_alpha: false,
+        extension: "jxl",
+        decoder: ImageDecoder::Djxl,
+        converts_format: false,
+        target_ssimulacra2: None,
     })
 }
 
@@ -1756,6 +1809,54 @@ mod tests {
     }
 
     #[test]
+    fn animated_jpeg_xl_stays_jpeg_xl_unless_another_format_is_asked_for() {
+        let mut info = image_info("jpegxl", "jpegxl", Alpha::Present);
+        info.kind = MediaKind::Animation;
+        let kept = plan_animated_jxl(&info, &Recipe::default()).unwrap();
+        assert_eq!(
+            kept.encoding,
+            ImageEncoding::Jxl {
+                quality: 78,
+                from_jpeg: false
+            }
+        );
+        assert_eq!((kept.extension, kept.converts_format), ("jxl", false));
+        // A bounding box the animation already fits in needs no scaling.
+        let mut roomy = Recipe::default();
+        roomy.video.max_width = Some(4000);
+        assert!(plan_animated_jxl(&info, &roomy).is_ok());
+        let mut smaller = Recipe::default();
+        smaller.video.max_width = Some(1000);
+        assert_eq!(
+            plan_animated_jxl(&info, &smaller),
+            Err(PlanError::AnimatedJxlResize)
+        );
+        let mut webp = Recipe::default();
+        webp.video.output = VideoOutput::Webp;
+        assert!(plan_animated_jxl(&info, &webp).is_err());
+        // A GIF from another animation is a conversion: kept even when larger.
+        let mut gif = Recipe::default();
+        gif.video.output = VideoOutput::Gif;
+        info.video.as_mut().unwrap().codec = "apng".into();
+        assert!(plan_gif(&info, &gif).unwrap().converts_format);
+    }
+
+    #[test]
+    fn rgb_sources_carry_no_yuv_color_tags() {
+        let mut info = video_info(480, 270, vec![]);
+        let picture = info.video.as_mut().unwrap();
+        picture.codec = "apng".into();
+        picture.color = ColorInfo {
+            primaries: Some("bt709".into()),
+            transfer: Some("iec61966-2-1".into()),
+            matrix: Some("gbr".into()),
+            range: Some("pc".into()),
+        };
+        let plan = plan_video(&info, &Recipe::default(), |_| true).unwrap();
+        assert_eq!(plan.color, ColorInfo::default());
+    }
+
+    #[test]
     fn video_to_gif_uses_level_defaults_and_never_upscales() {
         let mut recipe = Recipe::default();
         recipe.video.output = VideoOutput::Gif;
@@ -1807,6 +1908,7 @@ mod tests {
     fn gif_plans_only_for_animations_or_requested_video() {
         let mut gif = video_info(480, 270, vec![]);
         gif.kind = MediaKind::Animation;
+        gif.video.as_mut().unwrap().codec = "gif".into();
         let plan = plan_gif(&gif, &Recipe::default()).unwrap();
         assert!(!plan.converts_format);
         assert_eq!(

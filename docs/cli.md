@@ -19,7 +19,8 @@ An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always
 `--format jxl` needs libjxl's `cjxl` instead (and `djxl` with `--target-ssimulacra2`), found
 through `PERAZ_CJXL`, the bundled build, or `PATH`; without it the run stops before any work with
 exit code `3`. JPEG XL inputs are read with `djxl`, likewise exit code `3` when it is missing.
-Animated JPEG XL is skipped.
+An animated JPEG XL stays JPEG XL without FFmpeg; turning it into a GIF, WebP, AVIF, or MP4
+needs FFmpeg, and the run stops with exit code `3` when it is missing.
 
 ## Bundled FFmpeg
 
@@ -71,7 +72,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--encoder` | `auto`, `software`, `hardware` | Default `auto`: software if available, else hardware. |
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
 | `--max-height` | pixels | Scale down to at most this height; never scales up. |
-| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | Output format. Default `keep`. `jxl` (JPEG XL) applies to still images only. For videos and GIFs, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
+| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | Output format. Default `keep`. `jxl` (JPEG XL) applies to still images and animated JPEG XL. For videos, GIFs, and animated JPEG XL, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
 | `--fps` | 1–50 | Frame rate of GIFs and animated WebP/AVIF; never above the source. |
 | `--start` | time | Start this far into a video: seconds (`12.5`) or `[h:]m:ss`. |
 | `--duration` | time | Use at most this much of a video. |

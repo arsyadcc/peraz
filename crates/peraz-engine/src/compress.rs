@@ -14,7 +14,7 @@ use peraz_core::units::format_bytes;
 use peraz_core::{
     Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
     Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput,
-    plan_animated, plan_document, plan_gif, plan_image, plan_trim, plan_video,
+    plan_animated, plan_animated_jxl, plan_document, plan_gif, plan_image, plan_trim, plan_video,
 };
 
 use crate::batch::{Batch, Lane};
@@ -127,11 +127,17 @@ fn run(
         MediaKind::Pdf | MediaKind::Epub => {
             return make_document(batch, job, &info, progress, cancel, report);
         }
-        // FFmpeg builds rarely read JPEG XL, and djxl is used only for stills.
+        // FFmpeg builds rarely read JPEG XL: djxl turns the animation into an APNG first.
         MediaKind::Animation if info.container == "jpegxl" => {
-            return Outcome::Skipped {
-                message: "animated JPEG XL is not supported yet".to_owned(),
+            let workdir = match make_workdir() {
+                Ok(dir) => dir,
+                Err(outcome) => return outcome,
             };
+            let outcome = make_jxl_animation(
+                batch, tools, caps, job, &info, &workdir, progress, cancel, report,
+            );
+            let _ = std::fs::remove_dir_all(&workdir);
+            return outcome;
         }
         _ => {}
     }
@@ -139,29 +145,122 @@ fn run(
     let Some(tools) = tools else {
         return failed(NEEDS_FFMPEG.to_owned());
     };
+    make_moving(
+        batch, tools, caps, job, &info, &job.input, progress, cancel, report,
+    )
+}
 
+/// Videos and animations, read by FFmpeg from `media` (the input, or frames decoded from it).
+#[allow(clippy::too_many_arguments)]
+fn make_moving(
+    batch: &Batch,
+    tools: &Toolchain,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    media: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
     let output_kind = job.recipe.video.output;
     let moving = matches!(info.kind, MediaKind::Video | MediaKind::Animation);
     let wants_gif = (info.kind == MediaKind::Animation
         && matches!(output_kind, VideoOutput::Keep | VideoOutput::Gif))
         || (info.kind == MediaKind::Video && output_kind == VideoOutput::Gif);
     if wants_gif {
-        return make_gif(batch, tools, job, &info, progress, cancel, report);
+        return make_gif(batch, tools, job, info, media, progress, cancel, report);
     }
     if moving && matches!(output_kind, VideoOutput::Webp | VideoOutput::Avif) {
-        return make_animated(batch, tools, caps, job, &info, progress, cancel, report);
+        return make_animated(
+            batch, tools, caps, job, info, media, progress, cancel, report,
+        );
     }
     match info.kind {
         MediaKind::Video if job.recipe.video.trim_only => {
-            make_trim(batch, tools, caps, job, &info, progress, cancel, report)
+            make_trim(batch, tools, caps, job, info, progress, cancel, report)
         }
-        MediaKind::Video | MediaKind::Animation => {
-            make_video(batch, tools, caps, job, &info, progress, cancel, report)
-        }
+        MediaKind::Video | MediaKind::Animation => make_video(
+            batch, tools, caps, job, info, media, progress, cancel, report,
+        ),
         other => Outcome::Skipped {
             message: format!("{} compression is not available yet", kind_name(other)),
         },
     }
+}
+
+/// An animated JPEG XL: decoded by `djxl` into an APNG in `workdir`, then encoded again as JPEG
+/// XL by `cjxl` (the default), or turned into a GIF, WebP, AVIF, or MP4 by FFmpeg.
+#[allow(clippy::too_many_arguments)]
+fn make_jxl_animation(
+    batch: &Batch,
+    tools: Option<&Toolchain>,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    workdir: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let failed = |message: String| Outcome::Failed { message };
+    if job.recipe.video.output == VideoOutput::Keep {
+        let plan = match plan_animated_jxl(info, &job.recipe) {
+            Ok(plan) => plan,
+            Err(e) => return failed(e.to_string()),
+        };
+        let ImageEncoding::Jxl { quality, .. } = plan.encoding else {
+            return failed("internal error: not a JPEG XL plan".to_owned());
+        };
+        report.plan = Some(Plan::Image(plan));
+        report.encoder = Some(format!("cjxl q{quality}"));
+        let output = match choose_output(batch, job, "jxl") {
+            Ok(output) => output,
+            Err(outcome) => return outcome,
+        };
+        let frames = match crate::jxl::decode_animation(&job.input, workdir) {
+            Ok(frames) => frames,
+            Err(message) => return failed(message),
+        };
+        progress(0.3);
+        if cancel.load(Ordering::Relaxed) {
+            return Outcome::Cancelled;
+        }
+        let bytes = match crate::jxl::encode_animation(&frames, quality, workdir) {
+            Ok(bytes) => bytes,
+            Err(message) => return failed(message),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return Outcome::Cancelled;
+        }
+        let partial = partial_path(&output);
+        if let Err(e) = std::fs::write(&partial, bytes) {
+            let _ = std::fs::remove_file(&partial);
+            return failed(format!("cannot write {}: {e}", partial.display()));
+        }
+        progress(1.0);
+        return finish(&partial, &output, info.size_bytes, false);
+    }
+    let Some(tools) = tools else {
+        return failed(NEEDS_FFMPEG.to_owned());
+    };
+    let frames = match crate::jxl::decode_animation(&job.input, workdir) {
+        Ok(frames) => frames,
+        Err(message) => return failed(message),
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return Outcome::Cancelled;
+    }
+    let mut decoded = match probe(tools, &frames) {
+        Ok(decoded) => decoded,
+        Err(e) => return failed(format!("cannot read the frames djxl decoded: {e}")),
+    };
+    // The frames stand in for the input: an animation, compared with the input's size.
+    decoded.kind = MediaKind::Animation;
+    decoded.size_bytes = info.size_bytes;
+    make_moving(
+        batch, tools, caps, job, &decoded, &frames, progress, cancel, report,
+    )
 }
 
 /// Probes with FFmpeg, or without it for the files Peraz reads itself.
@@ -351,11 +450,13 @@ fn make_document(
     finish(&partial, &output, info.size_bytes, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_gif(
     batch: &Batch,
     tools: &Toolchain,
     job: &Job,
     info: &MediaInfo,
+    media: &Path,
     progress: Progress,
     cancel: &AtomicBool,
     report: &mut Report,
@@ -382,9 +483,7 @@ fn make_gif(
         .duration_ms
         .map_or((total - start).max(0.0), |ms| ms as f64 / 1000.0);
     let partial = partial_path(&output);
-    match encode_gif(
-        tools, &job.input, &partial, &plan, expected, progress, cancel,
-    ) {
+    match encode_gif(tools, media, &partial, &plan, expected, progress, cancel) {
         Ok(encoder) => report.encoder = Some(encoder),
         Err(error) => {
             let _ = std::fs::remove_file(&partial);
@@ -404,6 +503,7 @@ fn make_animated(
     caps: &Capabilities,
     job: &Job,
     info: &MediaInfo,
+    media: &Path,
     progress: Progress,
     cancel: &AtomicBool,
     report: &mut Report,
@@ -440,9 +540,7 @@ fn make_animated(
         file: Some(&partial),
         workdir: None,
     };
-    if let Err(error) = encode(
-        tools, &job.input, &sink, &plan.args, expected, progress, cancel,
-    ) {
+    if let Err(error) = encode(tools, media, &sink, &plan.args, expected, progress, cancel) {
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,
@@ -461,6 +559,7 @@ fn make_video(
     caps: &Capabilities,
     job: &Job,
     info: &MediaInfo,
+    media: &Path,
     progress: Progress,
     cancel: &AtomicBool,
     report: &mut Report,
@@ -476,12 +575,19 @@ fn make_video(
         Ok(output) => output,
         Err(outcome) => return outcome,
     };
+    // The size and score searches read the frames in place of the input.
+    let reading = Job {
+        input: media.to_owned(),
+        ..job.clone()
+    };
     if plan.target.is_some() {
-        return encode_to_target(tools, job, info, plan, &output, progress, cancel, report);
+        return encode_to_target(
+            tools, &reading, info, plan, &output, progress, cancel, report,
+        );
     }
     if plan.score_target.is_some() {
         return crate::score::encode_to_vmaf(
-            tools, job, info, plan, &output, progress, cancel, report,
+            tools, &reading, info, plan, &output, progress, cancel, report,
         );
     }
     let partial = partial_path(&output);
@@ -496,9 +602,7 @@ fn make_video(
         file: Some(&partial),
         workdir: None,
     };
-    if let Err(error) = encode(
-        tools, &job.input, &sink, &plan.args, duration, progress, cancel,
-    ) {
+    if let Err(error) = encode(tools, media, &sink, &plan.args, duration, progress, cancel) {
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,

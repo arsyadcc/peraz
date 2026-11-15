@@ -131,6 +131,35 @@ fn jpeg_xl_input_without_djxl_stops_the_run_before_any_work() {
 }
 
 #[test]
+fn animated_jpeg_xl_needs_ffmpeg_only_to_change_format() {
+    let dir = setup("jxl-animation");
+    // The start of an 8x8 animated JPEG XL made by cjxl: enough for its header.
+    std::fs::write(
+        dir.0.join("moving.jxl"),
+        [0xFF, 0x0A, 0x41, 0x04, 0x03, 0xC8, 0x09, 0x00],
+    )
+    .unwrap();
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "gif",
+            "--out-dir",
+            "out",
+            "moving.jxl",
+        ],
+    );
+    let message = stderr(&output);
+    assert_eq!(output.status.code(), Some(ENVIRONMENT), "{message}");
+    assert!(message.contains("moving.jxl needs FFmpeg"), "{message}");
+    // Staying JPEG XL needs no FFmpeg: the run starts (and stops on the missing djxl).
+    let output = peraz(&dir.0, &["compress", "--out-dir", "out", "moving.jxl"]);
+    let message = stderr(&output);
+    assert!(!message.contains("needs FFmpeg"), "{message}");
+}
+
+#[test]
 fn an_explicit_ffmpeg_that_does_not_exist_is_never_ignored() {
     let dir = setup("explicit");
     let missing = dir.0.join("bin").join("ffmpeg-missing");
