@@ -16,6 +16,7 @@
 //! target_size = "25MB"             # SI units; videos only
 //! target_vmaf = 93                 # videos: smallest file with this VMAF score
 //! target_ssimulacra2 = 80          # still images: smallest file with this SSIMULACRA2 score
+//! measure_quality = false          # score every result (VMAF, SSIMULACRA2), even without a target
 //! fps = 12                         # GIF and animated WebP/AVIF frame rate
 //! ```
 //!
@@ -62,6 +63,8 @@ pub struct Settings {
     pub target_ssimulacra2: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measure_quality: Option<bool>,
 }
 
 fn current_version() -> u32 {
@@ -84,6 +87,7 @@ impl Default for Settings {
             target_vmaf: None,
             target_ssimulacra2: None,
             fps: None,
+            measure_quality: None,
         }
     }
 }
@@ -222,6 +226,7 @@ impl Settings {
             target_vmaf: self.target_vmaf.or(below.target_vmaf),
             target_ssimulacra2: self.target_ssimulacra2.or(below.target_ssimulacra2),
             fps: self.fps.or(below.fps),
+            measure_quality: self.measure_quality.or(below.measure_quality),
         }
     }
 
@@ -263,6 +268,7 @@ impl Settings {
                 start_ms,
                 duration_ms,
             },
+            measure_quality: self.measure_quality.unwrap_or(false),
         })
     }
 }
@@ -434,8 +440,10 @@ mod tests {
             format: Some("gif".into()),
             fps: Some(10),
             target_size: Some("8MB".into()),
+            measure_quality: Some(true),
             ..Settings::default()
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()).unwrap(), settings);
+        assert!(settings.to_recipe(None, None).unwrap().measure_quality);
     }
 }

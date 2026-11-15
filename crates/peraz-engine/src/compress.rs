@@ -355,25 +355,7 @@ fn make_image(
         Ok(output) => output,
         Err(outcome) => return outcome,
     };
-    // The JPEG a JPEG XL input was losslessly made from, when it holds one.
-    let mut rebuilt_jpeg = None;
-    let decoded = match plan.decoder {
-        ImageDecoder::Native => decode_native(&job.input),
-        ImageDecoder::Ffmpeg => match tools {
-            Some(tools) => crate::heif::decode(tools, &job.input),
-            None => Err(NEEDS_FFMPEG.to_owned()),
-        },
-        ImageDecoder::Djxl => match crate::jxl::reconstruct_jpeg(&job.input) {
-            Ok(Some(jpeg)) => {
-                let decoded =
-                    crate::image::decode_native_bytes(&jpeg, &job.input.display().to_string());
-                rebuilt_jpeg = Some(jpeg);
-                decoded
-            }
-            Ok(None) => crate::jxl::decode_file(&job.input),
-            Err(message) => Err(message),
-        },
-    };
+    let (decoded, rebuilt_jpeg) = decode_image(tools, &job.input, plan.decoder);
     if rebuilt_jpeg.is_some()
         && let ImageEncoding::Jxl { from_jpeg, .. } = &mut plan.encoding
     {
@@ -397,6 +379,11 @@ fn make_image(
         ImageEncoding::Jpeg { .. } if unresized && rebuilt_jpeg.is_some() => Some(Lossless::Jpeg),
         _ => None,
     };
+    // A copy of the picture to measure the result against, when only measuring.
+    let reference = match &decoded {
+        Ok(d) if job.recipe.measure_quality && plan.target_ssimulacra2.is_none() => Some(d.clone()),
+        _ => None,
+    };
     let encoded = match (decoded, plan.target_ssimulacra2) {
         (Err(message), _) => Err(message),
         (Ok(d), None) => encode_image(d, &plan),
@@ -406,7 +393,7 @@ fn make_image(
         .map(|(encoded, score)| {
             report.score = score.map(|score| peraz_core::Score {
                 metric: peraz_core::Metric::Ssimulacra2,
-                target,
+                target: Some(target),
                 score: (score * 100.0).round() / 100.0,
                 sampled: false,
             });
@@ -421,6 +408,8 @@ fn make_image(
         Ok(encoded) => encoded,
         Err(message) => return failed(message),
     };
+    // The JPEG's own data holds the very same pixels.
+    let mut identical = false;
     if let Some(kind) = lossless
         && let Some(jpeg) = rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok())
         && let Some((bytes, encoder)) = keep_jpeg_data(&jpeg, kind)
@@ -428,6 +417,7 @@ fn make_image(
     {
         encoded.bytes = bytes;
         encoder.clone_into(&mut encoded.encoder);
+        identical = true;
         if let Some(score) = &mut report.score {
             score.score = 100.0;
         }
@@ -441,8 +431,59 @@ fn make_image(
         let _ = std::fs::remove_file(&partial);
         return failed(format!("cannot write {}: {e}", output.display()));
     }
+    let outcome = finish(&partial, &output, info.size_bytes, plan.converts_format);
+    // Only results that are kept are measured.
+    if let (Outcome::Compressed { .. }, Some(reference)) = (&outcome, reference) {
+        report.score = measured_image(tools, reference, &plan, &encoded.bytes, identical);
+    }
     progress(1.0);
-    finish(&partial, &output, info.size_bytes, plan.converts_format)
+    outcome
+}
+
+/// The SSIMULACRA2 score of an encoded picture against `reference`; 100 when it holds the very
+/// same pixels, and none when it cannot be read back (the result stands without its score).
+fn measured_image(
+    tools: Option<&Toolchain>,
+    reference: crate::image::Decoded,
+    plan: &peraz_core::ImagePlan,
+    bytes: &[u8],
+    identical: bool,
+) -> Option<peraz_core::Score> {
+    if identical {
+        return Some(peraz_core::Score {
+            metric: peraz_core::Metric::Ssimulacra2,
+            target: None,
+            score: 100.0,
+            sampled: false,
+        });
+    }
+    crate::score::measure_image(tools, reference, plan, bytes)
+        .ok()
+        .flatten()
+}
+
+/// Decodes a still image input, and for a JPEG XL made losslessly from a JPEG, also returns that
+/// JPEG, rebuilt.
+fn decode_image(
+    tools: Option<&Toolchain>,
+    input: &Path,
+    decoder: ImageDecoder,
+) -> (Result<crate::image::Decoded, String>, Option<Vec<u8>>) {
+    match decoder {
+        ImageDecoder::Native => (decode_native(input), None),
+        ImageDecoder::Ffmpeg => match tools {
+            Some(tools) => (crate::heif::decode(tools, input), None),
+            None => (Err(NEEDS_FFMPEG.to_owned()), None),
+        },
+        ImageDecoder::Djxl => match crate::jxl::reconstruct_jpeg(input) {
+            Ok(Some(jpeg)) => (
+                crate::image::decode_native_bytes(&jpeg, &input.display().to_string()),
+                Some(jpeg),
+            ),
+            Ok(None) => (crate::jxl::decode_file(input), None),
+            Err(message) => (Err(message), None),
+        },
+    }
 }
 
 fn make_document(
@@ -605,9 +646,68 @@ fn make_animated(
     finish(&partial, &output, info.size_bytes, true)
 }
 
-/// Compresses a video (or a GIF into MP4): at a quality level, a file size, or a VMAF score.
+/// Share of the progress for encoding a video whose quality is measured afterwards.
+const ENCODE_SHARE: f64 = 0.75;
+
+/// Compresses a video (or a GIF into MP4), then measures it when the recipe asks to.
 #[allow(clippy::too_many_arguments)]
 fn make_video(
+    batch: &Batch,
+    tools: &Toolchain,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    media: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    // A GIF's palette and dithering make a poor VMAF reference.
+    let measure = job.recipe.measure_quality && caps.vmaf && info.kind == MediaKind::Video;
+    if !measure {
+        return encode_video(
+            batch, tools, caps, job, info, media, progress, cancel, report,
+        );
+    }
+    let mut encoding = |f: f64| progress(f * ENCODE_SHARE);
+    let outcome = encode_video(
+        batch,
+        tools,
+        caps,
+        job,
+        info,
+        media,
+        &mut encoding,
+        cancel,
+        report,
+    );
+    // A score target already measured the result.
+    if let (Outcome::Compressed { output, .. }, None, Some(Plan::Video(plan))) =
+        (&outcome, &report.score, &report.plan)
+    {
+        let reading = Job {
+            input: media.to_owned(),
+            ..job.clone()
+        };
+        let mut measuring = |f: f64| progress(ENCODE_SHARE + f * (1.0 - ENCODE_SHARE));
+        // The result stands without its score when measuring fails or is cancelled.
+        report.score = crate::score::measure_video(
+            tools,
+            &reading,
+            info,
+            &plan.clone(),
+            output,
+            &mut measuring,
+            cancel,
+        )
+        .ok();
+    }
+    outcome
+}
+
+/// Compresses a video (or a GIF into MP4): at a quality level, a file size, or a VMAF score.
+#[allow(clippy::too_many_arguments)]
+fn encode_video(
     batch: &Batch,
     tools: &Toolchain,
     caps: &Capabilities,

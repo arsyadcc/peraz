@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use peraz_core::{
-    Alpha, ImageDecoder, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Outcome,
+    Alpha, ImageDecoder, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Metric, Outcome,
     OutputTarget, Plan, Quality, Recipe, VideoOutput,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
-use peraz_engine::jxl::{recompress_jpeg, reconstruct_jpeg, without_metadata};
+use peraz_engine::jxl::{JxlTools, recompress_jpeg, reconstruct_jpeg, without_metadata};
 use peraz_engine::probe::probe;
 
 struct Env {
@@ -940,6 +940,70 @@ fn compresses_animated_jpeg_xl_and_converts_it() {
     let video = probe(&env.tools, &mp4).unwrap();
     let seconds = video.duration_seconds.unwrap();
     assert!((1.9..=2.1).contains(&seconds), "{seconds}");
+}
+
+#[test]
+fn measures_results_without_changing_them() {
+    let Some(env) = setup("measure") else { return };
+    let run = |input: &str, output: &str, measure: bool| {
+        let mut job = job(
+            env.fixtures.join(input),
+            env.out.join(output),
+            Quality::Balanced,
+        );
+        job.recipe.measure_quality = measure;
+        let report = compress(
+            Some(&env.tools),
+            &env.caps,
+            &job,
+            &mut no_progress,
+            &NOT_CANCELLED,
+        );
+        let Outcome::Compressed { output_bytes, .. } = report.outcome else {
+            panic!("{input}: {:?}", report.outcome);
+        };
+        (output_bytes, report.score)
+    };
+    // The same file either way; only the report gains a score.
+    let (plain, none) = run("image-opaque.png", "plain.png", false);
+    let (measured, score) = run("image-opaque.png", "measured.png", true);
+    assert_eq!((plain, none), (measured, None));
+    let score = score.expect("a picture is measured");
+    assert_eq!((score.metric, score.target), (Metric::Ssimulacra2, None));
+    assert!((30.0..=100.0).contains(&score.score), "{score:?}");
+    // A JPEG kept losslessly as JPEG XL holds the very same pixels.
+    if JxlTools::locate().is_some() {
+        let mut job = job(
+            env.fixtures.join("image-orientation6.jpg"),
+            env.out.join("lossless.jxl"),
+            Quality::Highest,
+        );
+        job.recipe.image.format = ImageFormat::Jxl;
+        job.recipe.measure_quality = true;
+        let report = compress(None, &env.caps, &job, &mut no_progress, &NOT_CANCELLED);
+        assert_eq!(
+            (
+                report.encoder.as_deref(),
+                report.score.as_ref().map(|s| s.score)
+            ),
+            (Some("cjxl lossless JPEG recompression"), Some(100.0)),
+            "{report:?}"
+        );
+    }
+    if !env.caps.vmaf {
+        eprintln!("skipped video: this FFmpeg has no libvmaf");
+        return;
+    }
+    let (_, score) = run("video-720p-noaudio.mp4", "measured.mp4", true);
+    let score = score.expect("a video is measured");
+    assert_eq!(
+        (score.metric, score.target, score.sampled),
+        (Metric::Vmaf, None, false)
+    );
+    assert!((80.0..=100.0).contains(&score.score), "{score:?}");
+    // GIFs are not measured.
+    let (_, score) = run("animation.gif", "measured.gif", true);
+    assert_eq!(score, None);
 }
 
 #[test]

@@ -153,7 +153,7 @@ fn printed_json_matches_the_docs() {
         config.join("recipes/mine.toml"),
         "version = 1\ndescription = \"Mine\"\nquality = \"small\"\nformat = \"webp\"\n\
          max_width = 800\nmax_height = 600\ncodec = \"hevc\"\nencoder = \"software\"\n\
-         no_audio = true\ntarget_size = \"5MB\"\ntarget_ssimulacra2 = 80\nfps = 10\n",
+         no_audio = true\ntarget_size = \"5MB\"\ntarget_ssimulacra2 = 80\nfps = 10\nmeasure_quality = true\n",
     )
     .unwrap();
     std::fs::write(
@@ -209,7 +209,19 @@ fn printed_json_matches_the_docs() {
     let out = temp.join("out");
     std::fs::create_dir_all(&out).unwrap();
     let out = out.to_str().unwrap();
-    let runs: [&[&str]; 4] = [
+    check_compress_runs(&docs, out, &config);
+    check_events(&docs, out, &config);
+    if doctor["vmaf"] == Value::Bool(true) {
+        check_vmaf_report(&docs, out, &config);
+    } else {
+        eprintln!("skipped: --target-vmaf needs FFmpeg with libvmaf");
+    }
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// `compress --json` runs that between them print every kind of result.
+fn check_compress_runs(docs: &Docs, out: &str, config: &Path) {
+    let runs: [&[&str]; 5] = [
         // compressed, failed, and a document
         &[
             "--out-dir",
@@ -236,20 +248,20 @@ fn printed_json_matches_the_docs() {
             "70",
             "fixtures/image-photo.jpg",
         ],
+        // score without a target
+        &[
+            "--out-dir",
+            out,
+            "--measure-quality",
+            "fixtures/image-opaque.png",
+        ],
     ];
     for args in runs {
         let mut all = vec!["compress", "--json"];
         all.extend_from_slice(args);
-        let (json, _) = run(&all, &config);
-        check(&docs, &json, COMPRESS, &[("results[].", "Report")]);
+        let (json, _) = run(&all, config);
+        check(docs, &json, COMPRESS, &[("results[].", "Report")]);
     }
-    check_events(&docs, out, &config);
-    if doctor["vmaf"] == Value::Bool(true) {
-        check_vmaf_report(&docs, out, &config);
-    } else {
-        eprintln!("skipped: --target-vmaf needs FFmpeg with libvmaf");
-    }
-    let _ = std::fs::remove_dir_all(&temp);
 }
 
 const EVENTS: &str = "`peraz compress --events`";

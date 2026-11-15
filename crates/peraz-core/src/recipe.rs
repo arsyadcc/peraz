@@ -161,6 +161,10 @@ pub struct Recipe {
     pub gif: GifRecipe,
     /// The part of the source to use (videos and animations).
     pub clip: Clip,
+    /// Measure every result's quality against its source, also without a score target: VMAF
+    /// for videos, SSIMULACRA2 for still images. Encoding does not change.
+    #[serde(default)]
+    pub measure_quality: bool,
 }
 
 macro_rules! text_enum {

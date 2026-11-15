@@ -53,6 +53,7 @@ result, and `--out-dir <folder>` for a batch so the results land together.
 | A GIF from a video | `peraz --json --format gif --start 12 --duration 4 clip.mp4` |
 | A video from a GIF | `peraz --json --format mp4 anim.gif` (often 70–95% smaller) |
 | The smallest file that still looks this good | `peraz --json --target-vmaf 93 video.mov`, `peraz --json --target-ssimulacra2 80 <pictures>` (the report's `score` shows the result) |
+| How close each result stays to its source | add `--measure-quality` (the report's `score`, with `target` null; videos take about twice as long) |
 | Smaller HEVC video | `--codec hevc` |
 | No audio track | `--no-audio` |
 | A PDF or EPUB with lighter pictures | `peraz --json report.pdf book.epub` (text and layout stay) |

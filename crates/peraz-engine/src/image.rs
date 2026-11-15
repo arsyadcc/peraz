@@ -22,7 +22,7 @@ pub struct EncodedImage {
 }
 
 /// A decoded picture, already upright, with its color profile.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Decoded {
     pub image: DynamicImage,
     pub icc: Option<Vec<u8>>,

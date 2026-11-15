@@ -19,6 +19,12 @@ between alpha versions.
   totals. Works with `--jobs` and `--check`, and cancelled files still get their `file_done`.
   **Interface:** new flag `--events` and the events documented in docs/json.md; `--json` is
   unchanged.
+- `--measure-quality` (recipe key `measure_quality`) measures every result against its source
+  without changing how it is encoded: VMAF for videos, on the same samples as `--target-vmaf`,
+  and SSIMULACRA2 for still images. The report's `score` carries it. Results kept as the
+  original, GIFs, animations, and documents have no score, and without libvmaf videos are not
+  measured (a warning says so). **Interface:** new flag and recipe key; `score.target` is `null`
+  for a measured result (it stays an integer whenever a target was asked for).
 
 ## [0.4.0] - 2026-11-15
 

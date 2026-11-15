@@ -173,6 +173,7 @@ peraz --encoder hardware --max-width 1280 --no-audio clip.mov
 peraz --target-size 25MB long-video.mov    # fits, verified (two-pass with x264/x265)
 peraz --target-vmaf 93 clip.mov            # smallest file that still scores VMAF 93
 peraz --target-ssimulacra2 80 photos/*     # smallest pictures that still score 80
+peraz --measure-quality clip.mov photos/*  # report each result's VMAF or SSIMULACRA2
 peraz --start 0:12 --duration 10 clip.mov  # compress just that part
 peraz --trim-only --start 0:12 --duration 10 clip.mov  # cut only: lossless when possible
 peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
@@ -279,6 +280,11 @@ The report shows the score (`score` in `--json`). When no setting reaches the ta
 closest one is used and the report says so. `--target-vmaf` cannot be combined with
 `--target-size`, and neither changes the pictures inside PDFs and EPUBs.
 
+`--measure-quality` scores every result the same way without searching: the file is encoded as
+the quality level (or `--target-size`) says, then measured, and the report shows the score.
+Measuring a video takes about as long as compressing it; a picture, a fraction of a second.
+GIFs, animations, documents, and results kept as the original are not measured.
+
 ### Batches
 
 Batches run in parallel: still images use up to one job per logical core, while video and
@@ -304,6 +310,7 @@ target_size = "25MB"             # SI units; videos only
 target_vmaf = 93                 # videos: smallest file with this VMAF score
 target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2 score
 fps = 12                         # GIF and animated WebP/AVIF
+measure_quality = false          # score every result, also without a target
 ```
 
 Every key except `version` is optional, and unknown keys are errors. Use one with

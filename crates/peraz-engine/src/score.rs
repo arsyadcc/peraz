@@ -45,6 +45,152 @@ struct Window {
     length: Option<f64>,
 }
 
+impl Window {
+    /// `-ss`/`-t` input options for this window, in a file whose time 0 is `origin` seconds into
+    /// the source.
+    fn seek_args(self, origin: f64) -> Vec<String> {
+        let mut seek = Vec::new();
+        let start = self.start - origin;
+        if start > 0.0 {
+            seek.extend(["-ss".to_owned(), format!("{start:.3}")]);
+        }
+        if let Some(length) = self.length {
+            seek.extend(["-t".to_owned(), format!("{length:.3}")]);
+        }
+        seek
+    }
+}
+
+/// FFmpeg arguments that store the first video stream losslessly (FFV1) in the plan's pixel
+/// format, scaled to `scale_to` when given: what VMAF compares.
+fn lossless_args(plan: &VideoPlan, scale_to: Option<(u32, u32)>) -> Vec<String> {
+    let mut args: Vec<String> = ["-map", "0:v:0", "-an", "-sn", "-dn"]
+        .map(String::from)
+        .to_vec();
+    if let Some((w, h)) = scale_to {
+        args.extend(["-vf".into(), format!("scale={w}:{h}:flags=lanczos")]);
+    }
+    args.extend(
+        [
+            "-pix_fmt",
+            plan.pixel_format,
+            "-c:v",
+            "ffv1",
+            "-f",
+            "matroska",
+        ]
+        .map(String::from),
+    );
+    args
+}
+
+/// Measures a finished video against its source with VMAF, on the same samples a VMAF target is
+/// searched on. `job.input` is what the video was made from.
+pub(crate) fn measure_video(
+    tools: &Toolchain,
+    job: &Job,
+    info: &MediaInfo,
+    plan: &VideoPlan,
+    output: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<Score, EncodeError> {
+    let workdir = crate::compress::work_folder()?;
+    let measured = measure_in(tools, job, info, plan, output, &workdir, progress, cancel);
+    let _ = std::fs::remove_dir_all(&workdir);
+    measured
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_in(
+    tools: &Toolchain,
+    job: &Job,
+    info: &MediaInfo,
+    plan: &VideoPlan,
+    output: &Path,
+    workdir: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<Score, EncodeError> {
+    let clip = job.recipe.clip;
+    #[allow(clippy::cast_precision_loss)] // milliseconds in f64 are exact far beyond any video
+    let start = clip.start_ms.map_or(0.0, |ms| ms as f64 / 1000.0);
+    let windows = windows(start, clip.seconds(info.duration_seconds));
+    let picture = plan.scale_to.or_else(|| {
+        info.video
+            .as_ref()
+            .map(peraz_core::VideoTrack::display_size)
+    });
+    let reference_args = lossless_args(plan, plan.scale_to);
+    // The output is already at its size; the output starts where the clip does.
+    let distorted_args = lossless_args(plan, None);
+    let (mut weighted, mut frames) = (0.0, 0u64);
+    for (i, window) in windows.iter().enumerate() {
+        let reference = workdir.join(format!("reference-{i}.mkv"));
+        let distorted = workdir.join(format!("distorted-{i}.mkv"));
+        for (source, file, args, origin) in [
+            (job.input.as_path(), &reference, &reference_args, 0.0),
+            (output, &distorted, &distorted_args, start),
+        ] {
+            let seek = window.seek_args(origin);
+            let sink = Sink {
+                before_input: &seek,
+                file: Some(file),
+                workdir: None,
+            };
+            encode(tools, source, &sink, args, 0.0, &mut |_| {}, cancel)?;
+        }
+        let (mean, count) = vmaf(tools, &distorted, &reference, picture, workdir, i, cancel)?;
+        #[allow(clippy::cast_precision_loss)]
+        {
+            weighted += mean * count as f64;
+        }
+        frames += count;
+        let _ = std::fs::remove_file(&reference);
+        let _ = std::fs::remove_file(&distorted);
+        #[allow(clippy::cast_precision_loss)]
+        progress((i + 1) as f64 / windows.len() as f64);
+    }
+    if frames == 0 {
+        return Err(EncodeError::Failed(
+            "VMAF scored no frames; the video may be too short".to_owned(),
+        ));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let score = weighted / frames as f64;
+    Ok(Score {
+        metric: Metric::Vmaf,
+        target: None,
+        score: (score * 100.0).round() / 100.0,
+        sampled: windows.len() > 1,
+    })
+}
+
+/// Measures a still image Peraz encoded against the picture the encoder was given (upright, at
+/// the output's size) with SSIMULACRA2. `None` for pictures too small to score (under 8 pixels
+/// a side).
+pub(crate) fn measure_image(
+    tools: Option<&Toolchain>,
+    decoded: Decoded,
+    plan: &ImagePlan,
+    encoded: &[u8],
+) -> Result<Option<Score>, String> {
+    let prepared = prepare(decoded, plan);
+    if prepared.image.width() < 8 || prepared.image.height() < 8 {
+        return Ok(None);
+    }
+    let reference = linear_input(&prepared.image)?;
+    let image = decode_encoded(tools, encoded, plan.extension)?;
+    let score = ssimulacra2::compute_frame_ssimulacra2(reference, linear_input(&image)?)
+        .map_err(|e| format!("SSIMULACRA2: {e}"))?;
+    Ok(Some(Score {
+        metric: Metric::Ssimulacra2,
+        target: None,
+        score: (score * 100.0).round() / 100.0,
+        sampled: false,
+    }))
+}
+
 /// Where to sample a clip that starts at `start` and lasts `duration` seconds (when known).
 fn windows(start: f64, duration: Option<f64>) -> Vec<Window> {
     match duration {
@@ -162,7 +308,7 @@ pub(crate) fn encode_to_vmaf(
     plan.score_target = Some(target.clone());
     report.score = Some(Score {
         metric: Metric::Vmaf,
-        target: target.vmaf,
+        target: Some(target.vmaf),
         score: (scores.get(&crf).copied().unwrap_or(0.0) * 100.0).round() / 100.0,
         sampled: windows.len() > 1,
     });
@@ -219,33 +365,11 @@ fn search_crf(
     cancel: &AtomicBool,
 ) -> Result<(u8, BTreeMap<u8, f64>, u32), EncodeError> {
     // References: the samples at the output's size and pixel format, losslessly (FFV1).
-    let mut reference_args: Vec<String> = ["-map", "0:v:0", "-an", "-sn", "-dn"]
-        .map(String::from)
-        .to_vec();
-    if let Some((w, h)) = plan.scale_to {
-        reference_args.extend(["-vf".into(), format!("scale={w}:{h}:flags=lanczos")]);
-    }
-    reference_args.extend(
-        [
-            "-pix_fmt",
-            plan.pixel_format,
-            "-c:v",
-            "ffv1",
-            "-f",
-            "matroska",
-        ]
-        .map(String::from),
-    );
+    let reference_args = lossless_args(plan, plan.scale_to);
     let mut references = Vec::new();
     for (i, window) in windows.iter().enumerate() {
         let file = workdir.join(format!("reference-{i}.mkv"));
-        let mut seek = Vec::new();
-        if window.start > 0.0 {
-            seek.extend(["-ss".to_owned(), format!("{:.3}", window.start)]);
-        }
-        if let Some(length) = window.length {
-            seek.extend(["-t".to_owned(), format!("{length:.3}")]);
-        }
+        let seek = window.seek_args(0.0);
         let sink = Sink {
             before_input: &seek,
             file: Some(&file),

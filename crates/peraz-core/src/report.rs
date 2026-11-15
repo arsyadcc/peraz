@@ -148,8 +148,8 @@ pub enum Metric {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Score {
     pub metric: Metric,
-    /// The score asked for.
-    pub target: u8,
+    /// The score asked for; `None` when the result was only measured (`measure_quality`).
+    pub target: Option<u8>,
     /// The score measured on the result, against the input (at the output's size).
     pub score: f64,
     /// Measured on samples of the video rather than the whole of it.

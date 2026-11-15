@@ -137,9 +137,9 @@ What happened to one input, in `compress` results and `watch` lines.
 | `document.recompressed` | integer | Pictures replaced by a smaller version. |
 | `document.kept` | integer | Pictures whose new version was not smaller. |
 | `document.skipped` | integer | Pictures left alone (formats Peraz does not rewrite). |
-| `score` | object or null | With `--target-vmaf` (videos) or `--target-ssimulacra2` (still images): the score asked for and the one measured; null otherwise. |
+| `score` | object or null | With `--target-vmaf` (videos) or `--target-ssimulacra2` (still images): the score asked for and the one measured. With `--measure-quality`: the score measured on a compressed video (MP4 from a video) or still image. Null otherwise, including results kept as the original (`kept_original`), GIFs, animations, documents, trims, and videos when FFmpeg has no libvmaf. |
 | `score.metric` | string | One of `vmaf`, `ssimulacra2`. |
-| `score.target` | integer | The score asked for. |
+| `score.target` | integer or null | The score asked for; null when the result was only measured (`--measure-quality`). |
 | `score.score` | number | The score measured on the result, against the input at the output's size; below `score.target` when no setting could reach it. |
 | `score.sampled` | boolean | `true` when measured on samples of a longer video rather than the whole of it. |
 | `elapsed_seconds` | number | Time spent on this file. |
@@ -241,3 +241,4 @@ makes it 1.
 | `settings.target_vmaf` | integer | |
 | `settings.target_ssimulacra2` | integer | |
 | `settings.fps` | integer | |
+| `settings.measure_quality` | boolean | |

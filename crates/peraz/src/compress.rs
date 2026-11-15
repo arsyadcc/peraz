@@ -102,6 +102,12 @@ pub struct SettingsArgs {
     /// Remove all audio tracks.
     #[arg(long)]
     pub no_audio: bool,
+
+    /// Measure every result against its source, also without a score target: VMAF for videos
+    /// (needs FFmpeg with libvmaf), SSIMULACRA2 for still images. Takes extra time; encoding
+    /// does not change.
+    #[arg(long)]
+    pub measure_quality: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -368,6 +374,16 @@ pub(crate) fn check_tools(
         );
         return Err(exit::ENVIRONMENT);
     }
+    // Pictures can still be measured, so this is not a reason to stop.
+    if recipe.measure_quality
+        && let Some(tools) = tools
+        && !caps.vmaf
+    {
+        eprintln!(
+            "warning: {} has no libvmaf filter, so videos are not measured (--measure-quality)",
+            tools.ffmpeg.display()
+        );
+    }
     if recipe.video.target_vmaf.is_none() || recipe.video.target_bytes.is_some() {
         return Ok(());
     }
@@ -598,6 +614,7 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         target_vmaf: args.target_vmaf,
         target_ssimulacra2: args.target_ssimulacra2,
         fps: args.fps,
+        measure_quality: args.measure_quality.then_some(true),
         ..Settings::default()
     };
     let project = if args.recipe.is_none() && !args.ignore_project_recipe {
@@ -766,21 +783,26 @@ fn percent_saved(before: u64, after: u64) -> String {
     }
 }
 
-/// ` · VMAF 93.4 (target 93)`, with a warning when the target was out of reach.
+/// ` · VMAF 93.4 (target 93)`, with a warning when the target was out of reach; ` · VMAF 93.4`
+/// for a measured result.
 fn score_note(score: &Score) -> String {
     let metric = match score.metric {
         Metric::Vmaf => "VMAF",
         Metric::Ssimulacra2 => "SSIMULACRA2",
     };
+    let Some(target) = score.target else {
+        let sampled = if score.sampled { " (on samples)" } else { "" };
+        return format!(" · {metric} {:.1}{sampled}", score.score);
+    };
     let sampled = if score.sampled { ", on samples" } else { "" };
-    let missed = if score.score < f64::from(score.target) {
+    let missed = if score.score < f64::from(target) {
         ": the best reachable"
     } else {
         ""
     };
     format!(
-        " · {metric} {:.1} (target {}{sampled}{missed})",
-        score.score, score.target
+        " · {metric} {:.1} (target {target}{sampled}{missed})",
+        score.score
     )
 }
 
@@ -794,7 +816,7 @@ pub(crate) fn print_human(report: &Report) {
             let before = report.input_bytes.unwrap_or(0);
             let encoder = report.encoder.as_deref().unwrap_or("");
             println!("{input} → {}", output.display());
-            let target = match &report.plan {
+            let mut target = match &report.plan {
                 Some(Plan::Video(VideoPlan {
                     target: Some(t), ..
                 })) => format!(
@@ -803,11 +825,11 @@ pub(crate) fn print_human(report: &Report) {
                     t.attempts,
                     if t.attempts == 1 { "try" } else { "tries" }
                 ),
-                _ => match &report.score {
-                    Some(score) => score_note(score),
-                    None => String::new(),
-                },
+                _ => String::new(),
             };
+            if let Some(score) = &report.score {
+                target.push_str(&score_note(score));
+            }
             println!(
                 "  {} → {} ({}) · {encoder}{target} · {:.1} s",
                 format_bytes(before),

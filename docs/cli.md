@@ -82,6 +82,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--target-vmaf` | 1–100 | Make each video as small as it can be while it still scores this VMAF. Replaces `--quality` for videos. Needs FFmpeg with libvmaf and a software encoder; cannot be combined with `--target-size`. |
 | `--target-ssimulacra2` | 1–100 | Make each still image as small as it can be while it still scores this SSIMULACRA2. Replaces `--quality` for still images. |
 | `--no-audio` | | Remove all audio tracks. |
+| `--measure-quality` | | Measure every result against its source, also without a score target, and report it in `score`: VMAF for videos (on samples of videos over 30 seconds; needs FFmpeg with libvmaf, otherwise videos are not measured and a warning says so), SSIMULACRA2 for still images. Encoding does not change. Measuring takes extra time: about as long as compressing for videos, a fraction of a second per picture. |
 | `-j`, `--jobs` | number | How many files to work on at once. Default: one per logical core. |
 | `--json` | | Print [JSON](json.md) instead of text. |
 
