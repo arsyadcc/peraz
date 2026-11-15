@@ -19,6 +19,9 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if let Some(kind) = sniff_document(path).map_err(input_error)? {
         return Ok(document_info(kind, size));
     }
+    if let Some(info) = jpeg_xl_info(path, size)? {
+        return Ok(info);
+    }
     let absolute = std::path::absolute(path).map_err(input_error)?;
     // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
     // as protocols: only local files are ever opened.
@@ -308,6 +311,9 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
     if let Some(kind) = sniff_document(path).map_err(input_error)? {
         return Ok(Some(document_info(kind, size)));
     }
+    if let Some(info) = jpeg_xl_info(path, size)? {
+        return Ok(Some(info));
+    }
     let Some((codec, container)) = sniff_still_image(path).map_err(input_error)? else {
         return Ok(None);
     };
@@ -361,6 +367,47 @@ fn regular_file_size(path: &Path) -> Result<u64, EngineError> {
     }
     Ok(metadata.len())
 }
+
+/// JPEG XL is read from its header: `djxl` decodes it, not FFmpeg.
+fn jpeg_xl_info(path: &Path, size_bytes: u64) -> Result<Option<MediaInfo>, EngineError> {
+    let header = crate::jxl_header::sniff(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidData => EngineError::NotMedia {
+            message: e.to_string(),
+        },
+        _ => EngineError::Input {
+            path: path.to_owned(),
+            source: e,
+        },
+    })?;
+    Ok(header.map(|header| MediaInfo {
+        kind: if header.animated {
+            MediaKind::Animation
+        } else {
+            MediaKind::Image
+        },
+        container: "jpegxl".to_owned(),
+        size_bytes,
+        duration_seconds: None,
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: JPEG_XL.to_owned(),
+            width: header.width,
+            height: header.height,
+            // The orientation is applied when decoding.
+            rotation: 0,
+            frame_rate: None,
+            frame_count: (!header.animated).then_some(1),
+            pixel_format: None,
+            color: ColorInfo::default(),
+            alpha: header.alpha,
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    }))
+}
+
+/// The codec name for JPEG XL (FFmpeg's).
+pub const JPEG_XL: &str = "jpegxl";
 
 fn document_info(kind: MediaKind, size_bytes: u64) -> MediaInfo {
     MediaInfo {

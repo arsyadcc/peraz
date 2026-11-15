@@ -152,9 +152,9 @@ makes it 1.
 | `hwaccels[]` | array of strings | FFmpeg's hardware decoding methods. |
 | `encoders[]` | array of strings | Every encoder in this FFmpeg build. |
 | `vmaf` | boolean | FFmpeg has the `libvmaf` filter, which `--target-vmaf` needs. |
-| `jxl` | object or null | libjxl's tools, which `--format jxl` needs; null when `cjxl` was not found. |
+| `jxl` | object or null | libjxl's tools, which `--format jxl` and JPEG XL inputs need; null when `cjxl` was not found. |
 | `jxl.cjxl` | string | Path of `cjxl`. |
-| `jxl.djxl` | string or null | Path of `djxl`, which `--target-ssimulacra2` needs to read JPEG XL back. |
+| `jxl.djxl` | string or null | Path of `djxl`, which reads JPEG XL inputs, and JPEG XL outputs for `--target-ssimulacra2`. |
 | `jxl.version` | string or null | libjxl's version, e.g. `0.12.0`. |
 
 ## `peraz recipe list --json` and `peraz recipe show --json`

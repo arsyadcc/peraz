@@ -36,7 +36,7 @@ pub type Progress<'a> = &'a mut dyn FnMut(f64);
 /// Setting `cancel` (e.g. from a Ctrl-C handler) stops FFmpeg, removes the partial file, and
 /// returns [`Outcome::Cancelled`].
 ///
-/// Without `tools` (no FFmpeg), only PDFs, EPUBs, and still JPEG, PNG, WebP, BMP, and TIFF
+/// Without `tools` (no FFmpeg), only PDFs, EPUBs, and still JPEG, PNG, WebP, BMP, TIFF, and JPEG XL
 /// images can be compressed; other files fail with a message saying they need FFmpeg.
 pub fn compress(
     tools: Option<&Toolchain>,
@@ -127,6 +127,12 @@ fn run(
         MediaKind::Pdf | MediaKind::Epub => {
             return make_document(batch, job, &info, progress, cancel, report);
         }
+        // FFmpeg builds rarely read JPEG XL, and djxl is used only for stills.
+        MediaKind::Animation if info.container == "jpegxl" => {
+            return Outcome::Skipped {
+                message: "animated JPEG XL is not supported yet".to_owned(),
+            };
+        }
         _ => {}
     }
     // Everything below runs FFmpeg.
@@ -202,6 +208,7 @@ fn make_image(
             Some(tools) => crate::heif::decode(tools, &job.input),
             None => Err(NEEDS_FFMPEG.to_owned()),
         },
+        ImageDecoder::Djxl => crate::jxl::decode_file(&job.input),
     };
     // A JPEG becoming JPEG XL is also recompressed losslessly, when its pixels stay as they are.
     let recompress = matches!(

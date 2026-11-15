@@ -14,6 +14,7 @@ pub mod gif;
 pub mod heif;
 pub mod image;
 pub mod jxl;
+pub mod jxl_header;
 pub mod pdf;
 pub mod probe;
 mod score;

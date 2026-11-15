@@ -155,7 +155,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Kind | Input | Output |
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
-| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF | JPEG, PNG, WebP, AVIF, JPEG XL |
+| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL | JPEG, PNG, WebP, AVIF, JPEG XL |
 | Animation | GIF, video | GIF, animated WebP, animated AVIF, MP4 |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
@@ -230,6 +230,8 @@ smaller sizes, and keeps transparency. A JPEG is also recompressed losslessly, w
 resized: the result holds the JPEG's exact data (`djxl` gives the same JPEG back) and is typically
 about 20% smaller. Peraz keeps whichever of the two is smaller, so at `highest` it is usually the
 lossless one. Safari shows JPEG XL; check where your pictures will be viewed before choosing it.
+JPEG XL inputs are read with `djxl` and stay JPEG XL unless you choose another format, for example
+`--format jpeg` for pictures that must open everywhere. Animated JPEG XL is not supported yet.
 
 ### GIFs and animation
 
@@ -349,11 +351,11 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
   downloads a build). Peraz uses `--ffmpeg <path>`, `PERAZ_FFMPEG`, a bundled build in a
   `peraz-ffmpeg` folder next to `peraz`, or `ffmpeg` on `PATH`, in that order. `peraz doctor`
   shows which one it found and what it can encode.
-- The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, and libwebp, made by
-  [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
+- The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, libwebp, and libvmaf,
+  plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
   [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
-- Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs;
-  videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
+- Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, TIFF, and JPEG XL images, PDFs, and
+  EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 
 ## Building from source
 

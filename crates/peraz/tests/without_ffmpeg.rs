@@ -113,6 +113,24 @@ fn jpeg_xl_without_cjxl_stops_the_run_before_any_work() {
 }
 
 #[test]
+fn jpeg_xl_input_without_djxl_stops_the_run_before_any_work() {
+    let dir = setup("jxl-input");
+    // A bare codestream header: 8x8, default metadata. The run stops before decoding it.
+    std::fs::write(dir.0.join("picture.jxl"), [0xFF, 0x0A, 0x41, 0x02]).unwrap();
+    let output = peraz(
+        &dir.0,
+        &["compress", "--out-dir", "out", "photo.png", "picture.jxl"],
+    );
+    let message = stderr(&output);
+    assert_eq!(output.status.code(), Some(ENVIRONMENT), "{message}");
+    assert!(
+        message.contains("picture.jxl is JPEG XL, which needs djxl"),
+        "{message}"
+    );
+    assert!(!dir.0.join("out/photo-1.png").exists());
+}
+
+#[test]
 fn an_explicit_ffmpeg_that_does_not_exist_is_never_ignored() {
     let dir = setup("explicit");
     let missing = dir.0.join("bin").join("ffmpeg-missing");

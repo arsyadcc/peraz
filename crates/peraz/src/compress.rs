@@ -243,6 +243,9 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     if let Err(code) = check_tools(&recipe, tools.as_ref(), &caps) {
         return code;
     }
+    if let Err(code) = check_jpeg_xl_inputs(&args.files) {
+        return code;
+    }
 
     let target = output_target(args);
     let check_dir = check_folder(args, recipe_name.as_deref());
@@ -360,8 +363,29 @@ pub(crate) fn check_tools(
     }
 }
 
+/// Stops before any work when an input is JPEG XL and `djxl` is missing.
+fn check_jpeg_xl_inputs(files: &[PathBuf]) -> Result<(), u8> {
+    if peraz_engine::jxl::djxl().is_ok() {
+        return Ok(());
+    }
+    let jpeg_xl = files
+        .iter()
+        .find(|file| matches!(peraz_engine::jxl_header::sniff(file), Ok(Some(_))));
+    let Some(file) = jpeg_xl else {
+        return Ok(());
+    };
+    eprintln!(
+        "error: {} is JPEG XL, which needs djxl from libjxl, which was not found",
+        file.display()
+    );
+    eprintln!(
+        "Run `peraz ffmpeg install` to get a build that has it, or install libjxl's tools (djxl is looked up next to cjxl and on PATH)."
+    );
+    Err(exit::ENVIRONMENT)
+}
+
 /// What Peraz compresses without FFmpeg (everything it decodes and encodes in process).
-pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, WebP, BMP, and TIFF images, PDFs, and EPUBs";
+pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, WebP, BMP, TIFF, and JPEG XL images, PDFs, and EPUBs";
 
 /// Finds FFmpeg. Without one, the run goes on only when FFmpeg was not chosen explicitly (with
 /// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz reads itself; otherwise it stops

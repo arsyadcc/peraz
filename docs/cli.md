@@ -9,8 +9,8 @@ people and scripts. From 0.1.0 on, renaming or removing any of them is a breakin
 
 ## Without FFmpeg
 
-Peraz runs FFmpeg for videos, animations, GIFs, HEIC, and AVIF. JPEG, PNG, WebP, BMP, and TIFF
-images, PDFs, and EPUBs are handled in process, so `peraz compress` works on them when FFmpeg is
+Peraz runs FFmpeg for videos, animations, GIFs, HEIC, and AVIF. JPEG, PNG, WebP, BMP, TIFF, and
+JPEG XL images, PDFs, and EPUBs are handled without it, so `peraz compress` works on them when FFmpeg is
 not installed: the results are the same as with FFmpeg, and `--json` prints `"ffmpeg": null`. If
 any input needs FFmpeg, the run stops before any work with exit code `3` and names that file.
 An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
@@ -18,7 +18,8 @@ An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always
 
 `--format jxl` needs libjxl's `cjxl` instead (and `djxl` with `--target-ssimulacra2`), found
 through `PERAZ_CJXL`, the bundled build, or `PATH`; without it the run stops before any work with
-exit code `3`.
+exit code `3`. JPEG XL inputs are read with `djxl`, likewise exit code `3` when it is missing.
+Animated JPEG XL is skipped.
 
 ## Bundled FFmpeg
 
@@ -142,7 +143,7 @@ that is not smaller than the input is not kept, unless the format was changed on
 | `0` | Success, including files kept or skipped. |
 | `1` | At least one input failed. |
 | `2` | Invalid usage. |
-| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), or `cjxl` not found with `--format jxl`. |
+| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), or `cjxl` not found with `--format jxl` (`djxl` with a JPEG XL input). |
 | `4` | `--check` found files that could be smaller. |
 | `130` | Cancelled with Ctrl-C or SIGTERM; the current file's partial output is removed. |
 

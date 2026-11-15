@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use peraz_core::{
-    ImageFormat, Job, KeepReason, MediaKind, Outcome, OutputTarget, Quality, Recipe, VideoOutput,
+    Alpha, ImageDecoder, ImageFormat, Job, KeepReason, MediaKind, Outcome, OutputTarget, Plan,
+    Quality, Recipe, VideoOutput,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
@@ -363,6 +364,79 @@ fn converts_to_jpeg_xl_and_recompresses_jpegs_losslessly() {
     assert!(status.success());
     let decoded = image::open(&back).unwrap().to_rgba8();
     assert!(decoded.pixels().any(|p| p[3] == 0), "transparency kept");
+}
+
+#[test]
+fn reads_jpeg_xl_inputs() {
+    let Some(env) = setup("jxl-input") else {
+        return;
+    };
+    if peraz_engine::jxl::djxl().is_err() {
+        eprintln!("skipped: no djxl");
+        return;
+    }
+    let source = std::fs::read(env.fixtures.join("image-orientation6.jpg")).unwrap();
+    let lossless = env.out.join("lossless.jxl");
+    std::fs::write(
+        &lossless,
+        peraz_engine::jxl::recompress_jpeg(&source, 6).unwrap(),
+    )
+    .unwrap();
+    let decoded =
+        peraz_engine::image::decode_native(&env.fixtures.join("image-alpha.png")).unwrap();
+    let alpha = env.out.join("alpha.jxl");
+    std::fs::write(&alpha, peraz_engine::jxl::encode(&decoded, 78).unwrap()).unwrap();
+
+    // JPEG XL inputs are read with djxl, upright and with their transparency.
+    let read = |input: &Path, output: &str, format: ImageFormat| {
+        let output = env.out.join(output);
+        let mut job = job(input.to_owned(), output.clone(), Quality::Balanced);
+        job.recipe.image.format = format;
+        let report = compress(None, &env.caps, &job, &mut no_progress, &NOT_CANCELLED);
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{}: {:?}",
+            input.display(),
+            report.outcome
+        );
+        assert_eq!(
+            report.plan.map(|plan| match plan {
+                Plan::Image(plan) => plan.decoder,
+                other => panic!("{other:?}"),
+            }),
+            Some(ImageDecoder::Djxl)
+        );
+        image::open(&output).unwrap()
+    };
+    let upright = read(&lossless, "from-jxl.png", ImageFormat::Png);
+    assert_eq!((upright.width(), upright.height()), (800, 600));
+    let transparent = read(&alpha, "from-jxl-alpha.png", ImageFormat::Png).to_rgba8();
+    assert!(transparent.pixels().any(|p| p[3] == 0), "transparency kept");
+    let info = peraz_engine::probe::probe_without_ffmpeg(&alpha)
+        .unwrap()
+        .unwrap();
+    let picture = info.video.unwrap();
+    assert_eq!(
+        (info.kind, picture.width, picture.height, picture.alpha),
+        (MediaKind::Image, 1200, 900, Alpha::Present)
+    );
+    // Recompressing a JPEG XL stays JPEG XL, kept only when smaller.
+    let output = env.out.join("again.jxl");
+    let report = compress(
+        None,
+        &env.caps,
+        &job(alpha.clone(), output, Quality::Smallest),
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(
+            report.outcome,
+            Outcome::Compressed { .. } | Outcome::KeptOriginal(_)
+        ),
+        "{:?}",
+        report.outcome
+    );
 }
 
 #[test]

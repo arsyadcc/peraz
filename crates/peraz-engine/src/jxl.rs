@@ -1,5 +1,5 @@
-//! JPEG XL output through libjxl's `cjxl`, and `djxl` to read results back. Like FFmpeg, both run
-//! as separate processes.
+//! JPEG XL through libjxl's tools: `cjxl` writes it, and `djxl` reads inputs and results. Like
+//! FFmpeg, both run as separate processes.
 //!
 //! Lookup order for `cjxl`: `PERAZ_CJXL`, then the bundled folder next to the `peraz` executable
 //! (the same `peraz-ffmpeg` folder FFmpeg is in), then `PATH`. `djxl` is looked up next to `cjxl`,
@@ -27,11 +27,15 @@ pub const CJXL_ENV: &str = "PERAZ_CJXL";
 pub const NEEDS_CJXL: &str = "JPEG XL output needs cjxl from libjxl, which was not found. Install \
                               libjxl's tools, or point Peraz to cjxl with PERAZ_CJXL";
 
+/// What to say when `djxl` is missing.
+pub const NEEDS_DJXL: &str = "JPEG XL input needs djxl from libjxl, which was not found. Install \
+                              libjxl's tools, or run `peraz ffmpeg install`";
+
 /// The libjxl tools Peraz runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JxlTools {
     pub cjxl: PathBuf,
-    /// Reads JPEG XL back, for `--target-ssimulacra2`.
+    /// Reads JPEG XL: inputs, and outputs for `--target-ssimulacra2`.
     pub djxl: Option<PathBuf>,
 }
 
@@ -124,31 +128,66 @@ pub fn recompress_jpeg(jpeg: &[u8], orientation: u8) -> Result<Vec<u8>, String> 
 
 /// Decodes a JPEG XL file Peraz just made, with `djxl`.
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage, String> {
-    let djxl = tools()?.djxl.as_ref().ok_or(
-        "--target-ssimulacra2 with JPEG XL output needs djxl from libjxl, to read each try back",
-    )?;
+    let djxl = djxl().map_err(|_| {
+        "--target-ssimulacra2 with JPEG XL output needs djxl from libjxl, to read each try back"
+            .to_owned()
+    })?;
     let workdir = crate::compress::work_folder()?;
     let input = workdir.join("in.jxl");
-    let output = workdir.join("out.png");
     let result = std::fs::write(&input, bytes)
         .map_err(|e| format!("cannot write a work file: {e}"))
-        .and_then(|()| {
-            let status = command(djxl)
-                .arg(&input)
-                .arg(&output)
-                .arg("--quiet")
-                .output()
-                .map_err(|e| format!("cannot run {}: {e}", djxl.display()))?;
-            if !status.status.success() {
-                return Err(format!(
-                    "djxl failed: {}",
-                    String::from_utf8_lossy(&status.stderr).trim()
-                ));
-            }
-            image::open(&output).map_err(|e| format!("cannot read back: {e}"))
-        });
+        .and_then(|()| run_djxl(djxl, &input, &workdir))
+        .map(|decoded| decoded.image);
     let _ = std::fs::remove_dir_all(&workdir);
     result
+}
+
+/// Decodes a JPEG XL input with `djxl`, with its orientation applied and its color profile.
+pub fn decode_file(input: &Path) -> Result<Decoded, String> {
+    let djxl = djxl()?;
+    let workdir = crate::compress::work_folder()?;
+    let result = run_djxl(djxl, input, &workdir).map_err(|e| {
+        format!(
+            "cannot decode {}: the picture data is damaged, incomplete, or not supported ({e})",
+            input.display()
+        )
+    });
+    let _ = std::fs::remove_dir_all(&workdir);
+    result
+}
+
+/// `djxl`, which reads JPEG XL.
+pub fn djxl() -> Result<&'static Path, String> {
+    JxlTools::locate()
+        .and_then(|tools| tools.djxl.as_deref())
+        .ok_or_else(|| NEEDS_DJXL.to_owned())
+}
+
+/// Runs `djxl` into a PNG in `workdir` and reads it. `djxl` applies the orientation and writes the
+/// color profile; the PNG's own metadata (a copy of the EXIF) is not applied again.
+fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String> {
+    let output = workdir.join("out.png");
+    let status = command(djxl)
+        .arg(input)
+        .arg(&output)
+        .arg("--quiet")
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", djxl.display()))?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        let line = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+        return Err(format!("djxl failed: {}", line.trim()));
+    }
+    let error = |e: image::ImageError| format!("cannot read djxl's output: {e}");
+    let mut decoder = image::ImageReader::open(&output)
+        .map_err(|e| format!("cannot read djxl's output: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("cannot read djxl's output: {e}"))?
+        .into_decoder()
+        .map_err(error)?;
+    let icc = image::ImageDecoder::icc_profile(&mut decoder).map_err(error)?;
+    let image = DynamicImage::from_decoder(decoder).map_err(error)?;
+    Ok(Decoded { image, icc })
 }
 
 fn run_cjxl(cjxl: &Path, input: &Path, output: &Path, args: &[&str]) -> Result<Vec<u8>, String> {

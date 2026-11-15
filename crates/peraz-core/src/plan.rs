@@ -638,6 +638,8 @@ pub enum ImageDecoder {
     Native,
     /// FFmpeg, for HEIC/HEIF and AVIF (tile grids, HEVC/AV1 pictures).
     Ffmpeg,
+    /// libjxl's `djxl`, for JPEG XL.
+    Djxl,
 }
 
 /// Image codecs (FFmpeg names) decoded in process.
@@ -653,6 +655,7 @@ fn source_format(codec: &str) -> Option<ImageFormat> {
         "png" => Some(ImageFormat::Png),
         "webp" => Some(ImageFormat::Webp),
         "av1" => Some(ImageFormat::Avif),
+        "jpegxl" => Some(ImageFormat::Jxl),
         _ => None,
     }
 }
@@ -667,6 +670,8 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         ImageDecoder::Native
     } else if FFMPEG_IMAGES.contains(&codec) {
         ImageDecoder::Ffmpeg
+    } else if codec == "jpegxl" {
+        ImageDecoder::Djxl
     } else {
         return Err(PlanError::UnsupportedImage {
             codec: picture.codec.clone(),
@@ -1728,6 +1733,26 @@ mod tests {
             (jpeg.decoder, jpeg.converts_format),
             (ImageDecoder::Native, false)
         );
+    }
+
+    #[test]
+    fn jpeg_xl_input_is_read_with_djxl_and_stays_jpeg_xl() {
+        let info = image_info("jpegxl", "jpegxl", Alpha::Present);
+        let kept = plan_image(&info, &Recipe::default()).unwrap();
+        assert_eq!(kept.decoder, ImageDecoder::Djxl);
+        assert_eq!(kept.extension, "jxl");
+        assert!(!kept.converts_format, "kept only when smaller");
+        assert!(matches!(
+            kept.encoding,
+            ImageEncoding::Jxl {
+                from_jpeg: false,
+                ..
+            }
+        ));
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Png;
+        let png = plan_image(&info, &recipe).unwrap();
+        assert_eq!((png.extension, png.converts_format), ("png", true));
     }
 
     #[test]
