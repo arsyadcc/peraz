@@ -981,14 +981,13 @@ fn measures_results_without_changing_them() {
         job.recipe.image.format = ImageFormat::Jxl;
         job.recipe.measure_quality = true;
         let report = compress(None, &env.caps, &job, &mut no_progress, &NOT_CANCELLED);
-        assert_eq!(
-            (
-                report.encoder.as_deref(),
-                report.score.as_ref().map(|s| s.score)
-            ),
-            (Some("cjxl lossless JPEG recompression"), Some(100.0)),
-            "{report:?}"
-        );
+        let score = report.score.as_ref().map(|s| s.score);
+        // Which is smaller, the lossless or the lossy result, depends on the libjxl version.
+        if report.encoder.as_deref() == Some("cjxl lossless JPEG recompression") {
+            assert_eq!(score, Some(100.0), "{report:?}");
+        } else {
+            assert!(score.is_some_and(|s| s < 100.0), "{report:?}");
+        }
     }
     if !env.caps.vmaf {
         eprintln!("skipped video: this FFmpeg has no libvmaf");
