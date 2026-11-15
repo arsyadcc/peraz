@@ -231,7 +231,9 @@ resized: the result holds the JPEG's exact data (`djxl` gives the same JPEG back
 about 20% smaller. Peraz keeps whichever of the two is smaller, so at `highest` it is usually the
 lossless one. Safari shows JPEG XL; check where your pictures will be viewed before choosing it.
 JPEG XL inputs are read with `djxl` and stay JPEG XL unless you choose another format, for example
-`--format jpeg` for pictures that must open everywhere. Animated JPEG XL is not supported yet.
+`--format jpeg` for pictures that must open everywhere. A JPEG XL made losslessly from a JPEG
+turns back into that exact JPEG (metadata removed) when that is smaller than a new encode, which
+it usually is at `highest`. Animated JPEG XL is not supported yet.
 
 ### GIFs and animation
 

@@ -15,7 +15,9 @@ between alpha versions.
 
 - JPEG XL inputs: still JPEG XL images are read with libjxl's `djxl` (from the bundled build or
   `PATH`, next to `cjxl`) and stay JPEG XL unless `--format` says otherwise. They need no FFmpeg.
-  Animated JPEG XL is skipped. **Interface:** exit code `3` when an input is JPEG XL and `djxl` is
+  A JPEG XL made losslessly from a JPEG is read as that JPEG, rebuilt exactly: with `--format
+  jpeg` its original data is kept (metadata removed) when that is smaller than a new encode, and
+  as JPEG XL it can be recompressed losslessly again. Animated JPEG XL is skipped. **Interface:** exit code `3` when an input is JPEG XL and `djxl` is
   missing; `peraz watch` picks up `.jxl` files.
 
 ## [0.3.0] - 2026-11-14

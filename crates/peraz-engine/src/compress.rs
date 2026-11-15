@@ -202,22 +202,34 @@ fn make_image(
         Ok(output) => output,
         Err(outcome) => return outcome,
     };
+    // The JPEG a JPEG XL input was losslessly made from, when it holds one.
+    let mut rebuilt_jpeg = None;
     let decoded = match plan.decoder {
         ImageDecoder::Native => decode_native(&job.input),
         ImageDecoder::Ffmpeg => match tools {
             Some(tools) => crate::heif::decode(tools, &job.input),
             None => Err(NEEDS_FFMPEG.to_owned()),
         },
-        ImageDecoder::Djxl => crate::jxl::decode_file(&job.input),
+        ImageDecoder::Djxl => match crate::jxl::reconstruct_jpeg(&job.input) {
+            Ok(Some(jpeg)) => {
+                let decoded =
+                    crate::image::decode_native_bytes(&jpeg, &job.input.display().to_string());
+                rebuilt_jpeg = Some(jpeg);
+                decoded
+            }
+            Ok(None) => crate::jxl::decode_file(&job.input),
+            Err(message) => Err(message),
+        },
     };
-    // A JPEG becoming JPEG XL is also recompressed losslessly, when its pixels stay as they are.
-    let recompress = matches!(
-        plan.encoding,
-        ImageEncoding::Jxl {
-            from_jpeg: true,
-            ..
-        }
-    ) && decoded.as_ref().is_ok_and(|d| {
+    if rebuilt_jpeg.is_some()
+        && let ImageEncoding::Jxl { from_jpeg, .. } = &mut plan.encoding
+    {
+        *from_jpeg = true;
+        report.plan = Some(Plan::Image(plan.clone()));
+    }
+    // When the pixels stay as they are, a JPEG's own data can be kept losslessly: recompressed
+    // into JPEG XL, or, for a JPEG rebuilt from JPEG XL that becomes JPEG again, as it is.
+    let unresized = decoded.as_ref().is_ok_and(|d| {
         fit_within(
             (d.image.width(), d.image.height()),
             plan.max_width,
@@ -225,6 +237,13 @@ fn make_image(
         )
         .is_none()
     });
+    let lossless = match plan.encoding {
+        ImageEncoding::Jxl {
+            from_jpeg: true, ..
+        } if unresized => Some(Lossless::JpegXl),
+        ImageEncoding::Jpeg { .. } if unresized && rebuilt_jpeg.is_some() => Some(Lossless::Jpeg),
+        _ => None,
+    };
     let encoded = match (decoded, plan.target_ssimulacra2) {
         (Err(message), _) => Err(message),
         (Ok(d), None) => encode_image(d, &plan),
@@ -249,12 +268,13 @@ fn make_image(
         Ok(encoded) => encoded,
         Err(message) => return failed(message),
     };
-    if recompress
-        && let Some(lossless) = recompress_jpeg(&job.input)
-        && lossless.len() < encoded.bytes.len()
+    if let Some(kind) = lossless
+        && let Some(jpeg) = rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok())
+        && let Some((bytes, encoder)) = keep_jpeg_data(&jpeg, kind)
+        && bytes.len() < encoded.bytes.len()
     {
-        encoded.bytes = lossless;
-        "cjxl lossless JPEG recompression".clone_into(&mut encoded.encoder);
+        encoded.bytes = bytes;
+        encoder.clone_into(&mut encoded.encoder);
         if let Some(score) = &mut report.score {
             score.score = 100.0;
         }
@@ -637,18 +657,33 @@ pub(crate) fn make_workdir() -> Result<PathBuf, Outcome> {
     Ok(workdir)
 }
 
-/// A JPEG recompressed losslessly into JPEG XL, or `None` when cjxl cannot (some JPEGs, such as
-/// arithmetic-coded ones, are not supported): the lossy encode is kept then.
-fn recompress_jpeg(input: &Path) -> Option<Vec<u8>> {
+/// How a JPEG's own data is kept without loss.
+#[derive(Debug, Clone, Copy)]
+enum Lossless {
+    /// Recompressed into JPEG XL.
+    JpegXl,
+    /// As it is, with its metadata removed.
+    Jpeg,
+}
+
+/// The JPEG's data kept losslessly, with the encoder name for the report; `None` when that is not
+/// possible (cjxl does not support some JPEGs, such as arithmetic-coded ones): the lossy encode is
+/// kept then.
+fn keep_jpeg_data(jpeg: &[u8], kind: Lossless) -> Option<(Vec<u8>, &'static str)> {
     use image::ImageDecoder as _;
-    let jpeg = std::fs::read(input).ok()?;
-    let orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&jpeg))
+    let orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(jpeg))
         .ok()?
         .orientation()
         .ok()?;
     let exif =
         (1..=8).find(|&n| image::metadata::Orientation::from_exif(n) == Some(orientation))?;
-    crate::jxl::recompress_jpeg(&jpeg, exif).ok()
+    match kind {
+        Lossless::JpegXl => crate::jxl::recompress_jpeg(jpeg, exif)
+            .ok()
+            .map(|bytes| (bytes, "cjxl lossless JPEG recompression")),
+        Lossless::Jpeg => crate::jxl::without_metadata(jpeg, exif)
+            .map(|bytes| (bytes, "JPEG rebuilt from JPEG XL")),
+    }
 }
 
 /// [`make_workdir`] for code that reports errors as text.

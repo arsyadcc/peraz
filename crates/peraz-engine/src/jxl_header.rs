@@ -3,7 +3,8 @@
 //! whether it is an animation.
 //!
 //! A file is either a bare codestream (starting `FF 0A`) or an ISO-BMFF container (ISO/IEC
-//! 18181-2) whose codestream is in a `jxlc` box or split across `jxlp` boxes.
+//! 18181-2) whose codestream is in a `jxlc` box or split across `jxlp` boxes. A container can
+//! also hold a `jbrd` box: the data that rebuilds the JPEG a file was losslessly made from.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -50,12 +51,19 @@ pub fn sniff(path: &Path) -> std::io::Result<Option<Header>> {
     })
 }
 
-/// The start of the codestream inside a container, from its `jxlc` box or `jxlp` boxes.
-fn container_codestream(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
-    let mut codestream = Vec::new();
+/// One box of a container: its type and where its content lies in the file.
+struct BoxSpan {
+    kind: [u8; 4],
+    start: u64,
+    end: u64,
+}
+
+/// The boxes of a container, read from their headers only.
+fn container_boxes(file: &mut std::fs::File) -> std::io::Result<Vec<BoxSpan>> {
+    let mut boxes = Vec::new();
     let mut offset = CONTAINER.len() as u64;
     let end = file.seek(SeekFrom::End(0))?;
-    while offset + 8 <= end && codestream.len() < HEADER_BYTES {
+    while offset + 8 <= end {
         file.seek(SeekFrom::Start(offset))?;
         let mut header = [0u8; 8];
         file.read_exact(&mut header)?;
@@ -75,25 +83,51 @@ fn container_codestream(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
         if box_end < start {
             break;
         }
-        let skip = match &header[4..] {
+        boxes.push(BoxSpan {
+            kind: [header[4], header[5], header[6], header[7]],
+            start,
+            end: box_end,
+        });
+        offset = box_end;
+    }
+    Ok(boxes)
+}
+
+/// The start of the codestream inside a container, from its `jxlc` box or `jxlp` boxes.
+fn container_codestream(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
+    let mut codestream = Vec::new();
+    for span in container_boxes(file)? {
+        let skip = match &span.kind {
             b"jxlc" => 0,
             // Each part starts with its 4-byte index.
             b"jxlp" => 4,
-            _ => {
-                offset = box_end;
-                continue;
-            }
+            _ => continue,
         };
-        let content_start = start + skip;
+        let content_start = span.start + skip;
         let wanted = (HEADER_BYTES - codestream.len()) as u64;
-        let take = box_end.saturating_sub(content_start).min(wanted);
+        let take = span.end.saturating_sub(content_start).min(wanted);
         file.seek(SeekFrom::Start(content_start))?;
         let mut part = vec![0; usize::try_from(take).unwrap_or(0)];
         file.read_exact(&mut part)?;
         codestream.extend_from_slice(&part);
-        offset = box_end;
+        if codestream.len() >= HEADER_BYTES {
+            break;
+        }
     }
     Ok(codestream)
+}
+
+/// The file is a JPEG recompressed losslessly: its container has a `jbrd` box, from which
+/// `djxl` rebuilds the original JPEG file exactly.
+pub fn has_jpeg_reconstruction(path: &Path) -> std::io::Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let mut head = [0u8; 12];
+    if read_up_to(&mut file, &mut head)? < head.len() || head != CONTAINER {
+        return Ok(false);
+    }
+    Ok(container_boxes(&mut file)?
+        .iter()
+        .any(|span| &span.kind == b"jbrd"))
 }
 
 fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -377,6 +411,10 @@ mod tests {
         let path = dir.join("boxed.jxl");
         std::fs::write(&path, parts.concat()).unwrap();
         assert_eq!(sniff(&path).unwrap(), parse(ALPHA_1200X900));
+        assert!(!has_jpeg_reconstruction(&path).unwrap());
+        let path = dir.join("from-jpeg.jxl");
+        std::fs::write(&path, [parts.concat(), boxed(b"jbrd", &[0; 20])].concat()).unwrap();
+        assert!(has_jpeg_reconstruction(&path).unwrap());
 
         let path = dir.join("single.jxl");
         let single = [CONTAINER.to_vec(), boxed(b"jxlc", OPAQUE_1600X1200)].concat();

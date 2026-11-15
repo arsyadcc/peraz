@@ -156,6 +156,47 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
     result
 }
 
+/// The JPEG a JPEG XL input was losslessly made from, rebuilt exactly by `djxl`; `None` when the
+/// file holds no reconstruction data.
+pub fn reconstruct_jpeg(input: &Path) -> Result<Option<Vec<u8>>, String> {
+    // Without reconstruction data, djxl would encode the pixels into a new JPEG instead.
+    if !crate::jxl_header::has_jpeg_reconstruction(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?
+    {
+        return Ok(None);
+    }
+    let djxl = djxl()?;
+    let workdir = crate::compress::work_folder()?;
+    let output = workdir.join("out.jpg");
+    let result = command(djxl)
+        .arg(input)
+        .arg(&output)
+        .arg("--quiet")
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", djxl.display()))
+        .and_then(|status| {
+            if status.status.success() {
+                std::fs::read(&output).map_err(|e| format!("cannot read djxl's output: {e}"))
+            } else {
+                let stderr = String::from_utf8_lossy(&status.stderr);
+                let line = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+                Err(format!(
+                    "cannot rebuild the JPEG in {}: {}",
+                    input.display(),
+                    line.trim()
+                ))
+            }
+        });
+    let _ = std::fs::remove_dir_all(&workdir);
+    result.map(Some)
+}
+
+/// A JPEG with its metadata removed as for every output (see [`strip_jpeg_metadata`]); the
+/// compressed picture data stays exactly as it is.
+pub fn without_metadata(jpeg: &[u8], orientation: u8) -> Option<Vec<u8>> {
+    strip_jpeg_metadata(jpeg, orientation)
+}
+
 /// `djxl`, which reads JPEG XL.
 pub fn djxl() -> Result<&'static Path, String> {
     JxlTools::locate()

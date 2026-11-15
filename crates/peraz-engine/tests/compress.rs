@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use peraz_core::{
-    Alpha, ImageDecoder, ImageFormat, Job, KeepReason, MediaKind, Outcome, OutputTarget, Plan,
-    Quality, Recipe, VideoOutput,
+    Alpha, ImageDecoder, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Outcome,
+    OutputTarget, Plan, Quality, Recipe, VideoOutput,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
+use peraz_engine::jxl::{recompress_jpeg, reconstruct_jpeg, without_metadata};
 use peraz_engine::probe::probe;
 
 struct Env {
@@ -437,6 +438,74 @@ fn reads_jpeg_xl_inputs() {
         "{:?}",
         report.outcome
     );
+}
+
+#[test]
+fn rebuilds_the_jpeg_a_jpeg_xl_was_made_from() {
+    let Some(env) = setup("jxl-rebuild") else {
+        return;
+    };
+    if peraz_engine::jxl::djxl().is_err() {
+        eprintln!("skipped: no djxl");
+        return;
+    }
+    let source = std::fs::read(env.fixtures.join("image-orientation6.jpg")).unwrap();
+    let from_jpeg = env.out.join("from-jpeg.jxl");
+    std::fs::write(&from_jpeg, recompress_jpeg(&source, 6).unwrap()).unwrap();
+    // The JPEG comes back byte for byte, as it was recompressed (metadata already removed).
+    let rebuilt = reconstruct_jpeg(&from_jpeg).unwrap().unwrap();
+    assert_eq!(Some(rebuilt), without_metadata(&source, 6));
+
+    // A JPEG XL made from pixels has nothing to rebuild.
+    let decoded =
+        peraz_engine::image::decode_native(&env.fixtures.join("image-alpha.png")).unwrap();
+    let from_pixels = env.out.join("from-pixels.jxl");
+    std::fs::write(
+        &from_pixels,
+        peraz_engine::jxl::encode(&decoded, 78).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reconstruct_jpeg(&from_pixels).unwrap(), None);
+
+    // Becoming JPEG XL again, the rebuilt JPEG counts as a JPEG: it can be kept losslessly.
+    let output = env.out.join("again.jxl");
+    let report = compress(
+        None,
+        &env.caps,
+        &job(from_jpeg.clone(), output, Quality::Highest),
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    let Some(Plan::Image(plan)) = report.plan else {
+        panic!("{:?}", report.outcome)
+    };
+    assert!(
+        matches!(
+            plan.encoding,
+            ImageEncoding::Jxl {
+                from_jpeg: true,
+                ..
+            }
+        ),
+        "{plan:?}"
+    );
+    // Becoming JPEG, it is the smaller of the original JPEG data and a new encode, upright.
+    let output = env.out.join("back.jpg");
+    let mut back = job(from_jpeg, output.clone(), Quality::Highest);
+    back.recipe.image.format = ImageFormat::Jpeg;
+    let report = compress(None, &env.caps, &back, &mut no_progress, &NOT_CANCELLED);
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    let encoder = report.encoder.unwrap();
+    assert!(
+        ["JPEG rebuilt from JPEG XL", "mozjpeg q90"].contains(&encoder.as_str()),
+        "{encoder}"
+    );
+    let upright = peraz_engine::image::decode_native(&output).unwrap().image;
+    assert_eq!((upright.width(), upright.height()), (800, 600));
 }
 
 #[test]
