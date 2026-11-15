@@ -11,6 +11,15 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- `peraz compress --events` prints what happens during a run as JSON Lines, for programs that
+  show progress: a `start` event, then per file `file_start`, `progress` (percent and an estimate
+  of the time left), and `file_done` with the same report as `--json`, then `done` with the
+  totals. Works with `--jobs` and `--check`, and cancelled files still get their `file_done`.
+  **Interface:** new flag `--events` and the events documented in docs/json.md; `--json` is
+  unchanged.
+
 ## [0.4.0] - 2026-11-15
 
 ### Added

@@ -13,10 +13,12 @@ use peraz_core::{
     VideoPlan,
 };
 use peraz_engine::batch::Batch;
+use peraz_engine::compress::{Observer, OnlyProgress};
 use peraz_engine::ffmpeg::{BuildInfo, Capabilities, FFMPEG_ENV, Toolchain};
 use peraz_engine::jxl::{CJXL_ENV, JxlTools};
 use serde::Serialize;
 
+use crate::events::{Event, Events, FileEvents};
 use crate::{exit, print_json, recipes};
 
 /// Flags that describe how files are compressed; shared by `compress` and `watch`.
@@ -103,6 +105,7 @@ pub struct SettingsArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // command-line switches
 pub struct Args {
     /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF; BMP/TIFF with --format), GIFs, PDFs, and EPUBs.
     #[arg(required = true)]
@@ -141,6 +144,11 @@ pub struct Args {
     /// Print JSON instead of text.
     #[arg(long)]
     json: bool,
+
+    /// Print events as they happen instead of text, one JSON object per line: each file's
+    /// start, progress, and report, then the totals. For programs that show progress.
+    #[arg(long, conflicts_with = "json")]
+    events: bool,
 }
 
 /// `--format`: checked here so mistakes are usage errors; the meaning lives in `peraz-core`.
@@ -210,21 +218,29 @@ pub(crate) struct Summary {
     saved_bytes: u64,
 }
 
-pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
+/// Checks `--output` and `--out-dir`, making the folder when it does not exist yet.
+fn prepare_output(args: &Args) -> Result<(), u8> {
     if args.output.is_some() && args.files.len() > 1 {
         eprintln!("error: --output works with a single input; use --out-dir for several files");
-        return exit::USAGE;
+        return Err(exit::USAGE);
     }
     if let Some(dir) = &args.out_dir {
         if dir.exists() && !dir.is_dir() {
             eprintln!("error: --out-dir {} is a file, not a folder", dir.display());
-            return exit::USAGE;
+            return Err(exit::USAGE);
         }
         // A folder that does not exist yet is made, like `mkdir -p`.
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("error: cannot create --out-dir {}: {e}", dir.display());
-            return exit::USAGE;
+            return Err(exit::USAGE);
         }
+    }
+    Ok(())
+}
+
+pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
+    if let Err(code) = prepare_output(args) {
+        return code;
     }
     let (recipe, recipe_name) = match recipe(&args.settings) {
         Ok(found) => found,
@@ -283,29 +299,34 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             existing,
         }
     };
+    let compress_one = |input: &PathBuf, observer: &mut dyn Observer| {
+        peraz_engine::compress::compress_observed(
+            &batch,
+            tools.as_ref(),
+            &caps,
+            &job_for(input),
+            observer,
+            cancel,
+        )
+    };
     // After cancellation every remaining file still gets a report (status `cancelled`), so
     // callers learn the fate of each input; the engine returns immediately for these.
-    let reports = if workers == 1 {
-        run_sequential(&args.files, args.json || args.check, |input, progress| {
-            peraz_engine::compress::compress_in(
-                &batch,
-                tools.as_ref(),
-                &caps,
-                &job_for(input),
-                progress,
-                cancel,
-            )
+    let quiet = args.json || args.check;
+    let events = args.events.then(Events::new);
+    let reports = if let Some(events) = &events {
+        events.emit(&Event::Start {
+            ffmpeg: build.as_ref(),
+            recipe: recipe_name.as_deref(),
+            files: &args.files,
+        });
+        run_with_events(&args.files, workers, events, compress_one)
+    } else if workers == 1 {
+        run_sequential(&args.files, quiet, |input, progress| {
+            compress_one(input, &mut OnlyProgress(progress))
         })
     } else {
-        run_parallel(&args.files, workers, args.json || args.check, |input| {
-            peraz_engine::compress::compress_in(
-                &batch,
-                tools.as_ref(),
-                &caps,
-                &job_for(input),
-                &mut |_| {},
-                cancel,
-            )
+        run_parallel(&args.files, workers, quiet, |_, input| {
+            compress_one(input, &mut OnlyProgress(&mut |_| {}))
         })
     };
 
@@ -315,6 +336,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
         recipe_name.as_deref(),
         &reports,
         check_dir.as_deref(),
+        events.as_ref(),
     )
 }
 
@@ -435,6 +457,7 @@ fn finish_run(
     recipe_name: Option<&str>,
     reports: &[Report],
     check_dir: Option<&Path>,
+    events: Option<&Events>,
 ) -> u8 {
     let summary = summarize(reports);
     let (failed, cancelled) = (summary.failed, summary.cancelled > 0);
@@ -444,7 +467,12 @@ fn finish_run(
         let _ = std::fs::remove_dir_all(dir);
         result
     });
-    if args.json {
+    if let Some(events) = events {
+        events.emit(&Event::Done {
+            check: check.as_ref(),
+            summary,
+        });
+    } else if args.json {
         print_json(Output {
             ffmpeg: build,
             recipe: recipe_name,
@@ -636,13 +664,30 @@ fn run_sequential(
     reports
 }
 
+/// Like [`run_parallel`], printing events instead of text.
+fn run_with_events(
+    files: &[PathBuf],
+    workers: usize,
+    events: &Events,
+    compress: impl Fn(&PathBuf, &mut dyn Observer) -> Report + Sync,
+) -> Vec<Report> {
+    run_parallel(files, workers, true, |index, input| {
+        let report = compress(input, &mut FileEvents::new(events, index, input));
+        events.emit(&Event::FileDone {
+            index,
+            report: &report,
+        });
+        report
+    })
+}
+
 /// Several files at once on `workers` threads. Text results print as they finish, prefixed
 /// with a counter; the returned reports keep the input order.
 pub(crate) fn run_parallel(
     files: &[PathBuf],
     workers: usize,
     json: bool,
-    compress: impl Fn(&PathBuf) -> Report + Sync,
+    compress: impl Fn(usize, &PathBuf) -> Report + Sync,
 ) -> Vec<Report> {
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
@@ -654,7 +699,7 @@ pub(crate) fn run_parallel(
                 loop {
                     let index = next.fetch_add(1, Ordering::SeqCst);
                     let Some(input) = files.get(index) else { break };
-                    let report = compress(input);
+                    let report = compress(index, input);
                     if !json {
                         let _guard = print.lock().unwrap_or_else(PoisonError::into_inner);
                         let finished = done.fetch_add(1, Ordering::SeqCst) + 1;

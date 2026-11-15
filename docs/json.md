@@ -52,6 +52,57 @@ One document for the whole run.
 
 With `--check`, nothing is kept: `outcome.output` names a temporary file that no longer exists.
 
+## `peraz compress --events`
+
+One line per event, as it happens (JSON Lines), for programs that show progress while Peraz
+works. Every line is a JSON object with `schema_version` and `event`; the other fields depend on
+the event. The order is:
+
+1. one `start`;
+2. per input, one `file_start`, any number of `progress`, then one `file_done`. With several
+   files at once (`--jobs`), the events of different files are interleaved: `index` and `input`
+   say which file an event is about;
+3. one `done`, after every input has its `file_done`.
+
+Every input gets its `file_start` and `file_done`, including files that cannot be read and files
+cancelled by Ctrl-C or SIGTERM (status `cancelled`, exit code 130). After `file_start`, a file may
+wait for a free encoder before its first `progress`. The output file is named in the `file_done`
+report. `progress` comes at most every 0.1 seconds per file and only when the percentage changed;
+pictures and documents may report only 100%.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema_version` | integer | The JSON schema version: 1. |
+| `event` | string | One of `start`, `file_start`, `progress`, `file_done`, `done`. |
+| `ffmpeg` | object or null | `start` only: the FFmpeg build used, as in [`peraz compress --json`](#peraz-compress---json); `null` when FFmpeg was not found. |
+| `ffmpeg.version` | string | FFmpeg's version. |
+| `ffmpeg.license` | string | One of `lgpl`, `gpl`, `nonfree`. |
+| `recipe` | string or null | `start` only: the recipe used, as in `peraz compress --json`. |
+| `files[]` | array of strings | `start` only: the inputs, in the order given. |
+| `index` | integer | `file_start`, `progress`, and `file_done`: the input's position in `files[]`, from 0. |
+| `input` | string | `file_start` and `progress`: the input file. |
+| `kind` | string or null | `file_start` only. One of `video`, `image`, `animation`, `audio`, `pdf`, `epub`, `unknown`; null when the file could not be read. |
+| `input_bytes` | integer or null | `file_start` only: the input's size; null when it could not be read. |
+| `duration_seconds` | number or null | `file_start` only: the input's length; null for pictures, documents, and files that could not be read. |
+| `percent` | number | `progress` only: how much of the file's work is done, 0–100, to one decimal. |
+| `eta_seconds` | number or null | `progress` only: an estimate of the time left for this file, from its pace so far; null during the first second. |
+| `report` | [report](#report) | `file_done` only: what happened to the file, the same as in `--json` results. |
+| `check` | object | `done` only, with `--check`: as in `peraz compress --json`. |
+| `check.threshold_percent` | integer | The `--check-threshold`. |
+| `check.could_shrink[]` | array of objects | Files that could be made at least that much smaller. |
+| `check.could_shrink[].path` | string | The input file. |
+| `check.could_shrink[].input_bytes` | integer | Its size. |
+| `check.could_shrink[].possible_bytes` | integer | The size Peraz reached. |
+| `check.could_shrink[].saving_percent` | number | The saving, in percent. |
+| `summary` | object | `done` only: totals over the reports, as in `peraz compress --json`. |
+| `summary.compressed` | integer | Results with status `compressed`. |
+| `summary.kept_original` | integer | Results with status `kept_original`. |
+| `summary.skipped` | integer | Results with status `skipped`. |
+| `summary.failed` | integer | Results with status `failed`. |
+| `summary.cancelled` | integer | Results with status `cancelled`. |
+| `summary.input_bytes` | integer | Total size of the inputs that could be read. |
+| `summary.saved_bytes` | integer | Total bytes saved by the compressed results. |
+
 ## `peraz watch --json`
 
 One line per file, as it is processed (JSON Lines): a [report](#report) with `schema_version`

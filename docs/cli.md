@@ -94,6 +94,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `-f`, `--force` | | With `--output`: replace that file if it exists. |
 | `--check` | | Write nothing; exit with code 4 when a file could be made at least `--check-threshold` percent smaller. |
 | `--check-threshold` | 1–99 | With `--check`: the smallest saving, in percent, that counts. Default 10. |
+| `--events` | | Print [events](json.md#peraz-compress---events) as they happen, one JSON object per line, instead of text: each file's start, progress, and report, then the totals. For programs that show progress. Cannot be combined with `--json`. |
 
 ### `watch` only
 

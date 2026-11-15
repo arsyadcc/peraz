@@ -58,6 +58,43 @@ pub fn compress_in(
     progress: Progress,
     cancel: &AtomicBool,
 ) -> Report {
+    compress_observed(batch, tools, caps, job, &mut OnlyProgress(progress), cancel)
+}
+
+/// Follows the compression of one file, for progress displays.
+pub trait Observer {
+    /// Called once per file, before any progress: with what was read about the input, or `None`
+    /// when it could not be read (or the run was already cancelled).
+    fn started(&mut self, info: Option<&MediaInfo>);
+    /// The fraction done, from 0.0 to 1.0.
+    fn progress(&mut self, fraction: f64);
+}
+
+/// An [`Observer`] for a progress callback alone.
+pub struct OnlyProgress<'a>(pub Progress<'a>);
+
+impl std::fmt::Debug for OnlyProgress<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OnlyProgress")
+    }
+}
+
+impl Observer for OnlyProgress<'_> {
+    fn started(&mut self, _: Option<&MediaInfo>) {}
+    fn progress(&mut self, fraction: f64) {
+        (self.0)(fraction);
+    }
+}
+
+/// Like [`compress_in`], telling `observer` when the file was read as well as the progress.
+pub fn compress_observed(
+    batch: &Batch,
+    tools: Option<&Toolchain>,
+    caps: &Capabilities,
+    job: &Job,
+    observer: &mut dyn Observer,
+    cancel: &AtomicBool,
+) -> Report {
     let started = Instant::now();
     let mut report = Report {
         input: job.input.clone(),
@@ -73,9 +110,29 @@ pub fn compress_in(
         elapsed_seconds: 0.0,
     };
     report.outcome = if cancel.load(Ordering::SeqCst) {
+        observer.started(None);
         Outcome::Cancelled
     } else {
-        run(batch, tools, caps, job, progress, cancel, &mut report)
+        match probe_input(tools, &job.input) {
+            Ok(info) => {
+                observer.started(Some(&info));
+                let mut progress = |fraction: f64| observer.progress(fraction);
+                run(
+                    batch,
+                    tools,
+                    caps,
+                    job,
+                    &info,
+                    &mut progress,
+                    cancel,
+                    &mut report,
+                )
+            }
+            Err(message) => {
+                observer.started(None);
+                Outcome::Failed { message }
+            }
+        }
     };
     if !matches!(report.outcome, Outcome::Compressed { .. }) {
         batch.release(&job.input);
@@ -84,21 +141,18 @@ pub fn compress_in(
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     batch: &Batch,
     tools: Option<&Toolchain>,
     caps: &Capabilities,
     job: &Job,
+    info: &MediaInfo,
     progress: Progress,
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
     let failed = |message: String| Outcome::Failed { message };
-
-    let info = match probe_input(tools, &job.input) {
-        Ok(info) => info,
-        Err(message) => return failed(message),
-    };
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
     // Decoders fill a cut-off JPEG or GIF with gray or drop frames instead of failing.
@@ -123,9 +177,9 @@ fn run(
     };
 
     match info.kind {
-        MediaKind::Image => return make_image(batch, tools, job, &info, progress, cancel, report),
+        MediaKind::Image => return make_image(batch, tools, job, info, progress, cancel, report),
         MediaKind::Pdf | MediaKind::Epub => {
-            return make_document(batch, job, &info, progress, cancel, report);
+            return make_document(batch, job, info, progress, cancel, report);
         }
         // FFmpeg builds rarely read JPEG XL: djxl turns the animation into an APNG first.
         MediaKind::Animation if info.container == "jpegxl" => {
@@ -134,7 +188,7 @@ fn run(
                 Err(outcome) => return outcome,
             };
             let outcome = make_jxl_animation(
-                batch, tools, caps, job, &info, &workdir, progress, cancel, report,
+                batch, tools, caps, job, info, &workdir, progress, cancel, report,
             );
             let _ = std::fs::remove_dir_all(&workdir);
             return outcome;
@@ -146,7 +200,7 @@ fn run(
         return failed(NEEDS_FFMPEG.to_owned());
     };
     make_moving(
-        batch, tools, caps, job, &info, &job.input, progress, cancel, report,
+        batch, tools, caps, job, info, &job.input, progress, cancel, report,
     )
 }
 

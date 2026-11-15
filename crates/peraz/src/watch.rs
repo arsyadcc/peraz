@@ -151,7 +151,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
                     existing: ExistingOutput::Skip,
                 }
             };
-            let reports = run_parallel(&files, workers.min(files.len()), true, |input| {
+            let reports = run_parallel(&files, workers.min(files.len()), true, |_, input| {
                 peraz_engine::compress::compress_in(
                     &batch,
                     Some(&tools),

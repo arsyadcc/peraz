@@ -6,6 +6,7 @@
 mod completions;
 mod compress;
 mod doctor;
+mod events;
 mod ffmpeg;
 #[cfg(test)]
 mod interface_tests;
@@ -121,10 +122,10 @@ fn locate(ffmpeg: Option<&Path>) -> Result<Toolchain, u8> {
 
 /// Wraps every JSON document with the schema version.
 #[derive(Serialize)]
-struct Envelope<T: Serialize> {
-    schema_version: u32,
+pub(crate) struct Envelope<T: Serialize> {
+    pub(crate) schema_version: u32,
     #[serde(flatten)]
-    body: T,
+    pub(crate) body: T,
 }
 
 fn print_json<T: Serialize>(body: T) {

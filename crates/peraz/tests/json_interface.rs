@@ -243,12 +243,73 @@ fn printed_json_matches_the_docs() {
         let (json, _) = run(&all, &config);
         check(&docs, &json, COMPRESS, &[("results[].", "Report")]);
     }
+    check_events(&docs, out, &config);
     if doctor["vmaf"] == Value::Bool(true) {
         check_vmaf_report(&docs, out, &config);
     } else {
         eprintln!("skipped: --target-vmaf needs FFmpeg with libvmaf");
     }
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+const EVENTS: &str = "`peraz compress --events`";
+
+/// `--events` prints one documented JSON object per line, in the documented order, and every
+/// documented event comes up.
+fn check_events(docs: &Docs, out: &str, config: &Path) {
+    let runs: [&[&str]; 2] = [
+        &[
+            "--jobs",
+            "2",
+            "--out-dir",
+            out,
+            "fixtures/video-720p-noaudio.mp4",
+            "fixtures/image-photo.jpg",
+            "fixtures/missing.png",
+        ],
+        &["--check", "fixtures/image-opaque.png"],
+    ];
+    let mut seen = BTreeSet::new();
+    for args in runs {
+        let mut all = vec!["compress", "--events"];
+        all.extend_from_slice(args);
+        let output = Command::new(env!("CARGO_BIN_EXE_peraz"))
+            .args(&all)
+            .env("PERAZ_CONFIG_DIR", config)
+            .current_dir(root())
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+            .collect();
+        let files = events[0]["files"].as_array().unwrap().len();
+        let mut started = vec![false; files];
+        let mut done = vec![false; files];
+        for (i, event) in events.iter().enumerate() {
+            check(docs, event, EVENTS, &[("report.", "Report")]);
+            let name = event["event"].as_str().unwrap();
+            seen.insert(name.to_owned());
+            assert_eq!(name == "start", i == 0, "{event}");
+            assert_eq!(name == "done", i == events.len() - 1, "{event}");
+            let index = event["index"].as_u64().map(|n| usize::try_from(n).unwrap());
+            match (name, index) {
+                ("file_start", Some(n)) => started[n] = true,
+                ("progress", Some(n)) => assert!(started[n] && !done[n], "{event}"),
+                ("file_done", Some(n)) => {
+                    assert!(started[n] && !done[n], "{event}");
+                    done[n] = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            done.iter().all(|d| *d),
+            "every input gets file_done: {text}"
+        );
+    }
+    assert_eq!(Some(seen), one_of(&docs[EVENTS]["event"]));
 }
 
 /// A `--target-vmaf` run reports its score as documented.
