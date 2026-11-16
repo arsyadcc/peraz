@@ -210,6 +210,10 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
     if bytes.starts_with(&[0xFF, 0xD8]) {
         // A JPEG's segments are read here, to get the Photoshop resources (IPTC) too.
         decoded.metadata = Metadata::from_jpeg(bytes);
+        // The decoder finds no profile when its parts are numbered from 0.
+        if decoded.icc.is_none() {
+            decoded.icc = crate::metadata::jpeg_profile(bytes);
+        }
         decoded.gain_map = crate::metadata::has_gain_map(bytes);
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         decoded.metadata.photoshop = crate::tiff::photoshop_resources(bytes);
@@ -347,12 +351,31 @@ fn jpeg_from_pixels(
         .start_compress(Vec::new())
         .map_err(|e| format!("mozjpeg: {e}"))?;
     if let Some(icc) = icc {
-        started.write_icc_profile(icc);
+        for segment in jpeg_profile_segments(icc) {
+            started.write_marker(mozjpeg::Marker::APP(2), &segment);
+        }
     }
     started
         .write_scanlines(pixels)
         .map_err(|e| format!("mozjpeg: {e}"))?;
     started.finish().map_err(|e| format!("mozjpeg: {e}"))
+}
+
+/// A color profile as the `APP2` segments of a JPEG: split into parts, each with its number
+/// (from 1) and the number of parts, as the ICC specification asks. Readers that check the
+/// numbering ignore a profile whose parts are counted from 0.
+fn jpeg_profile_segments(icc: &[u8]) -> Vec<Vec<u8>> {
+    const HEADER: &[u8] = b"ICC_PROFILE\0";
+    // A segment holds 65533 bytes after its length: the header, the two counts, then data.
+    const PART: usize = 65_533 - HEADER.len() - 2;
+    let Ok(parts) = u8::try_from(icc.len().div_ceil(PART)) else {
+        // More than 255 parts (over 16 MB) cannot be numbered: no real profile is that large.
+        return Vec::new();
+    };
+    (1..=parts)
+        .zip(icc.chunks(PART))
+        .map(|(number, part)| [HEADER, &[number, parts], part].concat())
+        .collect()
 }
 
 /// Quantizes to a palette when the quality range can be met, otherwise keeps true color; then
@@ -810,5 +833,32 @@ mod tests {
         let jpeg = encode_jpeg(&rgb, 80, None).unwrap();
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (40, 30));
+    }
+
+    #[test]
+    fn a_jpeg_carries_its_profile_the_way_readers_expect() {
+        let rgb = RgbImage::from_fn(40, 30, |x, y| {
+            #[allow(clippy::cast_possible_truncation)]
+            image::Rgb([(x * 6) as u8, (y * 8) as u8, 128])
+        });
+        // A small profile in one segment, and one that needs three.
+        let small = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+        let large: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+        for icc in [small, large] {
+            let jpeg = encode_jpeg(&rgb, 80, Some(&icc)).unwrap();
+            // The parts are numbered from 1, each with the total count.
+            let headers: Vec<(u8, u8)> = jpeg
+                .windows(14)
+                .filter(|w| w.starts_with(b"ICC_PROFILE\0"))
+                .map(|w| (w[12], w[13]))
+                .collect();
+            let count = u8::try_from(icc.len().div_ceil(65_519)).unwrap();
+            let expected: Vec<(u8, u8)> = (1..=count).map(|part| (part, count)).collect();
+            assert_eq!(headers, expected);
+            // A reader that checks the numbering finds the profile.
+            let mut decoder =
+                image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&jpeg)).unwrap();
+            assert_eq!(decoder.icc_profile().unwrap(), Some(icc));
+        }
     }
 }

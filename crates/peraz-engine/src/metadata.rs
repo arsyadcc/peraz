@@ -276,6 +276,41 @@ pub fn jpeg_end(jpeg: &[u8]) -> Option<usize> {
     }
 }
 
+/// The color profile of a JPEG, put together from its `APP2` parts in the order of their
+/// numbers. Parts are numbered from 1, but files exist whose parts count from 0 (Peraz wrote
+/// them up to version 0.5.0): those are read too, where stricter readers find no profile.
+pub fn jpeg_profile(jpeg: &[u8]) -> Option<Vec<u8>> {
+    const HEADER: &[u8] = b"ICC_PROFILE\0";
+    let mut parts: Vec<(u8, &[u8])> = Vec::new();
+    let mut at = 2;
+    while let (Some(0xFF), Some(&marker)) = (jpeg.get(at), jpeg.get(at + 1)) {
+        if marker == 0xFF {
+            at += 1;
+            continue;
+        }
+        if marker == 0xDA {
+            break;
+        }
+        let length = jpeg.get(at + 2..at + 4)?;
+        let length = usize::from(u16::from_be_bytes([length[0], length[1]]));
+        let body = jpeg.get(at + 4..at + 2 + length)?;
+        if marker == 0xE2
+            && let Some(rest) = body.strip_prefix(HEADER)
+            && rest.len() >= 2
+        {
+            // The part's number, the number of parts, then its data.
+            parts.push((rest[0], &rest[2..]));
+        }
+        at += 2 + length;
+    }
+    parts.sort_by_key(|(number, _)| *number);
+    let profile: Vec<u8> = parts
+        .iter()
+        .flat_map(|(_, data)| data.iter().copied())
+        .collect();
+    (!profile.is_empty()).then_some(profile)
+}
+
 /// What marks a picture as an HDR gain map, or as having one: the Ultra HDR and Apple names
 /// in its XMP, and the name of the standard for gain maps (ISO 21496-1).
 const GAIN_MAP_MARKS: [&[u8]; 3] = [b"hdrgm:", b"HDRGainMap", b"urn:iso:std:iso:ts:21496"];
@@ -495,6 +530,39 @@ mod tests {
         );
         assert!(Metadata::from_jpeg(b"\xFF\xD8\xFF\xD9").is_empty());
         assert!(Metadata::from_jpeg(b"").is_empty());
+    }
+
+    #[test]
+    fn a_jpeg_profile_is_read_whichever_way_its_parts_are_numbered() {
+        let part = |number: u8, count: u8, data: &[u8]| {
+            segment(
+                0xE2,
+                &[b"ICC_PROFILE\0", &[number, count][..], data].concat(),
+            )
+        };
+        let end = [0xFF, 0xDA, 0, 2, 0xFF, 0xD9];
+        // Numbered from 1, as the specification says, stored out of order.
+        let jpeg = [
+            &[0xFF, 0xD8][..],
+            &part(2, 2, b"profile"),
+            &part(1, 2, b"a color "),
+            &end,
+        ]
+        .concat();
+        assert_eq!(
+            jpeg_profile(&jpeg).as_deref(),
+            Some(&b"a color profile"[..])
+        );
+        // Numbered from 0, as some writers did.
+        let jpeg = [&[0xFF, 0xD8][..], &part(0, 1, b"counted from zero"), &end].concat();
+        assert_eq!(
+            jpeg_profile(&jpeg).as_deref(),
+            Some(&b"counted from zero"[..])
+        );
+        // Other APP2 data (the index of pictures in a phone photo) is not a profile.
+        let jpeg = [&[0xFF, 0xD8][..], &segment(0xE2, b"MPF\0 an index"), &end].concat();
+        assert_eq!(jpeg_profile(&jpeg), None);
+        assert_eq!(jpeg_profile(b""), None);
     }
 
     #[test]

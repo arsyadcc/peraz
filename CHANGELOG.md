@@ -110,6 +110,10 @@ between alpha versions.
   marker, and the report's new `warnings` say that the HDR gain map was removed (keeping it is
   planned). **Interface:** reports have `warnings`, an array of strings, in `--json` and
   `--events`; the text output prints them as notes.
+- JPEG output numbered the parts of the color profile from 0 instead of 1, so readers that
+  check the numbering (libjpeg, among others) found no profile and showed wide-gamut photos
+  with wrong colors. The parts are numbered from 1 now, and JPEGs written by earlier versions
+  are still read with their profile, so compressing them again repairs them.
 - A grayscale JPEG stays grayscale instead of being stored as three-channel color.
 - With `--keep-metadata`, an orientation stated in the XMP packet (`tiff:Orientation`) is reset
   like the one in EXIF, so no viewer turns the picture a second time; and EXIF or XMP too large
