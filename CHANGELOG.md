@@ -25,6 +25,14 @@ between alpha versions.
 
 ### Changed
 
+- GIFs are smaller below `--quality highest`: the frame data is compressed with a little loss,
+  where a pixel may come out as a color close to its own so that runs of pixels repeat. A GIF
+  that stays a GIF now gets smaller with every frame kept (a dithered clip by 13% at `high`
+  and 36% at `balanced`, where the original was kept before), and a GIF made from a video is
+  20% to 36% smaller at the same levels, for an SSIM about 0.01 lower. Frames that have at
+  most 256 colors keep them exactly instead of getting a new dithered palette, and a GIF whose
+  frames share their colors gets one palette for the file instead of one per frame. `--quality
+  highest` changes no pixel.
 - `--keep-metadata` now keeps EXIF in a TIFF and XMP in an AVIF. A TIFF carries the camera and
   dates among its own tags and the rest in its EXIF and GPS directories, where other programs
   look for them, and a TIFF input's EXIF is read from there and kept in the other formats. An

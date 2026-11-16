@@ -981,6 +981,10 @@ pub struct GifPlan {
     /// Temporal denoising strength (0 = off): small changes of a pixel from one frame to the next
     /// are averaged away before diffing, so camera noise does not count as change.
     pub denoise: u8,
+    /// How far a pixel may end up from its color so that the frame's data repeats itself more
+    /// and compresses better (0 = not at all): the largest sum of the squared differences of
+    /// red, green, and blue, with green counted double.
+    pub loss: u32,
     pub start_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     /// The output is a GIF made from something else (a video): kept even when larger.
@@ -1042,10 +1046,24 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
         // smaller and closer to the clean picture, and GIFs from the clean ones 12-20% smaller
         // for an SSIM at most 0.003 lower; heavy noise needs the stronger levels. A GIF source's
         // dithering also counts as noise, so GIFs get a lighter touch.
-        denoise: if info.kind == MediaKind::Animation {
+        // A GIF that stays a GIF is not denoised: its frames keep their exact colors, which
+        // often fit one palette for the whole file, and the loss below does the work.
+        denoise: if from_gif {
+            0
+        } else if info.kind == MediaKind::Animation {
             [0, 2, 3, 5, 8][level]
         } else {
             [0, 3, 5, 8, 12][level]
+        },
+        // Measured with SSIM against the source. From a video, 50 costs nothing visible and
+        // saves a fifth, and 100 saves over a third for 0.01 of SSIM. A GIF source is dithered
+        // already and needs twice as much for the same saving: 200 makes a film clip a third
+        // smaller and still looks the same at three times the size. The highest level
+        // changes nothing.
+        loss: if from_gif {
+            [0, 100, 200, 300, 400][level]
+        } else {
+            [0, 50, 100, 150, 200][level]
         },
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
@@ -2562,6 +2580,42 @@ mod tests {
         let plan = plan_gif(&video_info(320, 240, vec![]), &recipe).unwrap();
         assert_eq!((plan.width, plan.height), (320, 240), "never upscales");
         assert_eq!(plan.fps, 30, "never above the source frame rate");
+    }
+
+    #[test]
+    fn a_gif_may_lose_a_little_except_at_the_highest_level() {
+        let levels = [
+            Quality::Highest,
+            Quality::High,
+            Quality::Balanced,
+            Quality::Small,
+            Quality::Smallest,
+        ];
+        let plans = |info: &MediaInfo| {
+            levels.map(|quality| {
+                let mut recipe = Recipe {
+                    quality,
+                    ..Recipe::default()
+                };
+                recipe.video.output = VideoOutput::Gif;
+                plan_gif(info, &recipe).unwrap()
+            })
+        };
+        // From a video: nothing at the highest level, then more with each level.
+        let video = plans(&video_info(480, 270, vec![]));
+        assert_eq!(video.clone().map(|plan| plan.loss), [0, 50, 100, 150, 200]);
+        // A GIF that stays a GIF is dithered already: it takes twice as much to get as far,
+        // and it is not denoised, so that its frames keep their own colors.
+        let mut gif = video_info(480, 270, vec![]);
+        gif.kind = MediaKind::Animation;
+        gif.video.as_mut().unwrap().codec = "gif".to_owned();
+        let from_gif = plans(&gif);
+        assert_eq!(
+            from_gif.clone().map(|plan| plan.loss),
+            [0, 100, 200, 300, 400]
+        );
+        assert_eq!(from_gif.map(|plan| plan.denoise), [0; 5]);
+        assert!(video[2].denoise > 0);
     }
 
     #[test]

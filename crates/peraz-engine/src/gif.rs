@@ -57,6 +57,7 @@ pub fn encode_gif(
         height,
         plan,
         gif::Repeat::Infinite,
+        None,
     )?;
     #[allow(clippy::cast_precision_loss)]
     let expected_frames = (expected_seconds * f64::from(plan.fps)).max(1.0);
@@ -103,6 +104,53 @@ pub fn shown_centiseconds(delay: u16) -> u16 {
     if delay <= 1 { 10 } else { delay }
 }
 
+/// What a first pass over a GIF's frames finds.
+struct Survey {
+    /// How many frames there are.
+    total: usize,
+    /// A frame has transparency: every frame is then drawn whole, because what is cleared
+    /// cannot be diffed.
+    transparent: bool,
+    /// The frames are scaled to the plan's size.
+    resize: bool,
+    /// Every color of every frame, when the frames keep their size (and so their colors) and
+    /// one palette holds them all.
+    colors: Option<Vec<[u8; 3]>>,
+}
+
+fn survey(input: &Path, plan: &GifPlan, cancel: &AtomicBool) -> Result<Survey, GifError> {
+    let frames = crate::apng::decode(input, crate::apng::Source::Gif)?;
+    let resize = (frames.width, frames.height) != (plan.width, plan.height);
+    let (mut total, mut transparent) = (0, false);
+    let mut colors = (!resize).then(std::collections::BTreeSet::new);
+    for frame in frames {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(GifError::Cancelled);
+        }
+        let (pixels, _) = frame?;
+        total += 1;
+        transparent |= pixels.pixels().any(|p| p[3] < 128);
+        if let Some(found) = &mut colors {
+            found.extend(
+                pixels
+                    .pixels()
+                    .filter(|p| p[3] >= 128)
+                    .map(|p| [p[0], p[1], p[2]]),
+            );
+            // One entry of the palette stays free, for "leave the pixel as it is".
+            if found.len() > 255 {
+                colors = None;
+            }
+        }
+    }
+    Ok(Survey {
+        total,
+        transparent,
+        resize,
+        colors: colors.map(|found| found.into_iter().collect()),
+    })
+}
+
 /// A frame waiting to be written, until it is known how long it is shown.
 struct Held {
     pixels: image::RgbaImage,
@@ -142,24 +190,24 @@ pub fn encode_gif_from_gif(
         .map_err(|_| "GIF frames are at most 65535 pixels wide".to_owned())?;
     let height = u16::try_from(plan.height)
         .map_err(|_| "GIF frames are at most 65535 pixels high".to_owned())?;
-    // A first pass over the frames: how many there are, and whether any has transparency
-    // (then every frame is drawn whole, because what is cleared cannot be diffed).
-    let mut total = 0usize;
-    let mut transparent = false;
-    for frame in decode(input, Source::Gif)? {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(GifError::Cancelled);
-        }
-        let (pixels, _) = frame?;
-        total += 1;
-        transparent |= pixels.pixels().any(|p| p[3] < 128);
-    }
+    let Survey {
+        total,
+        transparent,
+        resize,
+        colors,
+    } = survey(input, plan, cancel)?;
     let file =
         File::create(output).map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    let mut writer = Writer::new(BufWriter::new(file), width, height, plan, repeat_of(input))?;
+    let mut writer = Writer::new(
+        BufWriter::new(file),
+        width,
+        height,
+        plan,
+        repeat_of(input),
+        colors,
+    )?;
     writer.transparent_source = transparent;
     let frames = decode(input, Source::Gif)?;
-    let resize = (frames.width, frames.height) != (plan.width, plan.height);
     #[allow(clippy::cast_precision_loss)]
     let (start, end) = (
         plan.start_ms.map_or(0.0, |ms| ms as f64),
@@ -346,6 +394,42 @@ fn file_url(path: &Path) -> Result<std::ffi::OsString, String> {
     Ok(url)
 }
 
+/// The colors of a frame as its palette, when a GIF palette holds them all: every pixel then
+/// keeps its exact color, with nothing to choose and nothing to dither. This is what frames of
+/// a GIF that is not scaled are, and flat graphics such as screen recordings. `None` for more
+/// than 256 colors (transparency counts as one).
+fn exact_palette(pixels: &[imagequant::RGBA]) -> Option<(Vec<imagequant::RGBA>, Vec<u8>)> {
+    let mut palette: Vec<imagequant::RGBA> = Vec::new();
+    let mut places: std::collections::HashMap<[u8; 4], u8> = std::collections::HashMap::new();
+    let mut indexes = Vec::with_capacity(pixels.len());
+    for pixel in pixels {
+        // Every transparent pixel is the same "leave it as it is".
+        let key = if pixel.a < 128 {
+            [0; 4]
+        } else {
+            [pixel.r, pixel.g, pixel.b, 255]
+        };
+        let index = if let Some(index) = places.get(&key) {
+            *index
+        } else {
+            let index = u8::try_from(palette.len()).ok()?;
+            palette.push(imagequant::RGBA::new(key[0], key[1], key[2], key[3]));
+            places.insert(key, index);
+            index
+        };
+        indexes.push(index);
+    }
+    Some((palette, indexes))
+}
+
+/// The rectangle of the canvas that a frame covers.
+struct Area {
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
 /// Turns RGBA frames into GIF frames.
 struct Writer<W: std::io::Write> {
     encoder: gif::Encoder<W>,
@@ -365,19 +449,34 @@ struct Writer<W: std::io::Write> {
     frames_seen: u64,
     frames_written: usize,
     attributes: imagequant::Attributes,
+    /// One palette for every frame, written once for the file, with the place of each color
+    /// in it; `None` when each frame brings its own.
+    shared: Option<SharedPalette>,
 }
 
+/// The colors of a palette that every frame uses, and the place of each color in it.
+type SharedPalette = (Vec<[u8; 3]>, std::collections::HashMap<[u8; 3], u8>);
+
 impl<W: std::io::Write> Writer<W> {
-    /// `repeat` is the loop count to store; `Finite(0)` stores none ("play once").
+    /// `repeat` is the loop count to store; `Finite(0)` stores none ("play once"). `shared`
+    /// holds every color of every frame, when they are few enough for one palette: it is then
+    /// written once for the whole file, not once per frame.
     fn new(
         out: W,
         width: u16,
         height: u16,
         plan: &GifPlan,
         repeat: gif::Repeat,
+        shared: Option<Vec<[u8; 3]>>,
     ) -> Result<Self, String> {
         let gif_error = |e: gif::EncodingError| format!("gif: {e}");
-        let mut encoder = gif::Encoder::new(out, width, height, &[]).map_err(gif_error)?;
+        // After the colors, one more entry stands for "leave the pixel as it is".
+        let shared = shared.filter(|colors| colors.len() < 256);
+        let global: Vec<u8> = shared
+            .iter()
+            .flat_map(|colors| colors.iter().flatten().copied().chain([0; 3]))
+            .collect();
+        let mut encoder = gif::Encoder::new(out, width, height, &global).map_err(gif_error)?;
         if repeat != gif::Repeat::Finite(0) {
             encoder.set_repeat(repeat).map_err(gif_error)?;
         }
@@ -401,7 +500,42 @@ impl<W: std::io::Write> Writer<W> {
             frames_seen: 0,
             frames_written: 0,
             attributes,
+            shared: shared.map(|colors| {
+                let places = colors
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, color)| Some((*color, u8::try_from(at).ok()?)))
+                    .collect();
+                (colors, places)
+            }),
         })
+    }
+
+    /// The frame's pixels as indexes into the shared palette, with that palette (its last
+    /// entry is the transparent one). `None` without a shared palette, or for a color that is
+    /// not in it: the frame then gets a palette of its own.
+    fn shared_indexes(
+        &self,
+        pixels: &[imagequant::RGBA],
+    ) -> Option<(Vec<imagequant::RGBA>, Vec<u8>)> {
+        let (colors, places) = self.shared.as_ref()?;
+        let transparent = u8::try_from(colors.len()).ok()?;
+        let indexes = pixels
+            .iter()
+            .map(|pixel| {
+                if pixel.a < 128 {
+                    Some(transparent)
+                } else {
+                    places.get(&[pixel.r, pixel.g, pixel.b]).copied()
+                }
+            })
+            .collect::<Option<Vec<u8>>>()?;
+        let palette = colors
+            .iter()
+            .map(|[red, green, blue]| imagequant::RGBA::new(*red, *green, *blue, 255))
+            .chain([imagequant::RGBA::new(0, 0, 0, 0)])
+            .collect();
+        Some((palette, indexes))
     }
 
     /// Delay in centiseconds for frame `index`, spreading rounding so the total time is exact.
@@ -484,9 +618,13 @@ impl<W: std::io::Write> Writer<W> {
         let mut pixels: Vec<imagequant::RGBA> = Vec::with_capacity(self.width * self.height);
         let (mut left, mut top, mut right, mut bottom) = (self.width, self.height, 0, 0);
         for (i, p) in rgba.as_chunks::<4>().0.iter().enumerate() {
+            // Unchanged: close to what the screen shows, by the change threshold or within
+            // what the plan lets a pixel be off by anyway.
             let changed = !diffing || {
                 let s = self.screen[i];
-                (0..3).any(|c| p[c].abs_diff(s[c]) > threshold)
+                let apart = |c: usize| u32::from(p[c].abs_diff(s[c]));
+                (0..3).any(|c| apart(c) > u32::from(threshold))
+                    && apart(0).pow(2) + 2 * apart(1).pow(2) + apart(2).pow(2) > self.plan.loss
             };
             if changed && p[3] >= 128 {
                 let (x, y) = (i % self.width, i / self.width);
@@ -516,7 +654,12 @@ impl<W: std::io::Write> Writer<W> {
             })
             .collect();
 
-        let (palette, mut indexes) = self.quantize(cropped, crop_w, crop_h)?;
+        let from_shared = self.shared_indexes(&cropped);
+        let own_palette = from_shared.is_none();
+        let (palette, mut indexes) = match from_shared {
+            Some(found) => found,
+            None => self.quantize(cropped, crop_w, crop_h)?,
+        };
         // GIF has one transparent index: merge every (nearly) transparent palette entry into it.
         let transparent = palette.iter().position(|c| c.a < 128);
         if let Some(t) = transparent {
@@ -527,14 +670,17 @@ impl<W: std::io::Write> Writer<W> {
                 }
             }
         }
-        for (row, y) in (top..bottom).enumerate() {
-            for (col, x) in (left..right).enumerate() {
-                let c = palette[usize::from(indexes[row * crop_w + col])];
-                if c.a >= 128 {
-                    self.screen[y * self.width + x] = [c.r, c.g, c.b, 255];
-                }
-            }
-        }
+        let transparent = transparent.and_then(|t| u8::try_from(t).ok());
+        let colors: Vec<[u8; 3]> = palette.iter().map(|c| [c.r, c.g, c.b]).collect();
+        let area = Area {
+            left,
+            top,
+            width: crop_w,
+            height: crop_h,
+        };
+        // On a canvas that is not cleared between frames, a transparent pixel shows what the
+        // screen has there.
+        let data = self.compress(rgba, &area, &colors, &indexes, transparent, diffing);
         let frame = gif::Frame {
             delay,
             dispose: if self.transparent_source {
@@ -542,18 +688,72 @@ impl<W: std::io::Write> Writer<W> {
             } else {
                 gif::DisposalMethod::Keep
             },
-            transparent: transparent.and_then(|t| u8::try_from(t).ok()),
+            transparent,
             left: u16::try_from(left).unwrap_or(0),
             top: u16::try_from(top).unwrap_or(0),
             width: u16::try_from(crop_w).unwrap_or(0),
             height: u16::try_from(crop_h).unwrap_or(0),
-            palette: Some(palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect()),
-            buffer: Cow::Owned(indexes),
+            palette: own_palette.then(|| colors.into_iter().flatten().collect()),
+            // Compressed already: written as it is.
+            buffer: Cow::Owned(data),
             ..gif::Frame::default()
         };
         self.flush_pending()?;
         self.pending = Some(frame);
         Ok(())
+    }
+
+    /// Compresses a frame's palette indexes, and notes on the screen what each pixel was
+    /// written as. With the plan's `loss`, a pixel may be written as another color close to
+    /// the one it should show (`rgba` holds the whole frame's), or left as the screen has it.
+    fn compress(
+        &mut self,
+        rgba: &[u8],
+        area: &Area,
+        colors: &[[u8; 3]],
+        indexes: &[u8],
+        transparent: Option<u8>,
+        on_screen: bool,
+    ) -> Vec<u8> {
+        let canvas_width = self.width;
+        // Where each of the frame's pixels is on the canvas.
+        let places: Vec<usize> = (area.top..area.top + area.height)
+            .flat_map(|y| (area.left..area.left + area.width).map(move |x| y * canvas_width + x))
+            .collect();
+        let (data, written) = if self.plan.loss == 0 {
+            crate::lzw::encode(indexes, colors.len(), None)
+        } else {
+            let frame = rgba.as_chunks::<4>().0;
+            let wanted: Vec<[u8; 3]> = places
+                .iter()
+                .map(|&at| [frame[at][0], frame[at][1], frame[at][2]])
+                .collect();
+            let under: Option<Vec<[u8; 3]>> = on_screen.then(|| {
+                places
+                    .iter()
+                    .map(|&at| {
+                        let [red, green, blue, _] = self.screen[at];
+                        [red, green, blue]
+                    })
+                    .collect()
+            });
+            let loss = crate::lzw::Loss {
+                wanted: &wanted,
+                under: under.as_deref(),
+                palette: colors,
+                transparent,
+                tolerance: self.plan.loss,
+            };
+            crate::lzw::encode(indexes, colors.len(), Some(&loss))
+        };
+        for (at, symbol) in places.into_iter().zip(written) {
+            if Some(symbol) != transparent
+                && let Some([red, green, blue]) = colors.get(usize::from(symbol))
+            {
+                self.screen[at] = [*red, *green, *blue, 255];
+            }
+        }
+        data
     }
 
     fn quantize(
@@ -562,6 +762,9 @@ impl<W: std::io::Write> Writer<W> {
         width: usize,
         height: usize,
     ) -> Result<(Vec<imagequant::RGBA>, Vec<u8>), String> {
+        if let Some(exact) = exact_palette(&pixels) {
+            return Ok(exact);
+        }
         let liq = |e: imagequant::Error| format!("imagequant: {e}");
         let mut image = self
             .attributes
@@ -586,7 +789,7 @@ impl<W: std::io::Write> Writer<W> {
     fn flush_pending(&mut self) -> Result<(), String> {
         if let Some(frame) = self.pending.take() {
             self.encoder
-                .write_frame(&frame)
+                .write_lzw_pre_encoded_frame(&frame)
                 .map_err(|e| format!("gif: {e}"))?;
             self.frames_written += 1;
         }
@@ -615,6 +818,7 @@ mod tests {
             dithering_percent: 0,
             change_threshold: 4,
             denoise: 0,
+            loss: 0,
             start_ms: None,
             duration_ms: None,
             converts_format: true,
@@ -636,9 +840,154 @@ mod tests {
         frames
     }
 
+    /// What a viewer sees of a GIF held in memory: every frame as the whole picture.
+    fn shown(bytes: &[u8]) -> Vec<image::RgbaImage> {
+        use image::AnimationDecoder as _;
+        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+            .unwrap()
+            .into_frames()
+            .map(|frame| frame.unwrap().into_buffer())
+            .collect()
+    }
+
+    /// Frames of a moving gradient of `shades` grays with noise of one shade: few colors, and
+    /// nothing that repeats exactly.
+    fn noisy_frames(width: usize, height: usize, shades: usize, count: usize) -> Vec<Vec<u8>> {
+        let mut state = 0x2545_F491u32;
+        (0..count)
+            .map(|frame| {
+                (0..width * height)
+                    .flat_map(|at| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let ramp = (at % width + frame * 3) * (shades - 2) / (width + count * 3);
+                        let shade = ramp + (state >> 31) as usize;
+                        let value = u8::try_from(shade * 255 / (shades - 1)).unwrap();
+                        [value, value, value, 255]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn written(plan: &GifPlan, frames: &[Vec<u8>], shared: Option<Vec<[u8; 3]>>) -> Vec<u8> {
+        let (width, height) = (
+            u16::try_from(plan.width).unwrap(),
+            u16::try_from(plan.height).unwrap(),
+        );
+        let mut writer = Writer::new(
+            Vec::new(),
+            width,
+            height,
+            plan,
+            gif::Repeat::Infinite,
+            shared,
+        )
+        .unwrap();
+        for frame in frames {
+            writer.push_at_rate(frame).unwrap();
+        }
+        writer.flush_pending().unwrap();
+        writer.encoder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn frames_with_few_colors_keep_every_color() {
+        // A palette that would be reduced and dithered if it were chosen: with 64 colors in
+        // the frames, there is nothing to choose.
+        let exact = GifPlan {
+            max_quality: 40,
+            dithering_percent: 100,
+            change_threshold: 0,
+            ..plan(96, 64)
+        };
+        let frames = noisy_frames(96, 64, 64, 3);
+        let shown = shown(&written(&exact, &frames, None));
+        assert_eq!(shown.len(), 3);
+        for (frame, picture) in frames.iter().zip(&shown) {
+            assert_eq!(picture.as_raw(), frame, "every pixel as it was");
+        }
+    }
+
+    #[test]
+    fn with_loss_the_file_is_smaller_and_every_pixel_stays_within_it() {
+        let frames = noisy_frames(96, 64, 64, 4);
+        let exact = GifPlan {
+            change_threshold: 1,
+            ..plan(96, 64)
+        };
+        let lossless = written(&exact, &frames, None);
+        let mut sizes = vec![lossless.len()];
+        for loss in [100, 300] {
+            let lossy = written(
+                &GifPlan {
+                    loss,
+                    ..exact.clone()
+                },
+                &frames,
+                None,
+            );
+            let shown = shown(&lossy);
+            assert_eq!(shown.len(), frames.len(), "every frame is still there");
+            for (frame, picture) in frames.iter().zip(&shown) {
+                for (wanted, got) in frame.as_chunks::<4>().0.iter().zip(picture.pixels()) {
+                    let apart = |c: usize| u32::from(wanted[c].abs_diff(got[c])).pow(2);
+                    let cost = apart(0) + 2 * apart(1) + apart(2);
+                    assert!(
+                        cost <= loss,
+                        "a pixel is {cost} from its color, over {loss}"
+                    );
+                }
+            }
+            sizes.push(lossy.len());
+        }
+        assert!(
+            sizes[1] * 10 < sizes[0] * 9 && sizes[2] < sizes[1],
+            "more loss, smaller file: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn one_palette_serves_every_frame_when_their_colors_fit() {
+        let frames = noisy_frames(96, 64, 64, 4);
+        let colors: std::collections::BTreeSet<[u8; 3]> = frames
+            .iter()
+            .flat_map(|frame| frame.as_chunks::<4>().0.iter().map(|p| [p[0], p[1], p[2]]))
+            .collect();
+        let exact = GifPlan {
+            change_threshold: 0,
+            ..plan(96, 64)
+        };
+        let own = written(&exact, &frames, None);
+        let shared = written(&exact, &frames, Some(colors.into_iter().collect()));
+        // The file has a palette of its own, and no frame brings one.
+        assert_eq!(shared[10] & 0x80, 0x80, "a global palette");
+        assert!(decode(&shared).iter().all(|frame| frame.palette.is_none()));
+        assert!(decode(&own).iter().all(|frame| frame.palette.is_some()));
+        assert!(
+            shared.len() < own.len(),
+            "{} against {}",
+            shared.len(),
+            own.len()
+        );
+        // The pictures are the same either way.
+        assert_eq!(shown(&shared), shown(&own));
+        for (frame, picture) in frames.iter().zip(shown(&shared)) {
+            assert_eq!(picture.as_raw(), frame);
+        }
+        // A color that is not in the shared palette gets the frame a palette of its own.
+        let mut odd = frames.clone();
+        odd[1][..4].copy_from_slice(&[250, 10, 10, 255]);
+        let colors: Vec<[u8; 3]> = (0..64u8)
+            .map(|i| [i * 4 + 3, i * 4 + 3, i * 4 + 3])
+            .collect();
+        let mixed = written(&exact, &odd, Some(colors));
+        assert_eq!(shown(&mixed)[1].get_pixel(0, 0).0, [250, 10, 10, 255]);
+    }
+
     #[test]
     fn delays_add_up_to_the_exact_duration() {
-        let writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite).unwrap();
+        let writer =
+            Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite, None).unwrap();
         let total: u32 = (0..12).map(|i| u32::from(writer.delay(i))).sum();
         assert_eq!(total, 100, "12 frames at 12 fps last one second");
     }
@@ -647,7 +996,7 @@ mod tests {
     fn identical_frames_merge_and_changes_are_cropped() {
         let (w, h) = (16, 8);
         let mut writer =
-            Writer::new(Vec::new(), 16, 8, &plan(16, 8), gif::Repeat::Infinite).unwrap();
+            Writer::new(Vec::new(), 16, 8, &plan(16, 8), gif::Repeat::Infinite, None).unwrap();
         let red = solid(w, h, [200, 0, 0, 255]);
         writer.push_at_rate(&red).unwrap();
         writer.push_at_rate(&red).unwrap(); // identical: merged
@@ -662,7 +1011,8 @@ mod tests {
         let bytes = writer.encoder.into_inner().unwrap();
         let frames = decode(&bytes);
         assert_eq!(frames.len(), 2);
-        let timing = Writer::new(Vec::new(), 1, 1, &plan(1, 1), gif::Repeat::Infinite).unwrap();
+        let timing =
+            Writer::new(Vec::new(), 1, 1, &plan(1, 1), gif::Repeat::Infinite, None).unwrap();
         assert_eq!(
             frames[0].delay,
             timing.delay(0) + timing.delay(1),
@@ -685,7 +1035,8 @@ mod tests {
         let mut denoising = plan(8, 8);
         denoising.denoise = 8;
         denoising.change_threshold = 2;
-        let mut writer = Writer::new(Vec::new(), 8, 8, &denoising, gif::Repeat::Infinite).unwrap();
+        let mut writer =
+            Writer::new(Vec::new(), 8, 8, &denoising, gif::Repeat::Infinite, None).unwrap();
         // A grey scene whose pixels flicker by up to 6 levels from frame to frame (sensor noise).
         for i in 0..6u8 {
             let frame: Vec<u8> = (0..w * h)
@@ -720,7 +1071,8 @@ mod tests {
 
         let mut plain = plan(8, 8);
         plain.change_threshold = 2;
-        let mut writer = Writer::new(Vec::new(), 8, 8, &plain, gif::Repeat::Infinite).unwrap();
+        let mut writer =
+            Writer::new(Vec::new(), 8, 8, &plain, gif::Repeat::Infinite, None).unwrap();
         for i in 0..6u8 {
             let frame: Vec<u8> = (0..w * h)
                 .flat_map(|p| {
@@ -741,7 +1093,8 @@ mod tests {
 
     #[test]
     fn transparent_sources_are_drawn_whole() {
-        let mut writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite).unwrap();
+        let mut writer =
+            Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite, None).unwrap();
         let mut frame = solid(4, 4, [10, 200, 10, 255]);
         frame[3] = 0; // one transparent pixel
         writer.push_at_rate(&frame).unwrap();

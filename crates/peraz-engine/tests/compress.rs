@@ -875,6 +875,31 @@ fn recompresses_a_gif_and_keeps_its_timing() {
     );
     // Every frame is kept, with its own delay.
     assert_eq!((frames, centiseconds), (source_frames, source_centiseconds));
+
+    // At the usual level the GIF keeps its size, every frame, and every delay, and still gets
+    // smaller: pixels may be a little off where that lets the data repeat itself.
+    let output = env.out.join("usual.gif");
+    let report = compress(
+        Some(&env.tools),
+        &env.caps,
+        &job(
+            env.fixtures.join("animation.gif"),
+            output.clone(),
+            Quality::Balanced,
+        ),
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    let Outcome::Compressed { output_bytes, .. } = report.outcome else {
+        panic!("{:?}", report.outcome)
+    };
+    assert!(
+        output_bytes * 100 < report.input_bytes.unwrap() * 97,
+        "{output_bytes} bytes"
+    );
+    let (w, h, frames, centiseconds) = gif_frames(&output);
+    assert_eq!((w, h), (480, 270));
+    assert_eq!((frames, centiseconds), (source_frames, source_centiseconds));
 }
 
 #[test]

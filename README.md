@@ -282,15 +282,18 @@ it usually is at `highest`.
 
 GIFs are encoded by Peraz itself: a palette per frame (imagequant) with dithering, unchanged
 pixels left transparent, frames cropped to what changed, and identical frames merged; light
-temporal denoising first keeps camera noise from counting as change. Default
+temporal denoising first keeps camera noise from counting as change. Below `-q highest`, the
+frame data is compressed with a little loss: a pixel may come out as a color close to its own
+where that lets a run of pixels repeat an earlier one, which is what makes GIF data small. Default
 GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `--max-width` and
 `--fps` override it.
 
 A GIF that stays a GIF is read by Peraz itself, without FFmpeg: every frame keeps its own delay
 (also the delays of 0 and 1 that browsers play in their own way), and the loop count stays what
-it was, so a GIF that plays once still plays once. The quality level sets the width and the
-palette, not the frame rate; `--fps` drops frames on request, and gives the time of a dropped
-frame to the one shown before it.
+it was, so a GIF that plays once still plays once. The quality level sets the width and how far
+pixels may be off, not the frame rate; `--fps` drops frames on request, and gives the time of a
+dropped frame to the one shown before it. Frames that are not scaled keep their own colors, in
+one palette for the whole file when they fit, and `-q highest` changes no pixel at all.
 
 `--format webp` and `--format avif` turn videos and GIFs into animated WebP or AVIF (same
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
