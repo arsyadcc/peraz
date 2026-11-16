@@ -13,6 +13,12 @@ between alpha versions.
 
 ### Added
 
+- HDR photos in HEIC stay HDR. A gain map stored the standard way (an ISO 21496-1 `tmap`
+  item, as current iPhones and macOS write it) is kept when the photo is compressed as a HEIC:
+  the gain map picture is turned and scaled with the main one and encoded again, and the file
+  says the same about how it is applied and what the HDR rendition is. An AVIF with a gain map
+  keeps it when it becomes a HEIC. A HEIC from an older iPhone, which marks its gain map as an
+  auxiliary picture, still loses it, with the warning.
 - HDR photos in JPEG stay HDR. A JPEG's gain map (Ultra HDR, as Android phones and Adobe's
   programs write it, and the layout iPhones use) is kept when the photo is compressed as a
   JPEG: it gets the same rotation and scaling as the picture, is encoded again, and is written

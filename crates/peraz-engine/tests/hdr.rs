@@ -392,3 +392,125 @@ fn a_jpeg_xl_gain_map_that_is_left_out_is_reported() {
         assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
     }
 }
+
+/// An FFmpeg that also writes HEIC (libx265), or `None` with a note.
+fn ffmpeg_with_x265() -> Option<(Toolchain, Capabilities)> {
+    let tools = ffmpeg()?;
+    if !tools.1.has_encoder("libx265") {
+        eprintln!("skipped: this FFmpeg has no libx265");
+        return None;
+    }
+    Some(tools)
+}
+
+#[test]
+fn a_heic_keeps_its_gain_map() {
+    use peraz_engine::heif::{decode, read_properties};
+    let dir = dir("heic");
+    let Some(tools) = ffmpeg_with_x265() else {
+        return;
+    };
+    // The HEIC is made on macOS only; the AVIF becomes a HEIC with its gain map everywhere.
+    for (name, everywhere) in [("hdr-gainmap.heic", false), ("hdr-gainmap.avif", true)] {
+        if !everywhere && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let Some(input) = sample(name) else { continue };
+        let before = read_properties(&std::fs::read(&input).unwrap())
+            .tone_map
+            .expect("the sample's gain map");
+        let source = decode(&tools.0, &input).unwrap();
+        let map = source.heif_gain_map.expect("the gain map's picture");
+        let picture = (source.image.width(), source.image.height());
+        let map_size = (map.pixels.width(), map.pixels.height());
+
+        let output = dir.0.join("out.heic");
+        let report = run_with(Some(&tools), &input, &output, ImageFormat::Heic);
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{name}: {:?}",
+            report.outcome
+        );
+        assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
+        assert!(
+            report.encoder.unwrap().contains("HDR gain map kept"),
+            "{name}"
+        );
+        // The result says the same about its gain map: how it is applied, and what the HDR
+        // rendition is.
+        let after = read_properties(&std::fs::read(&output).unwrap())
+            .tone_map
+            .expect("the result's gain map");
+        assert_eq!(after.metadata, before.metadata, "{name}");
+        assert_eq!(after.rendition, before.rendition, "{name}");
+        assert_eq!(after.map_color, before.map_color, "{name}");
+        // Read back, both pictures are there at their sizes.
+        let result = decode(&tools.0, &output).unwrap();
+        assert_eq!(
+            (result.image.width(), result.image.height()),
+            picture,
+            "{name}"
+        );
+        let kept = result.heif_gain_map.expect("the gain map's picture");
+        assert_eq!(
+            (kept.pixels.width(), kept.pixels.height()),
+            map_size,
+            "{name}"
+        );
+        // The gain map is the same picture: bright where the input's is bright.
+        let (a, b) = (map.pixels.to_luma8(), kept.pixels.to_luma8());
+        let apart: u64 = a
+            .pixels()
+            .zip(b.pixels())
+            .map(|(p, q)| u64::from(p[0].abs_diff(q[0])))
+            .sum::<u64>()
+            / u64::from(map_size.0 * map_size.1);
+        assert!(apart <= 6, "{name}: {apart} apart on average");
+
+        // Scaled down, the gain map is scaled with the picture.
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Heic;
+        recipe.image.max_width = Some(picture.0 / 2);
+        let job = Job {
+            input: input.clone(),
+            output: OutputTarget::File(output.clone()),
+            recipe,
+            existing: ExistingOutput::Replace,
+            recompress: true,
+        };
+        let report = compress(Some(&tools.0), &tools.1, &job, &mut |_| {}, &NOT_CANCELLED);
+        assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
+        let result = decode(&tools.0, &output).unwrap();
+        assert_eq!(result.image.width(), picture.0 / 2, "{name}");
+        let kept = result.heif_gain_map.expect("the gain map's picture");
+        assert_eq!(kept.pixels.width(), map_size.0 / 2, "{name}");
+    }
+}
+
+#[test]
+fn a_gain_map_goes_with_a_heic_of_an_odd_size() {
+    use peraz_engine::heif::{decode, read_properties};
+    let dir = dir("heic-odd");
+    let Some(tools) = ffmpeg_with_x265() else {
+        return;
+    };
+    let Some(input) = sample("hdr-gainmap.avif") else {
+        return;
+    };
+    // The picture cut to odd sides: HEVC codes even ones, so the file wraps the picture in a
+    // grid of its true size, and the gain map belongs to that grid.
+    let mut source = decode(&tools.0, &input).unwrap();
+    source.image = source.image.crop_imm(0, 0, 399, 299);
+    let map = source.heif_gain_map.as_mut().unwrap();
+    map.pixels = map.pixels.crop_imm(0, 0, 399, 299);
+    map.picture_size = (399, 299);
+    let (file, kept) = peraz_engine::heic::encode(&tools.0, &source, 60, None).unwrap();
+    assert!(kept);
+    let output = dir.0.join("odd.heic");
+    std::fs::write(&output, &file).unwrap();
+    assert!(read_properties(&file).tone_map.is_some());
+    let result = decode(&tools.0, &output).unwrap();
+    assert_eq!((result.image.width(), result.image.height()), (399, 299));
+    let kept = result.heif_gain_map.expect("the gain map's picture");
+    assert_eq!((kept.pixels.width(), kept.pixels.height()), (400, 300));
+}

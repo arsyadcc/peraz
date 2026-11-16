@@ -781,6 +781,7 @@ mod tests {
                 metadata: crate::metadata::Metadata::default(),
                 gain_map: false,
                 jpeg_gain_map: None,
+                heif_gain_map: None,
                 png_color: crate::image::PngColor::default(),
             };
             let (encoded, score) =
@@ -807,6 +808,7 @@ mod tests {
             metadata: crate::metadata::Metadata::default(),
             gain_map: false,
             jpeg_gain_map: None,
+            heif_gain_map: None,
             png_color: crate::image::PngColor::default(),
         };
         let (_, score) =

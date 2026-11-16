@@ -71,14 +71,106 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
     for transform in &properties.transforms {
         image = transform.apply(image);
     }
+    // The gain map picture, turned like the main one. When it cannot be read, the standard
+    // picture is what there is.
+    let heif_gain_map = properties.tone_map.clone().and_then(|description| {
+        let mut pixels = decode_item(tools, &url, description.map_item).ok()?;
+        for transform in &properties.transforms {
+            pixels = transform.apply(pixels);
+        }
+        Some(GainMap {
+            pixels,
+            picture_size: (image.width(), image.height()),
+            description,
+        })
+    });
     Ok(Decoded {
         image,
         icc: properties.icc,
         metadata: read_metadata(&bytes),
         gain_map: properties.gain_map,
         jpeg_gain_map: None,
+        heif_gain_map,
         png_color: crate::image::PngColor::default(),
     })
+}
+
+/// Decodes one picture item of a HEIF file as it is stored: gray if it is gray, else color.
+fn decode_item(
+    tools: &Toolchain,
+    url: &std::ffi::OsStr,
+    item: u32,
+) -> Result<DynamicImage, String> {
+    let probe = probe_items(tools, url)?;
+    let (filter, _) =
+        item_filter(&probe, Some(item), "item").ok_or("the file has no such picture")?;
+    let gray = probe.streams.iter().any(|stream| {
+        item_id(stream.id.as_ref()) == Some(item)
+            && stream
+                .pix_fmt
+                .as_deref()
+                .is_some_and(|p| p.starts_with("gray"))
+    });
+    let (format, range) = if gray {
+        ("gray", "scale=in_range=auto:out_range=full,")
+    } else {
+        ("rgb24", "")
+    };
+    let mut cmd = command(&tools.ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-noautorotate",
+        "-i",
+    ])
+    .arg(url)
+    .args([
+        "-filter_complex",
+        &format!("{filter};[item]{range}format={format}[out]"),
+    ])
+    .args([
+        "-map",
+        "[out]",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let output = cmd
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", tools.ffmpeg.display()))?;
+    if !output.status.success() {
+        return Err(check("ffmpeg", output).unwrap_err().to_string());
+    }
+    image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
+        .map_err(|e| format!("cannot read the decoded picture: {e}"))
+}
+
+/// What `ffprobe` says about the pictures in a HEIF file.
+fn probe_items(tools: &Toolchain, url: &std::ffi::OsStr) -> Result<Probe, String> {
+    let mut cmd = command(&tools.ffprobe);
+    cmd.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_stream_groups",
+        "-i",
+    ])
+    .arg(url);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", tools.ffprobe.display()))?;
+    let json = check("ffprobe", output).map_err(|e| e.to_string())?;
+    serde_json::from_str(&json).map_err(|e| format!("unexpected ffprobe output: {e}"))
 }
 
 fn file_url(path: &Path) -> Result<std::ffi::OsString, String> {
@@ -191,23 +283,7 @@ fn picture_filter(
     url: &std::ffi::OsStr,
     properties: &Properties,
 ) -> Result<(String, bool), String> {
-    let mut cmd = command(&tools.ffprobe);
-    cmd.args([
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_streams",
-        "-show_stream_groups",
-        "-i",
-    ])
-    .arg(url);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("could not run {}: {e}", tools.ffprobe.display()))?;
-    let json = check("ffprobe", output).map_err(|e| e.to_string())?;
-    let probe: Probe =
-        serde_json::from_str(&json).map_err(|e| format!("unexpected ffprobe output: {e}"))?;
+    let probe = probe_items(tools, url)?;
     let (color, size) = item_filter(&probe, properties.primary, "color")
         .or_else(|| fallback_filter(&probe, "color"))
         .ok_or("the file contains no picture")?;
@@ -335,6 +411,33 @@ pub struct Properties {
     pub transforms: Vec<Transform>,
     /// The file holds an HDR gain map for its picture.
     pub gain_map: bool,
+    /// The gain map as ISO 21496-1 stores it, when the file has one that way.
+    pub tone_map: Option<ToneMap>,
+}
+
+/// A gain map stored the ISO 21496-1 way: an item of type `tmap` derived from the primary
+/// picture and a gain map picture.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToneMap {
+    /// The item that holds the gain map picture.
+    pub map_item: u32,
+    /// The `tmap` item's data: how the gain map is applied.
+    pub metadata: Vec<u8>,
+    /// The properties of the `tmap` item that describe the HDR rendition (its color coding,
+    /// bit depth, and light levels), as whole boxes.
+    pub rendition: Vec<Vec<u8>>,
+    /// The gain map picture's own color coding (`colr`), as a whole box.
+    pub map_color: Option<Vec<u8>>,
+}
+
+/// A gain map taken from a HEIF file: its picture, upright like the main one, and what the
+/// file says about it.
+#[derive(Debug, Clone)]
+pub struct GainMap {
+    pub pixels: DynamicImage,
+    /// The main picture's size, upright.
+    pub picture_size: (u32, u32),
+    pub description: ToneMap,
 }
 
 /// The `auxC` type of an HDR gain map as Apple's cameras store it.
@@ -359,20 +462,21 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     let mut properties: Vec<Bx> = Vec::new();
     let mut associations: Vec<(u32, Vec<u16>)> = Vec::new();
     let mut auxiliary: Vec<(u32, u32)> = Vec::new();
-    // ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied.
-    let mut tone_map_item = false;
+    // ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied
+    // and is derived from the picture and the gain map picture.
+    let mut tone_map_item = None;
+    let mut derived: Vec<(u32, u32)> = Vec::new();
+    let (mut locations, mut inline_data) = (None, None);
     for child in boxes(meta_children) {
         match &child.kind {
-            b"iref" => auxiliary = parse_auxl(child.payload)?,
-            b"iinf" => tone_map_item = has_item_of_type(child.payload, *b"tmap"),
-            b"pitm" => {
-                let version = *child.payload.first()?;
-                primary = Some(if version == 0 {
-                    u32::from(be16(child.payload, 4)?)
-                } else {
-                    be32(child.payload, 4)?
-                });
+            b"iref" => {
+                auxiliary = references(child.payload, *b"auxl")?;
+                derived = references(child.payload, *b"dimg")?;
             }
+            b"iinf" => tone_map_item = item_of_type(child.payload, *b"tmap"),
+            b"iloc" => locations = Some(child.payload),
+            b"idat" => inline_data = Some(child.payload),
+            b"pitm" => primary = Some(primary_item(child.payload)?),
             b"iprp" => {
                 for part in boxes(child.payload) {
                     match &part.kind {
@@ -413,7 +517,27 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     };
     // Alpha planes, not depth maps or gain maps.
     let alpha = auxiliary_of(ALPHA_TYPES);
-    let gain_map = tone_map_item || auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
+    let gain_map = tone_map_item.is_some() || auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
+    let tone_map = tone_map_item.and_then(|item| {
+        // The `tmap` item is derived from the primary picture, then the gain map picture.
+        let sources: Vec<u32> = derived
+            .iter()
+            .filter(|(from, _)| *from == item)
+            .map(|(_, to)| *to)
+            .collect();
+        let [base, map_item] = sources[..] else {
+            return None;
+        };
+        let metadata = item_data(file, locations?, inline_data, item)?;
+        (base == primary).then(|| {
+            tone_map(
+                map_item,
+                metadata,
+                &properties_of(item),
+                &properties_of(map_item),
+            )
+        })
+    });
 
     let icc_of = |b: &Bx| {
         (&b.kind == b"colr")
@@ -425,7 +549,28 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         .iter()
         .find_map(|b| icc_of(b))
         .or_else(|| properties.iter().find_map(icc_of));
-    let transforms = own
+    let transforms = transforms_of(&own);
+    Some(Properties {
+        primary: Some(primary),
+        alpha,
+        icc,
+        transforms,
+        gain_map,
+        tone_map,
+    })
+}
+
+/// `pitm`: the primary item's ID (16 bits in version 0, 32 bits after).
+fn primary_item(payload: &[u8]) -> Option<u32> {
+    match *payload.first()? {
+        0 => be16(payload, 4).map(u32::from),
+        _ => be32(payload, 4),
+    }
+}
+
+/// The turns and flips among an item's properties, in file order.
+fn transforms_of(properties: &[&Bx]) -> Vec<Transform> {
+    properties
         .iter()
         .filter_map(|b| match &b.kind {
             b"irot" => Some(Transform::Rotate {
@@ -438,35 +583,41 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
             }),
             _ => None,
         })
-        .collect();
-    Some(Properties {
-        primary: Some(primary),
-        alpha,
-        icc,
-        transforms,
-        gain_map,
-    })
+        .collect()
 }
 
-/// `iinf`: whether one of its items (`infe`, version 2 or 3) has this type.
-fn has_item_of_type(payload: &[u8], kind: [u8; 4]) -> bool {
-    let Some(&version) = payload.first() else {
-        return false;
-    };
+/// What a file says about its gain map: the data of its `tmap` item, the properties of that
+/// item that describe the HDR rendition, and the gain map picture's color coding.
+fn tone_map(map_item: u32, metadata: Vec<u8>, rendition: &[&Bx], map: &[&Bx]) -> ToneMap {
+    let whole = |b: &&Bx| make_box(b.kind, b.payload);
+    ToneMap {
+        map_item,
+        metadata,
+        rendition: rendition
+            .iter()
+            .filter(|b| matches!(&b.kind, b"colr" | b"pixi" | b"clli" | b"mdcv" | b"amve"))
+            .filter_map(whole)
+            .collect(),
+        map_color: map.iter().find(|b| &b.kind == b"colr").and_then(whole),
+    }
+}
+
+/// `iinf`: the first of its items (`infe`, version 2 or 3) that has this type.
+fn item_of_type(payload: &[u8], kind: [u8; 4]) -> Option<u32> {
+    let version = *payload.first()?;
     // After the version and flags: the number of items, in 2 or 4 bytes.
-    let Some(entries) = payload.get(if version == 0 { 6 } else { 8 }..) else {
-        return false;
-    };
-    boxes(entries).any(|entry| {
-        &entry.kind == b"infe"
-            && match entry.payload.first() {
-                // Version and flags, the item's ID (2 bytes, or 4 in version 3), a protection
-                // index (2 bytes), then the type.
-                Some(2) => entry.payload.get(8..12) == Some(&kind),
-                Some(3) => entry.payload.get(10..14) == Some(&kind),
-                _ => false,
+    let entries = payload.get(if version == 0 { 6 } else { 8 }..)?;
+    boxes(entries)
+        .filter(|entry| &entry.kind == b"infe")
+        .find_map(|entry| match entry.payload.first() {
+            // Version and flags, the item's ID (2 bytes, or 4 in version 3), a protection
+            // index (2 bytes), then the type.
+            Some(2) if entry.payload.get(8..12) == Some(&kind) => {
+                be16(entry.payload, 4).map(u32::from)
             }
-    })
+            Some(3) if entry.payload.get(10..14) == Some(&kind) => be32(entry.payload, 4),
+            _ => None,
+        })
 }
 
 /// Reads the EXIF and XMP items of a HEIF file. What cannot be followed is left out.
@@ -592,8 +743,9 @@ fn icc_payload(colr: &[u8]) -> Option<Vec<u8>> {
     (kind == b"prof" || kind == b"rICC").then(|| colr[4..].to_vec())
 }
 
-/// `iref`: the (auxiliary item, main item) pairs of its `auxl` references.
-fn parse_auxl(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
+/// `iref`: the (from item, to item) pairs of its references of one type, in file order:
+/// `auxl` from an auxiliary picture to its main one, `dimg` from a derived item to its sources.
+fn references(payload: &[u8], kind: [u8; 4]) -> Option<Vec<(u32, u32)>> {
     let wide = *payload.first()? != 0; // version 1: 32-bit item IDs
     let id = |at: usize| {
         if wide {
@@ -605,7 +757,7 @@ fn parse_auxl(payload: &[u8]) -> Option<Vec<(u32, u32)>> {
     let width = if wide { 4 } else { 2 };
     let mut pairs = Vec::new();
     for reference in boxes(payload.get(4..)?) {
-        if &reference.kind != b"auxl" {
+        if reference.kind != kind {
             continue;
         }
         let at = offset_in(payload, reference.payload)?;

@@ -27,14 +27,15 @@ pub fn crf(quality: u8) -> u8 {
     (100 - quality.min(100)) / 2
 }
 
-/// Encodes a picture as HEIC at a quality setting (0–100), with its color profile, and with
-/// its transparency when it has any.
+/// Encodes a picture as HEIC at a quality setting (0–100), with its color profile, with its
+/// transparency when it has any, and with the HDR gain map a HEIC or AVIF input had. Returns
+/// the file, and whether a gain map is in it.
 pub fn encode(
     tools: &Toolchain,
     prepared: &Decoded,
     quality: u8,
     metadata: Option<&Metadata>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
     let (width, height) = (prepared.image.width(), prepared.image.height());
     let rgba = prepared.image.to_rgba8();
     let has_alpha = rgba.pixels().any(|p| p[3] < 255);
@@ -54,19 +55,67 @@ pub fn encode(
         } else {
             None
         };
-        container(
+        // The gain map: when it cannot be encoded, the standard picture is still written.
+        let gain_map = prepared
+            .heif_gain_map
+            .as_ref()
+            .and_then(|map| gain_map_picture(tools, &workdir, map, (width, height), quality).ok());
+        let kept_gain_map = gain_map.is_some();
+        let file = container(
             &Picture {
                 size: (width, height),
                 coded,
                 color,
                 alpha,
+                gain_map,
             },
             prepared.icc.as_deref(),
             metadata,
-        )
+        )?;
+        Ok((file, kept_gain_map))
     })();
     let _ = std::fs::remove_dir_all(&workdir);
     result
+}
+
+/// The gain map for a picture that is now `size`: scaled by the same factor as the picture
+/// (to even sides, which HEVC codes), and coded like a plane of its own.
+fn gain_map_picture<'a>(
+    tools: &Toolchain,
+    workdir: &Path,
+    map: &'a crate::heif::GainMap,
+    size: (u32, u32),
+    quality: u8,
+) -> Result<MapPicture<'a>, String> {
+    let scaled = |length: u32, now: u32, was: u32| {
+        let pixels = u64::from(length) * u64::from(now) / u64::from(was.max(1));
+        let pixels = u32::try_from(pixels).unwrap_or(u32::MAX).max(2);
+        pixels + pixels % 2
+    };
+    let wanted = (
+        scaled(map.pixels.width(), size.0, map.picture_size.0),
+        scaled(map.pixels.height(), size.1, map.picture_size.1),
+    );
+    let pixels = if wanted == (map.pixels.width(), map.pixels.height()) {
+        map.pixels.clone()
+    } else {
+        map.pixels
+            .resize_exact(wanted.0, wanted.1, image::imageops::FilterType::Lanczos3)
+    };
+    // A gain map is smooth, and its errors show as halos: a finer setting, as for alpha.
+    let finer = crf(quality).saturating_sub(8);
+    let gray = pixels.color().channel_count() == 1;
+    let coded = if gray {
+        hevc_picture(tools, workdir, Plane::Alpha(&pixels.to_luma8()), finer)?
+    } else {
+        hevc_picture(tools, workdir, Plane::Color(&pixels.to_rgb8()), finer)?
+    };
+    Ok(MapPicture {
+        size: wanted,
+        coded,
+        gray,
+        description: &map.description,
+    })
 }
 
 /// `image` enlarged to `size` by repeating its last column and row.
@@ -187,14 +236,28 @@ fn coded_picture(mp4: &[u8]) -> Option<Coded> {
 }
 
 /// What goes into the container.
-struct Picture {
+struct Picture<'a> {
     /// The size shown.
     size: (u32, u32),
     /// The size coded: `size` rounded up to even numbers.
     coded: (u32, u32),
     color: Coded,
     alpha: Option<Coded>,
+    gain_map: Option<MapPicture<'a>>,
 }
+
+/// An HDR gain map, coded, with what the input said about it.
+struct MapPicture<'a> {
+    size: (u32, u32),
+    coded: Coded,
+    gray: bool,
+    description: &'a crate::heif::ToneMap,
+}
+
+/// A reference from one item to others: its type, the item it is from, and the items it is to.
+type Reference = ([u8; 4], u16, Vec<u16>);
+/// A group of items: its type, its own ID, and its members.
+type Group = ([u8; 4], u32, Vec<u16>);
 
 /// An item of the HEIF file.
 struct Item {
@@ -293,7 +356,8 @@ fn container(
 
     let odd = picture.coded != picture.size;
     let mut items = Vec::new();
-    let mut references: Vec<([u8; 4], u16, u16)> = Vec::new();
+    let mut references: Vec<Reference> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
     // What a picture's item carries, whether it is the coded picture or a grid over it.
     let mut shown = vec![(shown_size, false), (coding, false)];
     shown.extend(profile.map(|profile| (profile, false)));
@@ -316,7 +380,7 @@ fn container(
             properties: vec![(color_configuration, true), (coded_size, false)],
             content_type: None,
         });
-        references.push((*b"dimg", primary, 2));
+        references.push((*b"dimg", primary, vec![2]));
     } else {
         let mut all = vec![(color_configuration, true)];
         all.extend(shown);
@@ -351,7 +415,7 @@ fn container(
                 properties: vec![(configuration, true), (coded_size, false)],
                 content_type: None,
             });
-            references.push((*b"dimg", 3, 4));
+            references.push((*b"dimg", 3, vec![4]));
         } else {
             let mut all = vec![(configuration, true)];
             all.extend(marks);
@@ -365,10 +429,67 @@ fn container(
             });
         }
         // The alpha picture is an auxiliary picture of the primary one.
-        references.push((*b"auxl", 3, primary));
+        references.push((*b"auxl", 3, vec![primary]));
+    }
+    if let Some(map) = &picture.gain_map {
+        let size = (shown_size, primary);
+        gain_map_items(map, size, &mut properties, &mut items, &mut references);
+        // A reader that knows gain maps shows the HDR rendition in the picture's place.
+        groups.push((*b"altr", 9, vec![8, primary]));
     }
     metadata_items(metadata, primary, &mut items, &mut references);
-    write_file(&items, primary, &references, &properties)
+    write_file(&items, primary, &references, &groups, &properties)
+}
+
+/// Adds the items of an HDR gain map: the gain map picture (item 7), and the item that stands
+/// for the HDR rendition (item 8), derived from the primary picture and the gain map.
+/// `shown` is the primary picture's size property and its item.
+fn gain_map_items(
+    map: &MapPicture,
+    (shown_size, primary): (u8, u16),
+    properties: &mut Vec<Vec<u8>>,
+    items: &mut Vec<Item>,
+    references: &mut Vec<Reference>,
+) {
+    let mut add = |property: Vec<u8>| {
+        properties.push(property);
+        u8::try_from(properties.len()).unwrap_or(u8::MAX)
+    };
+    // The gain map picture, not to be shown by itself.
+    let configuration = add(boxed(*b"hvcC", &map.coded.configuration));
+    let size = add(size_box(map.size));
+    let channels: &[u8] = if map.gray { &[1, 8] } else { &[3, 8, 8, 8] };
+    let mut described = vec![
+        (configuration, true),
+        (size, false),
+        (add(full_box(*b"pixi", 0, 0, channels)), false),
+    ];
+    if let Some(color) = &map.description.map_color {
+        described.push((add(color.clone()), false));
+    }
+    items.push(Item {
+        id: 7,
+        kind: *b"hvc1",
+        hidden: true,
+        data: map.coded.frame.clone(),
+        properties: described,
+        content_type: None,
+    });
+    // The HDR rendition: how the gain map is applied is its data, and it is described as
+    // the input described it (the rendition's color coding and bit depth).
+    let mut rendition = vec![(shown_size, false)];
+    for property in &map.description.rendition {
+        rendition.push((add(property.clone()), false));
+    }
+    items.push(Item {
+        id: 8,
+        kind: *b"tmap",
+        hidden: false,
+        data: map.description.metadata.clone(),
+        properties: rendition,
+        content_type: None,
+    });
+    references.push((*b"dimg", 8, vec![primary, 7]));
 }
 
 /// Adds the EXIF and XMP items, which describe the primary picture.
@@ -376,7 +497,7 @@ fn metadata_items(
     metadata: Option<&Metadata>,
     primary: u16,
     items: &mut Vec<Item>,
-    references: &mut Vec<([u8; 4], u16, u16)>,
+    references: &mut Vec<Reference>,
 ) {
     if let Some(exif) = metadata.and_then(|m| m.exif.as_deref()) {
         items.push(Item {
@@ -388,7 +509,7 @@ fn metadata_items(
             properties: Vec::new(),
             content_type: None,
         });
-        references.push((*b"cdsc", 5, primary));
+        references.push((*b"cdsc", 5, vec![primary]));
     }
     if let Some(xmp) = metadata.and_then(|m| m.xmp.as_deref()) {
         items.push(Item {
@@ -399,17 +520,23 @@ fn metadata_items(
             properties: Vec::new(),
             content_type: Some("application/rdf+xml"),
         });
-        references.push((*b"cdsc", 6, primary));
+        references.push((*b"cdsc", 6, vec![primary]));
     }
 }
 
 fn write_file(
     items: &[Item],
     primary: u16,
-    references: &[([u8; 4], u16, u16)],
+    references: &[Reference],
+    groups: &[Group],
     properties: &[Vec<u8>],
 ) -> Result<Vec<u8>, String> {
-    let ftyp = boxed(*b"ftyp", b"heic\0\0\0\0mif1heic");
+    // The `tmap` brand says that the file may hold a gain map.
+    let ftyp = if groups.is_empty() {
+        boxed(*b"ftyp", b"heic\0\0\0\0mif1heic")
+    } else {
+        boxed(*b"ftyp", b"heic\0\0\0\0mif1heictmap")
+    };
     let mut handler = vec![0; 4];
     handler.extend_from_slice(b"pict");
     handler.extend([0; 13]);
@@ -432,9 +559,24 @@ fn write_file(
     let mut links = Vec::new();
     for (kind, from, to) in references {
         let mut link = from.to_be_bytes().to_vec();
-        link.extend(1u16.to_be_bytes());
-        link.extend(to.to_be_bytes());
+        link.extend(u16::try_from(to.len()).unwrap_or(u16::MAX).to_be_bytes());
+        for item in to {
+            link.extend(item.to_be_bytes());
+        }
         links.extend(boxed(*kind, &link));
+    }
+    let mut grouped = Vec::new();
+    for (kind, id, members) in groups {
+        let mut group = id.to_be_bytes().to_vec();
+        group.extend(
+            u32::try_from(members.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for member in members {
+            group.extend(u32::from(*member).to_be_bytes());
+        }
+        grouped.extend(full_box(*kind, 0, 0, &group));
     }
     let described: Vec<&Item> = items.iter().filter(|i| !i.properties.is_empty()).collect();
     let mut associations = u32::try_from(described.len())
@@ -480,6 +622,9 @@ fn write_file(
             body.extend(full_box(*b"iref", 0, 0, &links));
         }
         body.extend(boxed(*b"iprp", &property_boxes));
+        if !grouped.is_empty() {
+            body.extend(boxed(*b"grpl", &grouped));
+        }
         Ok(full_box(*b"meta", 0, 0, &body))
     };
     let data_start = ftyp.len() + meta(0)?.len() + 8;
@@ -522,6 +667,7 @@ mod tests {
                 coded: (640, 480),
                 color: coded(7),
                 alpha: None,
+                gain_map: None,
             },
             Some(b"a color profile"),
             Some(&Metadata {
@@ -557,6 +703,7 @@ mod tests {
                 coded: (642, 480),
                 color: coded(7),
                 alpha: Some(coded(9)),
+                gain_map: None,
             },
             None,
             None,
