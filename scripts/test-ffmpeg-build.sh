@@ -97,15 +97,17 @@ pix_fmt=$("$probe" -v error -select_streams v:0 -show_entries stream=pix_fmt -of
 [[ ${pix_fmt%$'\r'} == yuv420p10le ]] || fail "10-bit HEVC came out as $pix_fmt"
 
 # ffprobe is a build of its own, without encoders, muxers, and filters. It must still read
-# everything ffmpeg reads: the same decoders, and the same demuxers (but for ffmpeg's lavfi
-# source, a device, which the list marks with a `d` in the place of a name).
+# everything ffmpeg reads: the same decoders, but for the ones that hand the work to a
+# graphics driver (AMF, NVIDIA), which reading a file's description never needs; and the same
+# demuxers, but for ffmpeg's lavfi source, a device, which the list marks with a `d` in the
+# place of a name.
 probe_version=$("$probe" -hide_banner -version)
 grep -q -- --enable-libx264 <<<"$probe_version" && fail "ffprobe was built with the encoder libraries"
-[[ -z $("$probe" -hide_banner -encoders | sed '1,/^ ------/d') ]] || fail "ffprobe has encoders"
-names() { sed -E '1,/^ *-+$/d' | awk '{print $2}' | sort; }
+[[ -z $("$probe" -hide_banner -encoders | names) ]] || fail "ffprobe has encoders"
+names() { tr -d '\r' | sed -E '1,/^ *-+$/d' | awk '{print $2}' | sort; }
 for kind in decoders demuxers; do
   missing=$(comm -23 <("$ff" -hide_banner "-$kind" | names) <("$probe" -hide_banner "-$kind" | names) \
-    | grep -vx d || true)
+    | grep -vxE 'd|.*_(amf|cuvid|qsv)' || true)
   [[ -z $missing ]] || fail "ffprobe lacks these $kind that ffmpeg has: $(tr '\n' ' ' <<<"$missing")"
 done
 ffmpeg_size=$(wc -c < "$ff") probe_size=$(wc -c < "$probe")
