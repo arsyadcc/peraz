@@ -249,9 +249,12 @@ IPTC where the output format can hold them (with the orientation reset, since th
 stored upright). Transparent images converted to JPEG are placed on white, or on the color
 given with `--background` (a page's background, for example).
 
-HDR photos are not kept as HDR yet. A photo with a gain map (most photos from current phones:
-HEIC from iPhones, Ultra HDR JPEG from Android, also AVIF and JPEG XL) is compressed as its
-standard picture, and the report warns that the gain map was removed. A picture that is HDR by
+An HDR photo in a JPEG stays HDR: its gain map (Ultra HDR from Android and Adobe, and the
+layout iPhones use) is compressed with the picture, turned and scaled like it, and written
+back with its description, so HDR screens still show the photo brighter and every other
+program shows the standard picture. Other formats do not keep a gain map yet: a HEIC, AVIF, or
+JPEG XL with one, and a JPEG converted to another format, is compressed as its standard
+picture, and the report warns that the gain map was removed. A picture that is HDR by
 its transfer function alone (PQ or HLG, such as a 10-bit AVIF) is skipped, because read as a
 standard picture it would come out dark and flat.
 

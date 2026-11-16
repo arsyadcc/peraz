@@ -76,6 +76,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         icc: properties.icc,
         metadata: read_metadata(&bytes),
         gain_map: properties.gain_map,
+        jpeg_gain_map: None,
         png_color: crate::image::PngColor::default(),
     })
 }

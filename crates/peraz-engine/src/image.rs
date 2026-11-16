@@ -25,6 +25,8 @@ pub struct EncodedImage {
     pub encoder: String,
     /// What could not be written although it was asked for (metadata that did not fit).
     pub warnings: Vec<String>,
+    /// The input's HDR gain map is in the result.
+    pub kept_gain_map: bool,
 }
 
 /// A decoded picture, already upright, with its color profile and its metadata (which is
@@ -34,8 +36,10 @@ pub struct Decoded {
     pub image: DynamicImage,
     pub icc: Option<Vec<u8>>,
     pub metadata: Metadata,
-    /// The file holds an HDR gain map next to this picture, which no output carries yet.
+    /// The file holds an HDR gain map next to this picture.
     pub gain_map: bool,
+    /// The gain map of a JPEG, which a JPEG made from it can carry.
+    pub jpeg_gain_map: Option<crate::gainmap::JpegGainMap>,
     /// What a PNG says about its colors without a profile (gamma, primaries, "this is sRGB").
     pub png_color: PngColor,
 }
@@ -67,6 +71,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         icc,
         metadata,
         gain_map,
+        jpeg_gain_map,
         png_color,
     } = decoded;
     if let Some((w, h)) = fit_within(
@@ -81,6 +86,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         icc,
         metadata,
         gain_map,
+        jpeg_gain_map,
         png_color,
     }
 }
@@ -114,6 +120,7 @@ fn encode_image_inner(
     let kept = Some(metadata).filter(|m| plan.keep_metadata && !m.is_empty());
     let (width, height) = (image.width(), image.height());
     let mut warnings = Vec::new();
+    let mut kept_gain_map = false;
     let (bytes, encoder) = match plan.encoding {
         ImageEncoding::Jpeg {
             quality,
@@ -121,10 +128,24 @@ fn encode_image_inner(
         } => {
             let (jpeg, settings) = jpeg_of(image, plan, quality, progressive, icc.as_deref())?;
             warnings.extend(kept.map(Metadata::too_large_for_jpeg).unwrap_or_default());
-            (
-                kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg)),
-                settings.name(),
-            )
+            let mut jpeg = kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg));
+            // An HDR photo stays one: its gain map follows the picture, turned and scaled
+            // like it. When that fails, the standard picture is still written.
+            if let Some(map) = &prepared.jpeg_gain_map {
+                match gain_map_jpeg(map, (width, height), settings) {
+                    Ok(encoded) => {
+                        jpeg = map.attach(&jpeg, &encoded);
+                        kept_gain_map = true;
+                    }
+                    Err(why) => warnings.push(format!("the HDR gain map was left out: {why}")),
+                }
+            }
+            let name = if kept_gain_map {
+                format!("{}, HDR gain map kept", settings.name())
+            } else {
+                settings.name()
+            };
+            (jpeg, name)
         }
         ImageEncoding::Png {
             min_quality,
@@ -187,7 +208,50 @@ fn encode_image_inner(
         height,
         encoder,
         warnings,
+        kept_gain_map,
     })
+}
+
+/// The quality a gain map is encoded at, at least: it is smooth, so this costs little, and
+/// its errors would show as halos in the bright parts of the picture.
+const GAIN_MAP_QUALITY: u8 = 85;
+
+/// A JPEG's gain map for the picture at its new `size`: encoded again as a JPEG (gray if it
+/// was gray), with the description the stored gain map had.
+fn gain_map_jpeg(
+    map: &crate::gainmap::JpegGainMap,
+    size: (u32, u32),
+    picture: JpegSettings,
+) -> Result<Vec<u8>, String> {
+    let pixels = map.pixels_for(size)?;
+    let settings = JpegSettings {
+        quality: picture.quality.max(GAIN_MAP_QUALITY),
+        full_color: false,
+        ..picture
+    };
+    let (width, height) = (pixels.width(), pixels.height());
+    let encoded = if pixels.color().channel_count() == 1 {
+        let space = mozjpeg::ColorSpace::JCS_GRAYSCALE;
+        jpeg_from_pixels(
+            pixels.to_luma8().as_raw(),
+            width,
+            height,
+            space,
+            settings,
+            None,
+        )?
+    } else {
+        let space = mozjpeg::ColorSpace::JCS_RGB;
+        jpeg_from_pixels(
+            pixels.to_rgb8().as_raw(),
+            width,
+            height,
+            space,
+            settings,
+            None,
+        )?
+    };
+    Ok(map.described(&encoded))
 }
 
 /// Decodes a JPEG/PNG/WebP/BMP/TIFF image with its EXIF orientation applied and its ICC profile.
@@ -235,6 +299,15 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
                 .filter(|profile| profile_fits(profile, decoded.image.color()));
         }
         decoded.gain_map = crate::metadata::has_gain_map(bytes);
+        // The gain map itself, with how the picture was stored: it shares the picture's turn
+        // and is scaled with it.
+        decoded.jpeg_gain_map = crate::gainmap::of_jpeg(bytes).map(|mut map| {
+            map.orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes))
+                .and_then(|mut decoder| decoder.orientation())
+                .unwrap_or(image::metadata::Orientation::NoTransforms);
+            map.picture_size = (decoded.image.width(), decoded.image.height());
+            map
+        });
     } else if bytes.starts_with(b"\x89PNG") {
         let (color, profile) = png_color(bytes, decoded.icc.is_some());
         decoded.png_color = color;
@@ -270,6 +343,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
         image,
         metadata,
         gain_map: false,
+        jpeg_gain_map: None,
         png_color: PngColor::default(),
     })
 }

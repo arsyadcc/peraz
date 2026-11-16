@@ -311,6 +311,7 @@ fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String
         icc,
         metadata,
         gain_map: false,
+        jpeg_gain_map: None,
         png_color: crate::image::PngColor::default(),
     })
 }

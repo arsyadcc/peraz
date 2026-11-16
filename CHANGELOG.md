@@ -13,6 +13,12 @@ between alpha versions.
 
 ### Added
 
+- HDR photos in JPEG stay HDR. A JPEG's gain map (Ultra HDR, as Android phones and Adobe's
+  programs write it, and the layout iPhones use) is kept when the photo is compressed as a
+  JPEG: it gets the same rotation and scaling as the picture, is encoded again, and is written
+  back with its description, the format's name in the picture's XMP, and a new MPF segment.
+  Its bytes count toward `--target-size`. Before, the result was the standard picture alone,
+  with a warning; other output formats still give that.
 - `--jpeg-mode baseline` (recipe key `jpeg_mode`) writes baseline JPEGs, for old systems,
   printers, and upload forms that do not read progressive ones. The default stays progressive.
   A baseline JPEG keeps mozjpeg's trellis quantization and optimized tables, and is a few

@@ -470,6 +470,8 @@ fn make_image(
             score.score = 100.0;
         }
     }
+    // The gain map the encoder attached is gone when the JPEG's own data took its place.
+    let kept_gain_map = encoded.kept_gain_map && !identical;
     report.encoder = Some(encoded.encoder);
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
@@ -483,7 +485,7 @@ fn make_image(
     if matches!(outcome, Outcome::Compressed { .. }) {
         report.warnings = encoded.warnings;
         // A JPEG kept whole with its metadata keeps its gain map; no other result has one.
-        if gain_map && !(identical && plan.keep_metadata) {
+        if gain_map && !kept_gain_map && !(identical && plan.keep_metadata) {
             report.warnings.push(GAIN_MAP_REMOVED.to_owned());
         }
     }

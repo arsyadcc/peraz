@@ -101,37 +101,163 @@ fn warns_about_the_gain_map(report: &Report) -> bool {
     report.warnings.iter().any(|w| w.contains("HDR gain map"))
 }
 
+/// The size of a JPEG picture, as stored.
+fn jpeg_size(jpeg: &[u8]) -> (u32, u32) {
+    let picture = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).unwrap();
+    (picture.width(), picture.height())
+}
+
+/// Where the second picture of a JPEG file starts, as its MPF segment says.
+fn second_picture(file: &[u8]) -> usize {
+    let at = file
+        .windows(4)
+        .position(|w| w == b"MPF\0")
+        .expect("an MPF segment");
+    // The byte order mark follows; the second entry's offset counts from it.
+    let base = at + 4;
+    let number = |at: usize| u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+    assert_eq!(&file[base..base + 4], b"MM\0\x2A");
+    base + number(base + 50 + 16 + 8)
+}
+
+fn run_recipe(input: &Path, output: &Path, recipe: Recipe) -> Report {
+    let job = Job {
+        input: input.to_owned(),
+        output: OutputTarget::File(output.to_owned()),
+        recipe,
+        existing: ExistingOutput::Replace,
+        recompress: true,
+    };
+    compress(
+        None,
+        &Capabilities::default(),
+        &job,
+        &mut |_| {},
+        &NOT_CANCELLED,
+    )
+}
+
 #[test]
-fn a_jpeg_gain_map_that_is_left_out_is_reported() {
+fn a_jpeg_keeps_its_gain_map() {
     let dir = dir("jpeg");
     // As Android phones and Photoshop store it (Ultra HDR), and as iPhones do.
     for name in ["hdr-ultrahdr.jpg", "hdr-apple-gainmap.jpg"] {
         let Some(input) = sample(name) else { continue };
+        let source = std::fs::read(&input).unwrap();
+        let before = peraz_engine::gainmap::of_jpeg(&source).expect("the sample's gain map");
+        let (picture, map) = (jpeg_size(&source), jpeg_size(&before.jpeg));
+
+        // Compressed as a JPEG, the photo is smaller and still has its gain map, with the
+        // same description: nothing to warn about.
+        let output = dir.0.join("out.jpg");
+        let report = run(&input, &output, ImageFormat::Keep);
         assert!(
-            peraz_engine::metadata::has_gain_map(&std::fs::read(&input).unwrap()),
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{name}: {:?}",
+            report.outcome
+        );
+        assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
+        assert!(
+            report.encoder.unwrap().contains("HDR gain map kept"),
             "{name}"
         );
-        for (format, output) in [
-            (ImageFormat::Keep, "out.jpg"),
-            (ImageFormat::Webp, "out.webp"),
-        ] {
-            let report = run(&input, &dir.0.join(output), format);
-            assert!(
-                matches!(report.outcome, Outcome::Compressed { .. }),
-                "{name}: {:?}",
-                report.outcome
-            );
-            assert!(
-                warns_about_the_gain_map(&report),
-                "{name}: {:?}",
-                report.warnings
-            );
+        let result = std::fs::read(&output).unwrap();
+        let after = peraz_engine::gainmap::of_jpeg(&result).expect("the result's gain map");
+        assert_eq!(jpeg_size(&result), picture, "{name}");
+        assert_eq!(
+            jpeg_size(&after.jpeg),
+            map,
+            "{name}: the gain map keeps its size"
+        );
+        assert_eq!(after.names_ultra_hdr, before.names_ultra_hdr, "{name}");
+        for mark in ["hdrgm:GainMapMax", "HDRGainMapHeadroom"] {
+            let has = |jpeg: &[u8]| jpeg.windows(mark.len()).any(|w| w == mark.as_bytes());
+            assert_eq!(has(&after.jpeg), has(&before.jpeg), "{name}: {mark}");
         }
-        // The result is the standard picture alone: nothing of the gain map is left in it.
-        let result = std::fs::read(dir.0.join("out.jpg")).unwrap();
-        assert!(!peraz_engine::metadata::has_gain_map(&result), "{name}");
-        assert!(image::load_from_memory(&result).is_ok(), "{name}");
+        // The file says where the gain map starts, and the picture ends there.
+        let start = second_picture(&result);
+        assert_eq!(&result[start..], after.jpeg.as_slice(), "{name}");
+        assert_eq!(
+            peraz_engine::metadata::jpeg_end(&result),
+            Some(start),
+            "{name}"
+        );
+
+        // Scaled down, the gain map is scaled with the picture.
+        let mut recipe = Recipe::default();
+        recipe.image.max_width = Some(picture.0 / 2);
+        let report = run_recipe(&input, &output, recipe);
+        assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
+        let result = std::fs::read(&output).unwrap();
+        let after = peraz_engine::gainmap::of_jpeg(&result).unwrap();
+        assert_eq!(jpeg_size(&result), (picture.0 / 2, picture.1 / 2), "{name}");
+        assert_eq!(jpeg_size(&after.jpeg), (map.0 / 2, map.1 / 2), "{name}");
+
+        // With a size to fit, the gain map counts.
+        let mut recipe = Recipe::default();
+        recipe.image.target_bytes = Some(result.len() as u64 * 3 / 4);
+        recipe.image.max_width = Some(picture.0 / 2);
+        let report = run_recipe(&input, &output, recipe);
+        let fitted = std::fs::read(&output).unwrap();
+        assert!(
+            fitted.len() * 4 <= result.len() * 3,
+            "{name}: {:?}",
+            report.outcome
+        );
+        assert!(peraz_engine::gainmap::of_jpeg(&fitted).is_some(), "{name}");
+
+        // Another format has no place for it yet: the report says so.
+        let report = run(&input, &dir.0.join("out.webp"), ImageFormat::Webp);
+        assert!(
+            warns_about_the_gain_map(&report),
+            "{name}: {:?}",
+            report.warnings
+        );
     }
+}
+
+#[test]
+fn a_gain_map_turns_with_a_picture_stored_on_its_side() {
+    let dir = dir("turned");
+    let Some(input) = sample("hdr-apple-gainmap.jpg") else {
+        return;
+    };
+    let mut source = std::fs::read(&input).unwrap();
+    let upright = peraz_engine::gainmap::of_jpeg(&source).unwrap();
+    let (picture, map) = (jpeg_size(&source), jpeg_size(&upright.jpeg));
+    // The sample's EXIF (big-endian) says "upright": make it say "turn a quarter clockwise".
+    let orientation = source
+        .windows(10)
+        .position(|w| w == [0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 1])
+        .expect("the orientation tag");
+    source[orientation + 9] = 6;
+    let turned = dir.0.join("turned.jpg");
+    std::fs::write(&turned, &source).unwrap();
+
+    let output = dir.0.join("out.jpg");
+    let report = run(&turned, &output, ImageFormat::Keep);
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let result = std::fs::read(&output).unwrap();
+    let after = peraz_engine::gainmap::of_jpeg(&result).unwrap();
+    // The pixels are stored upright now, the gain map's too.
+    assert_eq!(jpeg_size(&result), (picture.1, picture.0));
+    assert_eq!(jpeg_size(&after.jpeg), (map.1, map.0));
+    // The gain map was turned the same way as the picture: its brightest part is where the
+    // picture's is.
+    let brightest = |jpeg: &[u8]| {
+        let gray = image::load_from_memory(jpeg).unwrap().to_luma8();
+        let (width, height) = gray.dimensions();
+        let quarter = |x: u32, y: u32| u8::from(x >= width / 2) + 2 * u8::from(y >= height / 2);
+        let mut sums = [0u64; 4];
+        for (x, y, pixel) in gray.enumerate_pixels() {
+            sums[usize::from(quarter(x, y))] += u64::from(pixel[0]);
+        }
+        (0..4).max_by_key(|&q| sums[q]).unwrap()
+    };
+    assert_eq!(
+        brightest(&after.jpeg),
+        brightest(&result[..second_picture(&result)])
+    );
 }
 
 #[test]

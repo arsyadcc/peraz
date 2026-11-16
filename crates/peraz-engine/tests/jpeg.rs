@@ -150,7 +150,7 @@ fn the_end_of_the_picture_and_a_gain_map_after_it_are_found() {
 }
 
 #[test]
-fn a_gain_map_is_not_left_behind_and_the_report_says_it_was_removed() {
+fn a_gain_map_is_kept_in_a_jpeg_and_reported_where_it_is_left_out() {
     let dir = dir("gain-map");
     let (file, main) = ultra_hdr();
     let input = dir.0.join("hdr.jpg");
@@ -158,19 +158,36 @@ fn a_gain_map_is_not_left_behind_and_the_report_says_it_was_removed() {
     let plain = dir.0.join("sdr.jpg");
     std::fs::write(&plain, &main).unwrap();
 
-    // Encoded anew as a JPEG: one picture, nothing after its end.
+    // Encoded anew as a JPEG: the picture, then its gain map, and nothing after that.
     let output = dir.0.join("out.jpg");
     let report = run(&input, &output, ImageFormat::Jpeg, Quality::Small, false);
     let bytes = std::fs::read(&output).unwrap();
-    assert_eq!(jpeg_end(&bytes), Some(bytes.len()));
+    assert_eq!(report.warnings, Vec::<String>::new());
+    assert!(has_gain_map(&bytes));
+    let picture_end = jpeg_end(&bytes).unwrap();
+    assert_eq!(
+        jpeg_end(&bytes[picture_end..]),
+        Some(bytes.len() - picture_end),
+        "the gain map is the last thing in the file"
+    );
+    // In a format that has no place for it, the report says that it was removed.
+    let report = run(
+        &input,
+        &dir.0.join("out.png"),
+        ImageFormat::Png,
+        Quality::Small,
+        false,
+    );
     assert!(
         report.warnings.iter().any(|w| w.contains("HDR gain map")),
         "{:?}",
         report.warnings
     );
-    // A photo without one has nothing to report.
+    // A photo without one has nothing to report, and nothing after its end.
     let report = run(&plain, &output, ImageFormat::Jpeg, Quality::Small, false);
     assert_eq!(report.warnings, Vec::<String>::new());
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(jpeg_end(&bytes), Some(bytes.len()));
 
     if peraz_engine::jxl::JxlTools::locate().is_none() || peraz_engine::jxl::djxl().is_err() {
         eprintln!("skipped: the JPEG XL part needs cjxl and djxl");
