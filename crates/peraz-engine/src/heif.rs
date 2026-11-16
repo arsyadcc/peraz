@@ -73,8 +73,16 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
     }
     // The gain map picture, turned like the main one. When it cannot be read, the standard
     // picture is what there is.
-    let heif_gain_map = properties.tone_map.clone().and_then(|description| {
-        let mut pixels = decode_item(tools, &url, description.map_item).ok()?;
+    let heif_gain_map = properties.gain_map_description().and_then(|description| {
+        let mut pixels = decode_item(tools, &url, description.map_item()).ok()?;
+        // The part of the coded gain map that is the gain map.
+        if let MapDescription::Auxiliary(AuxiliaryMap {
+            shown: Some(shown), ..
+        }) = &description
+            && let Some((x, y, width, height)) = shown.within((pixels.width(), pixels.height()))
+        {
+            pixels = pixels.crop_imm(x, y, width, height);
+        }
         for transform in &properties.transforms {
             pixels = transform.apply(pixels);
         }
@@ -413,6 +421,16 @@ pub struct Properties {
     pub gain_map: bool,
     /// The gain map as ISO 21496-1 stores it, when the file has one that way.
     pub tone_map: Option<ToneMap>,
+    /// The gain map as iPhones stored it before that standard, when the file has one that way.
+    pub auxiliary_map: Option<AuxiliaryMap>,
+}
+
+impl Properties {
+    /// What the file says about its gain map: the standard's way first.
+    fn gain_map_description(&self) -> Option<MapDescription> {
+        let iso = self.tone_map.clone().map(MapDescription::Iso);
+        iso.or_else(|| self.auxiliary_map.clone().map(MapDescription::Auxiliary))
+    }
 }
 
 /// A gain map stored the ISO 21496-1 way: an item of type `tmap` derived from the primary
@@ -428,6 +446,89 @@ pub struct ToneMap {
     pub rendition: Vec<Vec<u8>>,
 }
 
+/// A gain map stored as iPhones did before ISO 21496-1: an auxiliary picture of the primary
+/// one, of the type `urn:com:apple:photo:2020:aux:hdrgainmap`, described by an XMP packet of
+/// its own. How much brighter the HDR rendition goes is in that packet, or in the maker note
+/// of the picture's EXIF.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuxiliaryMap {
+    /// The item that holds the gain map picture.
+    pub map_item: u32,
+    /// The XMP packet that describes the gain map picture.
+    pub xmp: Option<Vec<u8>>,
+    /// The part of the coded gain map picture that is the gain map (`clap`).
+    pub shown: Option<CleanAperture>,
+    /// An EXIF block with nothing but the maker note values that give the HDR headroom
+    /// ([`crate::exif::apple_hdr_note`]), when the picture's EXIF has them.
+    pub headroom_note: Option<Vec<u8>>,
+}
+
+/// `clap`: the part of a coded picture that is shown. Its size, and how far its center is
+/// from the coded picture's center, as fractions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanAperture {
+    width: u32,
+    height: u32,
+    right: (i32, u32),
+    down: (i32, u32),
+}
+
+impl CleanAperture {
+    fn of(payload: &[u8]) -> Option<Self> {
+        let number = |at: usize| be32(payload, at);
+        // Eight numbers: width, height, and the two offsets, each a numerator and a
+        // denominator. Only whole sizes are understood.
+        let whole = |at: usize| {
+            let (count, parts) = (number(at)?, number(at + 4)?);
+            (parts != 0 && count % parts == 0).then(|| count / parts)
+        };
+        let offset = |at: usize| {
+            let (count, parts) = (number(at)?.cast_signed(), number(at + 4)?);
+            (parts != 0).then_some((count, parts))
+        };
+        Some(CleanAperture {
+            width: whole(0)?,
+            height: whole(8)?,
+            right: offset(16)?,
+            down: offset(24)?,
+        })
+    }
+
+    /// The shown part of a picture coded at `size`: its left, top, width, and height. `None`
+    /// when that is not a whole number of pixels inside the picture.
+    fn within(&self, size: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+        // The shown part's center is the coded picture's center, moved by the offset.
+        let start = |coded: u32, shown: u32, (count, parts): (i32, u32)| {
+            let (parts, spare) = (i64::from(parts), i64::from(coded) - i64::from(shown));
+            let doubled = 2 * i64::from(count) + spare * parts;
+            let start = u32::try_from(doubled.div_euclid(2 * parts)).ok()?;
+            (start.checked_add(shown)? <= coded).then_some(start)
+        };
+        Some((
+            start(size.0, self.width, self.right)?,
+            start(size.1, self.height, self.down)?,
+            self.width,
+            self.height,
+        ))
+    }
+}
+
+/// What a HEIF file says about its gain map, besides the picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapDescription {
+    Iso(ToneMap),
+    Auxiliary(AuxiliaryMap),
+}
+
+impl MapDescription {
+    fn map_item(&self) -> u32 {
+        match self {
+            MapDescription::Iso(tone_map) => tone_map.map_item,
+            MapDescription::Auxiliary(map) => map.map_item,
+        }
+    }
+}
+
 /// A gain map taken from a HEIF file: its picture, upright like the main one, and what the
 /// file says about it.
 #[derive(Debug, Clone)]
@@ -435,7 +536,7 @@ pub struct GainMap {
     pub pixels: DynamicImage,
     /// The main picture's size, upright.
     pub picture_size: (u32, u32),
-    pub description: ToneMap,
+    pub description: MapDescription,
 }
 
 impl GainMap {
@@ -467,7 +568,7 @@ impl GainMap {
 }
 
 /// The `auxC` type of an HDR gain map as Apple's cameras store it.
-const APPLE_GAIN_MAP: &[u8] = b"urn:com:apple:photo:2020:aux:hdrgainmap";
+pub(crate) const APPLE_GAIN_MAP: &[u8] = b"urn:com:apple:photo:2020:aux:hdrgainmap";
 
 /// `auxC` types that mark an auxiliary image as an alpha plane (HEVC and AV1 conventions).
 const ALPHA_TYPES: &[&[u8]] = &[
@@ -478,7 +579,12 @@ const ALPHA_TYPES: &[&[u8]] = &[
 /// Reads the primary item, its alpha item, ICC profile, and transformations. Malformed or missing boxes yield
 /// empty properties: the picture still decodes, just without them.
 pub fn read_properties(file: &[u8]) -> Properties {
-    parse_properties(file).unwrap_or_default()
+    let mut properties = parse_properties(file).unwrap_or_default();
+    if let Some(map) = &mut properties.auxiliary_map {
+        let exif = read_metadata(file).exif;
+        map.headroom_note = exif.as_deref().and_then(crate::exif::apple_hdr_note);
+    }
+    properties
 }
 
 fn parse_properties(file: &[u8]) -> Option<Properties> {
@@ -487,8 +593,25 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     let own = layout.properties_of(primary);
     // Alpha planes, not depth maps or gain maps.
     let alpha = layout.auxiliary_of(ALPHA_TYPES);
-    let gain_map =
-        layout.tone_map_item.is_some() || layout.auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
+    let auxiliary_map = layout
+        .auxiliary_of(&[APPLE_GAIN_MAP])
+        .map(|map_item| AuxiliaryMap {
+            map_item,
+            // The XMP item that describes the gain map picture, not the main one.
+            xmp: layout
+                .described
+                .iter()
+                .filter(|(_, to)| *to == map_item)
+                .filter_map(|(from, _)| layout.data_of(*from))
+                .find(|data| data.windows(10).any(|w| w == b"HDRGainMap")),
+            shown: layout
+                .properties_of(map_item)
+                .iter()
+                .find(|b| &b.kind == b"clap")
+                .and_then(|b| CleanAperture::of(b.payload)),
+            headroom_note: None,
+        });
+    let gain_map = layout.tone_map_item.is_some() || auxiliary_map.is_some();
     let tone_map = layout.tone_map_item.and_then(|item| {
         // The `tmap` item is derived from the primary picture, then the gain map picture.
         let sources: Vec<u32> = layout
@@ -522,6 +645,7 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         transforms,
         gain_map,
         tone_map,
+        auxiliary_map,
     })
 }
 
@@ -538,6 +662,8 @@ struct Layout<'a> {
     auxiliary: Vec<(u32, u32)>,
     /// `dimg` references: a derived item and one of its sources, in file order.
     derived: Vec<(u32, u32)>,
+    /// `cdsc` references: an item of metadata and the item it describes.
+    described: Vec<(u32, u32)>,
     /// ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied
     /// and is derived from the picture and the gain map picture.
     tone_map_item: Option<u32>,
@@ -556,6 +682,7 @@ impl<'a> Layout<'a> {
             associations: Vec::new(),
             auxiliary: Vec::new(),
             derived: Vec::new(),
+            described: Vec::new(),
             tone_map_item: None,
             locations: None,
             inline_data: None,
@@ -566,6 +693,7 @@ impl<'a> Layout<'a> {
                 b"iref" => {
                     layout.auxiliary = references(child.payload, *b"auxl")?;
                     layout.derived = references(child.payload, *b"dimg")?;
+                    layout.described = references(child.payload, *b"cdsc")?;
                 }
                 b"iinf" => layout.tone_map_item = item_of_type(child.payload, *b"tmap"),
                 b"iloc" => layout.locations = Some(child.payload),
@@ -718,6 +846,17 @@ pub fn read_metadata(file: &[u8]) -> Metadata {
         return metadata;
     };
     let inline_data = child(b"idat").map(|b| b.payload);
+    // Metadata that describes another item than the primary picture (a gain map's XMP) is
+    // not the picture's.
+    let primary = child(b"pitm").and_then(|b| primary_item(b.payload));
+    let described = child(b"iref")
+        .and_then(|b| references(b.payload, *b"cdsc"))
+        .unwrap_or_default();
+    let of_another = |id: u32| {
+        let mut targets = described.iter().filter(|(from, _)| *from == id);
+        let mut targets = targets.by_ref().map(|(_, to)| Some(*to)).peekable();
+        targets.peek().is_some() && primary.is_some() && targets.all(|to| to != primary)
+    };
     // The item list: a version, then a count (16 or 32 bits), then one `infe` box per item.
     let entries = match infos.payload.first() {
         Some(0) => infos.payload.get(6..),
@@ -739,7 +878,7 @@ pub fn read_metadata(file: &[u8]) -> Metadata {
         let mut texts = rest.get(6..).unwrap_or_default().split(|b| *b == 0);
         let content_type = texts.nth(1).unwrap_or_default();
         let is_xmp = kind == b"mime" && content_type == b"application/rdf+xml";
-        if kind != b"Exif" && !is_xmp {
+        if (kind != b"Exif" && !is_xmp) || of_another(id) {
             continue;
         }
         let Some(data) = item_data(file, locations.payload, inline_data, id) else {
@@ -1462,6 +1601,28 @@ mod tests {
         let pitm = bx(b"pitm", &[0, 0, 0, 0, 0, 1]);
         let meta = bx(b"meta", &[vec![0, 0, 0, 0], pitm, iref, iprp].concat());
         [bx(b"ftyp", b"heic"), meta].concat()
+    }
+
+    #[test]
+    fn the_shown_part_of_a_coded_picture_is_found() {
+        let aperture = |numbers: [i32; 8]| {
+            let payload: Vec<u8> = numbers.iter().flat_map(|n| n.to_be_bytes()).collect();
+            CleanAperture::of(&payload)
+        };
+        // An iPhone's gain map: 425 rows of 426 coded, moved up by half a row from the middle.
+        let top = aperture([756, 1, 425, 1, 0, 1, -4_194_304, 8_388_608]).unwrap();
+        assert_eq!(top.within((756, 426)), Some((0, 0, 756, 425)));
+        // In the middle, and moved right and down from it.
+        let middle = aperture([100, 1, 50, 1, 0, 1, 0, 1]).unwrap();
+        assert_eq!(middle.within((120, 60)), Some((10, 5, 100, 50)));
+        let moved = aperture([200, 2, 50, 1, 6, 1, 10, 2]).unwrap();
+        assert_eq!(moved.within((120, 60)), Some((16, 10, 100, 50)));
+        // Not inside the picture, not whole pixels, or not a fraction at all.
+        assert_eq!(middle.within((90, 60)), None);
+        assert_eq!(moved.within((120, 55)), None);
+        assert_eq!(aperture([101, 2, 50, 1, 0, 1, 0, 1]), None);
+        assert_eq!(aperture([100, 0, 50, 1, 0, 1, 0, 1]), None);
+        assert_eq!(CleanAperture::of(&[0; 12]), None);
     }
 
     #[test]

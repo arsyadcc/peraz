@@ -517,6 +517,101 @@ fn keeps_its_gain_map(
 }
 
 #[test]
+fn a_heic_from_an_older_iphone_keeps_its_gain_map() {
+    use peraz_engine::heif::{decode, read_metadata, read_properties};
+    let dir = dir("heic-iphone");
+    let Some(tools) = ffmpeg_with_x265() else {
+        return;
+    };
+    let Some(input) = sample("hdr-iphone-gainmap.heic") else {
+        return;
+    };
+    // The gain map is an auxiliary picture with an XMP packet of its own, and the picture's
+    // maker note says how bright the HDR rendition goes.
+    let before = read_properties(&std::fs::read(&input).unwrap())
+        .auxiliary_map
+        .expect("the sample's gain map");
+    assert!(before.xmp.is_some() && before.headroom_note.is_some());
+    let source = decode(&tools.0, &input).unwrap();
+    assert_eq!((source.image.width(), source.image.height()), (1512, 850));
+    let map = source.heif_gain_map.expect("the gain map's picture");
+    // 426 rows are coded, and 425 of them are the gain map.
+    assert_eq!((map.pixels.width(), map.pixels.height()), (756, 425));
+
+    let output = dir.0.join("out.heic");
+    let compressed = |keep_metadata: bool, max_width: Option<u32>| {
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Heic;
+        recipe.image.keep_metadata = keep_metadata;
+        recipe.image.max_width = max_width;
+        let job = Job {
+            input: input.clone(),
+            output: OutputTarget::File(output.clone()),
+            recipe,
+            existing: ExistingOutput::Replace,
+            recompress: true,
+        };
+        let report = compress(Some(&tools.0), &tools.1, &job, &mut |_| {}, &NOT_CANCELLED);
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{:?}",
+            report.outcome
+        );
+        assert_eq!(report.warnings, Vec::<String>::new());
+        assert!(report.encoder.unwrap().contains("HDR gain map kept"));
+        let file = std::fs::read(&output).unwrap();
+        // Stored the same way, with the same description.
+        let properties = read_properties(&file);
+        assert_eq!(properties.tone_map, None);
+        let after = properties.auxiliary_map.expect("the result's gain map");
+        assert_eq!(after.xmp, before.xmp);
+        assert_eq!(after.headroom_note, before.headroom_note);
+        (read_metadata(&file), decode(&tools.0, &output).unwrap())
+    };
+
+    // Without the metadata, the two values of the maker note are all the EXIF there is, and
+    // the gain map's XMP is not taken for the picture's.
+    let (metadata, result) = compressed(false, None);
+    assert_eq!(metadata.exif, before.headroom_note);
+    assert_eq!(metadata.xmp, None);
+    assert_eq!((result.image.width(), result.image.height()), (1512, 850));
+    // HEVC codes even sides.
+    let kept = result.heif_gain_map.expect("the gain map's picture");
+    assert_eq!((kept.pixels.width(), kept.pixels.height()), (756, 426));
+    // The gain map is the same picture: bright where the input's is bright.
+    let kept = kept
+        .pixels
+        .resize_exact(756, 425, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let apart: u64 = map
+        .pixels
+        .to_luma8()
+        .pixels()
+        .zip(kept.pixels())
+        .map(|(p, q)| u64::from(p[0].abs_diff(q[0])))
+        .sum::<u64>()
+        / (756 * 425);
+    assert!(apart <= 6, "{apart} apart on average");
+
+    // With the metadata, the picture's EXIF is written whole.
+    let (metadata, _) = compressed(true, None);
+    assert_eq!(metadata.exif, source.metadata.exif);
+    assert_eq!(metadata.xmp, source.metadata.xmp);
+
+    // Scaled down, the gain map is scaled with the picture.
+    let (_, result) = compressed(false, Some(756));
+    assert_eq!(result.image.width(), 756);
+    let kept = result.heif_gain_map.expect("the gain map's picture");
+    assert_eq!(kept.pixels.width(), 378);
+
+    // An AVIF has no place for a gain map stored this way: it is left out, and reported.
+    let avif = dir.0.join("out.avif");
+    let report = run_with(Some(&tools), &input, &avif, ImageFormat::Avif);
+    assert!(warns_about_the_gain_map(&report), "{:?}", report.warnings);
+    assert!(!read_properties(&std::fs::read(&avif).unwrap()).gain_map);
+}
+
+#[test]
 fn a_gain_map_goes_with_a_heic_of_an_odd_size() {
     use peraz_engine::heif::{decode, read_properties};
     let dir = dir("heic-odd");

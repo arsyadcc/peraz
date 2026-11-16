@@ -15,6 +15,7 @@ use std::process::Stdio;
 use image::{DynamicImage, GrayImage, RgbImage};
 
 use crate::ffmpeg::{Toolchain, command};
+use crate::heif::MapDescription;
 use crate::image::Decoded;
 use crate::metadata::Metadata;
 
@@ -246,7 +247,7 @@ pub(crate) struct MapPicture<'a> {
     pub data: Vec<u8>,
     /// The picture's properties as whole boxes, and whether a reader must understand each.
     pub properties: Vec<(Vec<u8>, bool)>,
-    pub description: &'a crate::heif::ToneMap,
+    pub description: &'a MapDescription,
 }
 
 /// A reference from one item to others: its type, the item it is from, and the items it is to.
@@ -271,6 +272,8 @@ pub(crate) struct Item {
 /// The item IDs of what goes with a picture, the same in every file written here.
 pub(crate) const GAIN_MAP_ITEM: u16 = 7;
 pub(crate) const TONE_MAP_ITEM: u16 = 8;
+/// The XMP packet of a gain map that is an auxiliary picture (which has no `tmap` item).
+const MAP_NOTE_ITEM: u16 = 8;
 const ALTERNATIVES_GROUP: u32 = 9;
 
 /// The kind of HEIF file to write.
@@ -417,7 +420,7 @@ fn container(
     }
     if let Some(map) = &picture.gain_map {
         let size = (shown_size, primary);
-        groups.push(gain_map_items(
+        groups.extend(gain_map_items(
             map,
             size,
             &mut properties,
@@ -425,6 +428,8 @@ fn container(
             &mut references,
         ));
     }
+    let with_note = headroom_note(picture.gain_map.as_ref(), metadata);
+    let metadata = with_note.as_ref().or(metadata);
     metadata_items(metadata, primary, &mut items, &mut references);
     let parts = Parts {
         items: &items,
@@ -434,6 +439,23 @@ fn container(
         properties: &properties,
     };
     write_file(&parts, Format::Heic)
+}
+
+/// An iPhone's gain map needs two values of the picture's maker note. When the picture's EXIF
+/// is not written, they are written by themselves: the metadata to write then, with them as
+/// its EXIF.
+fn headroom_note(map: Option<&MapPicture>, metadata: Option<&Metadata>) -> Option<Metadata> {
+    let MapDescription::Auxiliary(auxiliary) = map?.description else {
+        return None;
+    };
+    if metadata.is_some_and(|kept| kept.exif.is_some()) {
+        return None;
+    }
+    Some(Metadata {
+        exif: Some(auxiliary.headroom_note.clone()?),
+        xmp: metadata.and_then(|kept| kept.xmp.clone()),
+        photoshop: None,
+    })
 }
 
 /// Adds the alpha picture (item 3): the coded picture itself, or for a picture of an odd size
@@ -485,47 +507,74 @@ fn alpha_items(
     }
 }
 
-/// Adds the items of an HDR gain map: the gain map picture, and the item that stands for the
-/// HDR rendition, derived from the primary picture and the gain map. `shown` is the primary
-/// picture's size property and its item. Returns the group that lets a reader which knows
-/// gain maps show the HDR rendition in the picture's place.
+/// Adds the items of an HDR gain map: the gain map picture, and what ties it to the primary
+/// picture, the way the input did. `shown` is the primary picture's size property and its
+/// item. Returns the group, if any, that the file needs for it.
 pub(crate) fn gain_map_items(
     map: &MapPicture,
     (shown_size, primary): (u8, u16),
     properties: &mut Vec<Vec<u8>>,
     items: &mut Vec<Item>,
     references: &mut Vec<Reference>,
-) -> Group {
+) -> Option<Group> {
     let mut add = |property: Vec<u8>| listed(properties, property);
     // The gain map picture, not to be shown by itself.
-    items.push(Item {
+    let mut own: Vec<(u8, bool)> = map
+        .properties
+        .iter()
+        .map(|(property, essential)| (add(property.clone()), *essential))
+        .collect();
+    let picture = |own| Item {
         id: GAIN_MAP_ITEM,
         kind: map.kind,
         hidden: true,
         data: map.data.clone(),
-        properties: map
-            .properties
-            .iter()
-            .map(|(property, essential)| (add(property.clone()), *essential))
-            .collect(),
+        properties: own,
         content_type: None,
-    });
-    // The HDR rendition: how the gain map is applied is its data, and it is described as
-    // the input described it (the rendition's color coding and bit depth).
-    let mut rendition = vec![(shown_size, false)];
-    for property in &map.description.rendition {
-        rendition.push((add(property.clone()), false));
+    };
+    match map.description {
+        // ISO 21496-1: an item that stands for the HDR rendition, derived from the primary
+        // picture and the gain map. How the gain map is applied is its data, and it is
+        // described as the input described it (the rendition's color coding and bit depth).
+        MapDescription::Iso(tone_map) => {
+            items.push(picture(own));
+            let mut rendition = vec![(shown_size, false)];
+            for property in &tone_map.rendition {
+                rendition.push((add(property.clone()), false));
+            }
+            items.push(Item {
+                id: TONE_MAP_ITEM,
+                kind: *b"tmap",
+                hidden: false,
+                data: tone_map.metadata.clone(),
+                properties: rendition,
+                content_type: None,
+            });
+            references.push((*b"dimg", TONE_MAP_ITEM, vec![primary, GAIN_MAP_ITEM]));
+            // A reader that knows gain maps shows the HDR rendition in the picture's place.
+            Some((*b"altr", ALTERNATIVES_GROUP, vec![TONE_MAP_ITEM, primary]))
+        }
+        // As iPhones stored it before: an auxiliary picture of the primary one, with an XMP
+        // packet of its own.
+        MapDescription::Auxiliary(auxiliary) => {
+            let kind = [crate::heif::APPLE_GAIN_MAP, &[0]].concat();
+            own.push((add(full_box(*b"auxC", 0, 0, &kind)), false));
+            items.push(picture(own));
+            references.push((*b"auxl", GAIN_MAP_ITEM, vec![primary]));
+            if let Some(xmp) = &auxiliary.xmp {
+                items.push(Item {
+                    id: MAP_NOTE_ITEM,
+                    kind: *b"mime",
+                    hidden: true,
+                    data: xmp.clone(),
+                    properties: Vec::new(),
+                    content_type: Some("application/rdf+xml"),
+                });
+                references.push((*b"cdsc", MAP_NOTE_ITEM, vec![GAIN_MAP_ITEM]));
+            }
+            None
+        }
     }
-    items.push(Item {
-        id: TONE_MAP_ITEM,
-        kind: *b"tmap",
-        hidden: false,
-        data: map.description.metadata.clone(),
-        properties: rendition,
-        content_type: None,
-    });
-    references.push((*b"dimg", TONE_MAP_ITEM, vec![primary, GAIN_MAP_ITEM]));
-    (*b"altr", ALTERNATIVES_GROUP, vec![TONE_MAP_ITEM, primary])
 }
 
 /// The place of a property in the property list (from 1), where it is added unless it is
@@ -806,6 +855,96 @@ mod tests {
             }
             assert_eq!(at, file.len());
         }
+    }
+
+    #[test]
+    fn a_gain_map_stored_as_an_auxiliary_picture_is_written_that_way() {
+        use crate::heif::AuxiliaryMap;
+        let note = crate::exif::apple_hdr_note(&apple_exif()).unwrap();
+        let description = MapDescription::Auxiliary(AuxiliaryMap {
+            map_item: 10,
+            xmp: Some(b"<x:xmpmeta>HDRGainMap</x:xmpmeta>".to_vec()),
+            shown: None,
+            headroom_note: Some(note.clone()),
+        });
+        let with = |metadata: Option<&Metadata>| {
+            let picture = Picture {
+                size: (640, 480),
+                coded: (640, 480),
+                color: coded(7),
+                alpha: None,
+                gain_map: Some(MapPicture {
+                    kind: *b"hvc1",
+                    data: vec![5; 30],
+                    properties: vec![(boxed(*b"hvcC", &[1, 5, 5]), true)],
+                    description: &description,
+                }),
+            };
+            container(&picture, None, metadata).unwrap()
+        };
+        let file = with(None);
+        // No `tmap` item and no brand for one: the gain map is an auxiliary picture.
+        assert_eq!(&file[4..24], b"ftypheic\0\0\0\0mif1heic");
+        let properties = crate::heif::read_properties(&file);
+        assert!(properties.gain_map);
+        assert_eq!((properties.alpha, &properties.tone_map), (None, &None));
+        let MapDescription::Auxiliary(written) = &description else {
+            unreachable!()
+        };
+        assert_eq!(
+            properties.auxiliary_map,
+            Some(AuxiliaryMap {
+                map_item: 7,
+                ..written.clone()
+            })
+        );
+        // The picture's EXIF is only the two values the gain map needs, and the gain map's
+        // XMP is not the picture's.
+        let metadata = crate::heif::read_metadata(&file);
+        assert_eq!(metadata.exif.as_deref(), Some(&note[..]));
+        assert_eq!(metadata.xmp, None);
+
+        // With the picture's own EXIF and XMP, those are written, whole.
+        let kept = Metadata {
+            exif: Some(apple_exif()),
+            xmp: Some(b"<x:xmpmeta>the picture's</x:xmpmeta>".to_vec()),
+            photoshop: None,
+        };
+        let file = with(Some(&kept));
+        let metadata = crate::heif::read_metadata(&file);
+        assert_eq!(metadata.exif, kept.exif);
+        assert_eq!(metadata.xmp, kept.xmp);
+        let properties = crate::heif::read_properties(&file).auxiliary_map.unwrap();
+        assert_eq!(properties.headroom_note, Some(note));
+        assert_eq!(properties.xmp, written.xmp);
+    }
+
+    /// An EXIF block with a camera name and an Apple maker note that has the two HDR values.
+    fn apple_exif() -> Vec<u8> {
+        // The maker note: its name, then a directory of two signed fractions whose values
+        // follow it (offsets count from the note's start).
+        let mut note = b"Apple iOS\0\0\x01MM".to_vec();
+        note.extend([0, 2]);
+        note.extend([0, 0x21, 0, 10, 0, 0, 0, 1, 0, 0, 0, 44]);
+        note.extend([0, 0x30, 0, 10, 0, 0, 0, 1, 0, 0, 0, 52]);
+        note.extend([0; 4]);
+        note.extend([0, 1, 0xCC, 0xA6, 0, 1, 0xC1, 0x31]);
+        note.extend([0, 0, 3, 1, 0, 6, 0xF6, 0]);
+        // The block: a first directory with the camera's maker and the pointer to the EXIF
+        // directory, which holds the maker note.
+        let mut exif = b"MM\0*\0\0\0\x08".to_vec();
+        exif.extend([0, 2]);
+        exif.extend([0x01, 0x0F, 0, 2, 0, 0, 0, 6, 0, 0, 0, 38]);
+        exif.extend([0x87, 0x69, 0, 4, 0, 0, 0, 1, 0, 0, 0, 44]);
+        exif.extend([0; 4]);
+        exif.extend(b"Apple\0");
+        exif.extend([0, 1]);
+        exif.extend([0x92, 0x7C, 0, 7]);
+        exif.extend(u32::try_from(note.len()).unwrap().to_be_bytes());
+        exif.extend(62u32.to_be_bytes());
+        exif.extend([0; 4]);
+        exif.extend(note);
+        exif
     }
 
     #[test]

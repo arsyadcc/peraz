@@ -19,8 +19,18 @@ between alpha versions.
   what the HDR rendition is. A HEIC with such a gain map keeps it when it becomes an AVIF. The
   gain map's bytes count toward `--target-size`. The report's `encoder` says `HDR gain map
   kept`. Before, the result was the standard picture alone, with a warning.
+- HDR photos from older iPhones stay HDR as HEIC. Such a HEIC stores its gain map as an
+  auxiliary picture (before iPhones wrote the ISO 21496-1 item), with an XMP packet of its
+  own, and the photo's EXIF maker note says how bright the HDR rendition goes. The gain map
+  is kept the same way: cropped as the file says, turned and scaled with the picture, encoded
+  again, and written with its XMP packet. Without `--keep-metadata`, the result's EXIF holds
+  the two maker note values that give the brightness and nothing else; with it, the EXIF is
+  kept whole as before. As an AVIF, such a photo still loses its gain map, with the warning.
 
 ### Fixed
+
+- The XMP packet of a HEIC's gain map is no longer taken for the picture's own XMP when the
+  file lists it first.
 
 - A gain map written into a HEIC is described as it is coded (full range, BT.709), whatever
   the input said about its own gain map picture. Before, the input's description was copied,

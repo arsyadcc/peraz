@@ -7,7 +7,7 @@
 //! pieces are written again with the HEIF writer that HEIC output uses.
 
 use crate::heic::{Format, Item, MapPicture, Parts, Reference, boxed, size_box};
-use crate::heif::{GainMap, coded_pictures};
+use crate::heif::{GainMap, MapDescription, coded_pictures};
 use crate::metadata::Metadata;
 
 const PRIMARY_ITEM: u16 = 1;
@@ -24,6 +24,10 @@ pub fn with_gain_map(
     icc: Option<&[u8]>,
     metadata: Option<&Metadata>,
 ) -> Result<Vec<u8>, String> {
+    // Only the standard's gain map has a place in an AVIF.
+    if !matches!(map.description, MapDescription::Iso(_)) {
+        return Err("an AVIF cannot hold a gain map stored as an auxiliary picture".to_owned());
+    }
     let (color, alpha) =
         coded_pictures(encoded).ok_or("the AV1 encoder's file cannot be taken apart")?;
     let map = map_picture(map, size, map_quality)?;
@@ -59,19 +63,21 @@ pub fn with_gain_map(
         // The alpha picture is an auxiliary picture of the primary one.
         references.push((*b"auxl", ALPHA_ITEM, vec![PRIMARY_ITEM]));
     }
-    let group = crate::heic::gain_map_items(
+    let groups: Vec<_> = crate::heic::gain_map_items(
         &map,
         (shown_size, PRIMARY_ITEM),
         &mut properties,
         &mut items,
         &mut references,
-    );
+    )
+    .into_iter()
+    .collect();
     crate::heic::metadata_items(metadata, PRIMARY_ITEM, &mut items, &mut references);
     let parts = Parts {
         items: &items,
         primary: PRIMARY_ITEM,
         references: &references,
-        groups: &[group],
+        groups: &groups,
         properties: &properties,
     };
     crate::heic::write_file(&parts, Format::Avif)
@@ -137,11 +143,11 @@ mod tests {
                 Luma([u8::try_from(x * 10).unwrap()])
             })),
             picture_size: (48, 32),
-            description: ToneMap {
+            description: MapDescription::Iso(ToneMap {
                 map_item: 2,
                 metadata: b"how the gain map is applied".to_vec(),
                 rendition: vec![crate::heic::full_box(*b"pixi", 0, 0, &[3, 10, 10, 10])],
-            },
+            }),
         }
     }
 
@@ -185,9 +191,12 @@ mod tests {
             assert_eq!(properties.icc.as_deref(), Some(&b"a color profile"[..]));
             // The gain map is described as it was, and points at its picture.
             let tone_map = properties.tone_map.expect("the gain map");
-            assert_eq!(tone_map.metadata, map.description.metadata);
-            assert_eq!(tone_map.rendition, map.description.rendition);
             assert_eq!(tone_map.map_item, 7);
+            let written = ToneMap {
+                map_item: 2,
+                ..tone_map
+            };
+            assert_eq!(MapDescription::Iso(written), map.description);
             let kept = read_metadata(&file);
             assert_eq!(kept.exif, metadata.exif);
             assert_eq!(kept.xmp, metadata.xmp);

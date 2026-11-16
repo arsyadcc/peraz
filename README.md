@@ -254,11 +254,14 @@ picture, turned and scaled like it, and written back with its description, so HD
 still show the photo brighter and every other program shows the standard picture. For a JPEG
 that is Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC and an AVIF, the
 gain map as the standard (ISO 21496-1) stores it, which also goes from one of the two formats
-to the other. Elsewhere a gain map is not kept yet: in JPEG XL output, between JPEG and the
-other formats, and for a HEIC from an older iPhone, which stores it another way. Such a photo
-is compressed as its standard picture, and the report warns that the gain map was removed. A
-picture that is HDR by its transfer function alone (PQ or HLG, such as a 10-bit AVIF) is
-skipped, because read as a standard picture it would come out dark and flat.
+to the other. A HEIC from an older iPhone, which stores its gain map as an auxiliary picture,
+keeps it that way as a HEIC; the two numbers in the photo's EXIF that say how bright the HDR
+rendition goes are kept with it, also when the rest of the metadata is removed. Elsewhere a
+gain map is not kept yet: in JPEG XL output, between JPEG and the other formats, and from an
+older iPhone's HEIC to AVIF. Such a photo is compressed as its standard picture, and the
+report warns that the gain map was removed. A picture that is HDR by its transfer function
+alone (PQ or HLG, such as a 10-bit AVIF) is skipped, because read as a standard picture it
+would come out dark and flat.
 
 JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
 and upload forms that read nothing else. A picture with sharp colored edges (colored text and

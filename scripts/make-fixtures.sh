@@ -48,19 +48,27 @@ echo "HDR photos (downloaded)"
 #   hdr-gainmap.avif       an AVIF with a gain map (ISO 21496-1)
 #   hdr-pq.avif            a 10-bit AVIF that is HDR by its transfer function (PQ), no gain map
 libavif="https://raw.githubusercontent.com/AOMediaCodec/libavif/37a5461042aa3b1eb105193724ee41bfd2478d0b/tests/data"
-hdr_sample() { # name in ./fixtures, name in libavif, SHA-256
-  if curl -fsSL --max-time 60 -o "$1.part" "$libavif/$2" \
+hdr_sample() { # name in ./fixtures, where it is downloaded from, SHA-256
+  if curl -fsSL --max-time 60 -o "$1.part" "$2" \
      && echo "$3  $1.part" | shasum -a 256 -c - >/dev/null 2>&1; then
     mv "$1.part" "$1"
   else
     rm -f "$1.part"
-    echo "  skipped: could not download $2, or its checksum is not the expected one"
+    echo "  skipped: could not download $1, or its checksum is not the expected one"
   fi
 }
-hdr_sample hdr-ultrahdr.jpg seine_sdr_gainmap_srgb.jpg 1aaf0a1afa91a485c13e4ad696a3da1fe1ddd2675417e3812a23a9d13f765262
-hdr_sample hdr-apple-gainmap.jpg apple_gainmap_v3.jpg 071203c2a0ba754852e480a1cb70a1d45ea7476a25a79fc38e4433ea1aabb871
-hdr_sample hdr-gainmap.avif seine_sdr_gainmap_srgb.avif e0ebdb2f1f44c7d901e6b5f817eb2520eace344624cab0d57aaa929d05d6d971
-hdr_sample hdr-pq.avif seine_hdr_srgb.avif b4f440392ad8cdfd398aea0c8817c93d98cfd8cde381bbe430aceae0207e93c8
+hdr_sample hdr-ultrahdr.jpg "$libavif/seine_sdr_gainmap_srgb.jpg" 1aaf0a1afa91a485c13e4ad696a3da1fe1ddd2675417e3812a23a9d13f765262
+hdr_sample hdr-apple-gainmap.jpg "$libavif/apple_gainmap_v3.jpg" 071203c2a0ba754852e480a1cb70a1d45ea7476a25a79fc38e4433ea1aabb871
+hdr_sample hdr-gainmap.avif "$libavif/seine_sdr_gainmap_srgb.avif" e0ebdb2f1f44c7d901e6b5f817eb2520eace344624cab0d57aaa929d05d6d971
+hdr_sample hdr-pq.avif "$libavif/seine_hdr_srgb.avif" b4f440392ad8cdfd398aea0c8817c93d98cfd8cde381bbe430aceae0207e93c8
+# From the test data of apple-hdr-heic (https://github.com/johncf/apple-hdr-heic), under its
+# license (MIT, Copyright (c) 2024 John Charankattu). The commit is pinned and the file is
+# checked against its SHA-256.
+#   hdr-iphone-gainmap.heic  a HEIC from an iPhone 13 Pro, whose gain map is an auxiliary
+#                            picture: how iPhones stored it before ISO 21496-1
+hdr_sample hdr-iphone-gainmap.heic \
+  "https://media.githubusercontent.com/media/johncf/apple-hdr-heic/e64716c29abc91a3b40543d7c47fb0f526608982/tests/data/hdr-sample.heic" \
+  c690fa4ecc6ae71ee9a926de869a95835a5d41e764ccbc200647e2fb9d0800cc
 # A HEIC with a gain map, as current phones store HDR photos: made from the JPEG above with
 # macOS's own frameworks.
 if command -v swift >/dev/null && [ "$(uname)" = Darwin ] && [ -f hdr-ultrahdr.jpg ]; then

@@ -308,6 +308,61 @@ impl Directories {
     }
 }
 
+/// How the maker note of an Apple camera starts. A directory follows, in big-endian byte
+/// order, whose offsets count from the start of the note.
+const APPLE_NOTE: &[u8] = b"Apple iOS\0\0\x01MM";
+/// The two values in an Apple maker note that say how much brighter than standard white a
+/// photo's HDR rendition goes. Apple's software computes the headroom of the photo's gain map
+/// from them when the gain map does not say it itself.
+const APPLE_HDR_TAGS: [u16; 2] = [0x0021, 0x0030];
+
+/// An EXIF block with nothing but what an iPhone photo's gain map needs from `block`: an
+/// Apple maker note with the two values that give the HDR headroom. `None` when `block` has
+/// no such values.
+#[must_use]
+pub fn apple_hdr_note(block: &[u8]) -> Option<Vec<u8>> {
+    let (reader, first) = Reader::new(block)?;
+    let pointers = reader.directory(first, |tag| tag == EXIF_POINTER);
+    let exif_at = reader.pointed(&pointers, EXIF_POINTER)?;
+    let note = reader
+        .directory(exif_at, |tag| tag == MAKER_NOTE)
+        .into_iter()
+        .next()?
+        .value;
+    if !note.starts_with(APPLE_NOTE) {
+        return None;
+    }
+    let apple = Reader {
+        bytes: &note,
+        big_endian: true,
+    };
+    // Signed fractions, one each.
+    let values: Vec<Entry> = apple
+        .directory(APPLE_NOTE.len(), |tag| APPLE_HDR_TAGS.contains(&tag))
+        .into_iter()
+        .filter(|entry| entry.kind == 10 && entry.count == 1)
+        .collect();
+    if values.len() != APPLE_HDR_TAGS.len() {
+        return None;
+    }
+    let layout = Directories {
+        big_endian: true,
+        ..Directories::default()
+    };
+    let mut note = APPLE_NOTE.to_vec();
+    note.extend(layout.directory(&values, APPLE_NOTE.len())?);
+    Directories {
+        exif: vec![Entry {
+            tag: MAKER_NOTE,
+            kind: 7,
+            count: u32::try_from(note.len()).ok()?,
+            value: note,
+        }],
+        ..layout
+    }
+    .block()
+}
+
 /// The EXIF of a TIFF file, gathered from its directories into one EXIF block; `None` when it
 /// has none.
 #[must_use]
@@ -403,6 +458,67 @@ mod tests {
             count,
             value: value.to_vec(),
         }
+    }
+
+    #[test]
+    fn the_hdr_values_of_an_apple_maker_note_are_taken_by_themselves() {
+        // A maker note as an iPhone writes it: other values around the two that matter.
+        let fraction = |count: i32, parts: i32| [count.to_be_bytes(), parts.to_be_bytes()].concat();
+        let layout = Directories {
+            big_endian: true,
+            ..Directories::default()
+        };
+        let values = [
+            entry(0x0001, 9, 1, &14i32.to_be_bytes()),
+            entry(0x0021, 10, 1, &fraction(117_926, 114_993)),
+            entry(0x002B, 2, 12, b"an identity\0"),
+            entry(0x0030, 10, 1, &fraction(769, 456_192)),
+        ];
+        let mut note = APPLE_NOTE.to_vec();
+        note.extend(layout.directory(&values, APPLE_NOTE.len()).unwrap());
+        // In a little-endian block, as some programs rewrite it: the note keeps its own order.
+        let block = Directories {
+            big_endian: false,
+            main: vec![entry(0x010F, 2, 6, b"Apple\0")],
+            exif: vec![
+                entry(0x9003, 2, 20, b"2024:10:06 18:13:19\0"),
+                entry(MAKER_NOTE, 7, u32::try_from(note.len()).unwrap(), &note),
+            ],
+            ..Directories::default()
+        }
+        .block()
+        .unwrap();
+
+        let small = apple_hdr_note(&block).expect("the HDR values");
+        // Nothing else of the block is in it: no camera, no date, no identity.
+        for gone in [&b"Apple\0"[..], b"2024:10:06", b"an identity"] {
+            let found = small.windows(gone.len()).filter(|w| *w == gone).count();
+            // The maker note's own name starts with "Apple iOS".
+            assert_eq!(found, 0, "{}", String::from_utf8_lossy(gone));
+        }
+        let (reader, first) = Reader::new(&small).unwrap();
+        let directories = reader.directories(first, |tag| tag != EXIF_POINTER);
+        assert_eq!(directories.main, []);
+        assert_eq!(directories.exif.len(), 1);
+        let kept = Reader {
+            bytes: &directories.exif[0].value,
+            big_endian: true,
+        }
+        .directory(APPLE_NOTE.len(), |_| true);
+        assert_eq!(kept, [values[1].clone(), values[3].clone()]);
+        // Taken from its own result, it is the same block.
+        assert_eq!(apple_hdr_note(&small), Some(small));
+
+        // Without the two values, or without an Apple maker note, there is nothing to take.
+        let other = Directories {
+            big_endian: true,
+            exif: vec![entry(MAKER_NOTE, 7, 8, b"Nikon\0\x02\x10")],
+            ..Directories::default()
+        }
+        .block()
+        .unwrap();
+        assert_eq!(apple_hdr_note(&other), None);
+        assert_eq!(apple_hdr_note(b"not EXIF"), None);
     }
 
     fn sample(big_endian: bool) -> Directories {
