@@ -6,6 +6,7 @@
 //! cancelled by stopping the process.
 
 pub mod apng;
+mod av1;
 pub mod avif;
 pub mod batch;
 pub mod compress;
@@ -16,6 +17,7 @@ pub mod ffmpeg;
 mod fit;
 pub mod gainmap;
 pub mod gif;
+pub mod hdr;
 pub mod heic;
 pub mod heif;
 pub mod icon;

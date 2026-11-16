@@ -352,7 +352,7 @@ fn upright_xmp(xmp: Vec<u8>) -> Vec<u8> {
     text.into_bytes()
 }
 
-fn png_chunk(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
+pub(crate) fn png_chunk(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
     let mut crc = flate2::Crc::new();
     crc.update(&kind);
     crc.update(body);

@@ -12,9 +12,10 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Stdio;
 
-use image::{DynamicImage, GrayImage, RgbImage};
+use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage};
 
 use crate::ffmpeg::{Toolchain, command};
+use crate::hdr::HdrColor;
 use crate::heif::MapDescription;
 use crate::image::Decoded;
 use crate::metadata::Metadata;
@@ -43,13 +44,21 @@ pub fn encode(
     // HEVC with 4:2:0 color codes even sizes: repeat the last column and row to get there.
     let coded = (width + width % 2, height + height % 2);
     let color = padded(&DynamicImage::ImageRgba8(rgba.clone()).to_rgb8(), coded);
+    // A picture that is HDR by its transfer function is coded at 10 bits, as it is.
+    let deep = prepared
+        .hdr
+        .map(|hdr| (padded(&prepared.image.to_rgb16(), coded), hdr));
     let workdir = crate::compress::work_folder()?;
     let result = (|| {
-        let color = hevc_picture(tools, &workdir, Plane::Color(&color), crf(quality))?;
+        let plane = match &deep {
+            Some((pixels, hdr)) => Plane::Deep(pixels, *hdr),
+            None => Plane::Color(&color),
+        };
+        let color = hevc_picture(tools, &workdir, plane, crf(quality))?;
         let alpha = if has_alpha {
             let alpha =
                 GrayImage::from_fn(width, height, |x, y| image::Luma([rgba.get_pixel(x, y)[3]]));
-            let alpha = padded_gray(&alpha, coded);
+            let alpha = padded(&alpha, coded);
             // The shape of a picture shows every error: its plane gets a finer setting.
             let finer = crf(quality).saturating_sub(8);
             Some(hevc_picture(tools, &workdir, Plane::Alpha(&alpha), finer)?)
@@ -69,6 +78,7 @@ pub fn encode(
                 color,
                 alpha,
                 gain_map,
+                hdr: prepared.hdr,
             },
             prepared.icc.as_deref(),
             metadata,
@@ -113,20 +123,14 @@ fn gain_map_picture<'a>(
 }
 
 /// `image` enlarged to `size` by repeating its last column and row.
-fn padded(image: &RgbImage, size: (u32, u32)) -> RgbImage {
+fn padded<P: image::Pixel>(
+    image: &ImageBuffer<P, Vec<P::Subpixel>>,
+    size: (u32, u32),
+) -> ImageBuffer<P, Vec<P::Subpixel>> {
     if image.dimensions() == size {
         return image.clone();
     }
-    RgbImage::from_fn(size.0, size.1, |x, y| {
-        *image.get_pixel(x.min(image.width() - 1), y.min(image.height() - 1))
-    })
-}
-
-fn padded_gray(image: &GrayImage, size: (u32, u32)) -> GrayImage {
-    if image.dimensions() == size {
-        return image.clone();
-    }
-    GrayImage::from_fn(size.0, size.1, |x, y| {
+    ImageBuffer::from_fn(size.0, size.1, |x, y| {
         *image.get_pixel(x.min(image.width() - 1), y.min(image.height() - 1))
     })
 }
@@ -136,6 +140,8 @@ fn padded_gray(image: &GrayImage, size: (u32, u32)) -> GrayImage {
 enum Plane<'a> {
     Color(&'a RgbImage),
     Alpha(&'a GrayImage),
+    /// An HDR picture at 16 bits per channel, coded at 10 bits with what its values mean.
+    Deep(&'a ImageBuffer<image::Rgb<u16>, Vec<u16>>, HdrColor),
 }
 
 /// One HEVC-coded picture: the decoder configuration (`hvcC` payload) and the coded frame.
@@ -147,25 +153,47 @@ struct Coded {
 /// Encodes one picture with libx265 and takes the decoder configuration and the frame out of
 /// the MP4 that FFmpeg writes.
 fn hevc_picture(tools: &Toolchain, workdir: &Path, plane: Plane, crf: u8) -> Result<Coded, String> {
+    let deep_bytes: Vec<u8>;
     let (input_format, size, pixels, output_format): (_, _, &[u8], _) = match plane {
         Plane::Color(image) => ("rgb24", image.dimensions(), image.as_raw(), "yuv420p"),
         Plane::Alpha(image) => ("gray", image.dimensions(), image.as_raw(), "gray"),
+        Plane::Deep(image, _) => {
+            deep_bytes = image
+                .as_raw()
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            ("rgb48le", image.dimensions(), &deep_bytes, "yuv420p10le")
+        }
+    };
+    // How the stream says what its values mean: BT.709 with the sRGB curve, or what an HDR
+    // picture's values are (the matrix follows its primaries).
+    let (matrix, colorspace, primaries, transfer) = match plane {
+        Plane::Deep(_, hdr) => {
+            let (primaries, transfer) = hdr.names();
+            if hdr.matrix().0 == 9 {
+                ("bt2020", "bt2020nc", primaries, transfer)
+            } else {
+                ("bt709", "bt709", primaries, transfer)
+            }
+        }
+        _ => ("bt709", "bt709", "bt709", "iec61966-2-1"),
     };
     let output = workdir.join("picture.mp4");
     let mut cmd = command(&tools.ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-y"])
         .args(["-f", "rawvideo", "-pix_fmt", input_format])
         .args(["-s", &format!("{}x{}", size.0, size.1), "-i", "pipe:0"])
-        // Full-range BT.709 for the conversion from RGB, and the same written into the stream,
-        // so every decoder converts back the same way.
+        // Full range for the conversion from RGB, and the same matrix written into the
+        // stream, so every decoder converts back the same way.
         .args([
             "-vf",
-            &format!("scale=out_color_matrix=bt709:out_range=full,format={output_format}"),
+            &format!("scale=out_color_matrix={matrix}:out_range=full,format={output_format}"),
         ])
         .args(["-frames:v", "1", "-c:v", ENCODER, "-crf", &crf.to_string()])
         .args(["-preset", "slow", "-x265-params", "log-level=error:info=0"])
-        .args(["-color_range", "pc", "-colorspace", "bt709"])
-        .args(["-color_primaries", "bt709", "-color_trc", "iec61966-2-1"])
+        .args(["-color_range", "pc", "-colorspace", colorspace])
+        .args(["-color_primaries", primaries, "-color_trc", transfer])
         .args(["-tag:v", "hvc1", "-an", "-f", "mp4"])
         .arg(crate::compress::file_url(&output)?)
         .stdin(Stdio::piped())
@@ -238,6 +266,8 @@ struct Picture<'a> {
     color: Coded,
     alpha: Option<Coded>,
     gain_map: Option<MapPicture<'a>>,
+    /// The picture is HDR by its transfer function, coded at 10 bits.
+    hdr: Option<HdrColor>,
 }
 
 /// An HDR gain map, coded, with what the input said about it.
@@ -280,6 +310,9 @@ const ALTERNATIVES_GROUP: u32 = 9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Format {
     Heic,
+    /// A HEIC whose picture has 10 bits per channel: another HEVC profile, with a brand of
+    /// its own.
+    HeicTenBit,
     Avif,
 }
 
@@ -341,6 +374,17 @@ fn color_coding(has_profile: bool) -> Vec<u8> {
     boxed(*b"colr", &nclx)
 }
 
+/// The property that says what the values of an HDR picture mean: its primaries, PQ or HLG,
+/// the matrix that goes with the primaries, full range.
+fn hdr_coding(hdr: HdrColor) -> Vec<u8> {
+    let mut nclx = b"nclx".to_vec();
+    nclx.extend(u16::from(hdr.primaries).to_be_bytes());
+    nclx.extend(u16::from(hdr.transfer).to_be_bytes());
+    nclx.extend(u16::from(hdr.matrix().0).to_be_bytes());
+    nclx.push(0x80);
+    boxed(*b"colr", &nclx)
+}
+
 /// Writes the HEIF file.
 fn container(
     picture: &Picture,
@@ -360,9 +404,21 @@ fn container(
     } else {
         add(size_box(picture.coded))
     };
-    let coding = add(color_coding(icc.is_some()));
+    let coding = add(match picture.hdr {
+        Some(hdr) => hdr_coding(hdr),
+        None => color_coding(icc.is_some()),
+    });
     let profile = icc.map(|icc| add(boxed(*b"colr", &[b"prof", icc].concat())));
-    let three_channels = add(full_box(*b"pixi", 0, 0, &[3, 8, 8, 8]));
+    let depth = if picture.hdr.is_some() { 10 } else { 8 };
+    let three_channels = add(full_box(*b"pixi", 0, 0, &[3, depth, depth, depth]));
+    // The brightest pixel and the brightest frame average of an HDR picture, when known.
+    let light_level = picture
+        .hdr
+        .and_then(|hdr| hdr.light_level)
+        .map(|(brightest, average)| {
+            let levels = [brightest.to_be_bytes(), average.to_be_bytes()].concat();
+            add(boxed(*b"clli", &levels))
+        });
 
     let odd = picture.coded != picture.size;
     let mut items = Vec::new();
@@ -372,36 +428,20 @@ fn container(
     let mut shown = vec![(shown_size, false), (coding, false)];
     shown.extend(profile.map(|profile| (profile, false)));
     shown.push((three_channels, false));
+    shown.extend(light_level.map(|levels| (levels, false)));
     let primary = 1;
+    let grid = odd.then_some(picture.size);
+    let coded = [(color_configuration, true), (coded_size, false)];
+    picture_items(
+        primary,
+        &picture.color.frame,
+        grid,
+        shown,
+        coded,
+        &mut items,
+    );
     if odd {
-        items.push(Item {
-            id: primary,
-            kind: *b"grid",
-            hidden: false,
-            data: grid_data(picture.size),
-            properties: shown,
-            content_type: None,
-        });
-        items.push(Item {
-            id: 2,
-            kind: *b"hvc1",
-            hidden: true,
-            data: picture.color.frame.clone(),
-            properties: vec![(color_configuration, true), (coded_size, false)],
-            content_type: None,
-        });
         references.push((*b"dimg", primary, vec![2]));
-    } else {
-        let mut all = vec![(color_configuration, true)];
-        all.extend(shown);
-        items.push(Item {
-            id: primary,
-            kind: *b"hvc1",
-            hidden: false,
-            data: picture.color.frame.clone(),
-            properties: all,
-            content_type: None,
-        });
     }
     if let Some(alpha) = &picture.alpha {
         let sizes = (shown_size, coded_size);
@@ -438,7 +478,12 @@ fn container(
         groups: &groups,
         properties: &properties,
     };
-    write_file(&parts, Format::Heic)
+    let format = if picture.hdr.is_some() {
+        Format::HeicTenBit
+    } else {
+        Format::Heic
+    };
+    write_file(&parts, format)
 }
 
 /// An iPhone's gain map needs two values of the picture's maker note. When the picture's EXIF
@@ -458,9 +503,51 @@ fn headroom_note(map: Option<&MapPicture>, metadata: Option<&Metadata>) -> Optio
     })
 }
 
-/// Adds the alpha picture (item 3): the coded picture itself, or for a picture of an odd size
-/// (`grid`) a grid of that size over the coded picture (item 4). `sizes` are the size
-/// properties of the picture shown and of the picture coded.
+/// Adds a picture as item `id`: the coded picture itself, or for a picture of an odd size
+/// (`grid`) a grid of that size over the coded picture, which is then item `id + 1`. `shown`
+/// are the properties of the picture as it is shown, and `coded` those of the coded picture
+/// alone: its decoder configuration and its size.
+fn picture_items(
+    id: u16,
+    frame: &[u8],
+    grid: Option<(u32, u32)>,
+    shown: Vec<(u8, bool)>,
+    [configuration, coded_size]: [(u8, bool); 2],
+    items: &mut Vec<Item>,
+) {
+    if let Some(size) = grid {
+        items.push(Item {
+            id,
+            kind: *b"grid",
+            hidden: false,
+            data: grid_data(size),
+            properties: shown,
+            content_type: None,
+        });
+        items.push(Item {
+            id: id + 1,
+            kind: *b"hvc1",
+            hidden: true,
+            data: frame.to_vec(),
+            properties: vec![configuration, coded_size],
+            content_type: None,
+        });
+    } else {
+        let mut all = vec![configuration];
+        all.extend(shown);
+        items.push(Item {
+            id,
+            kind: *b"hvc1",
+            hidden: false,
+            data: frame.to_vec(),
+            properties: all,
+            content_type: None,
+        });
+    }
+}
+
+/// Adds the alpha picture (item 3, and item 4 under a grid). `sizes` are the size properties
+/// of the picture shown and of the picture coded.
 fn alpha_items(
     alpha: &Coded,
     grid: Option<(u32, u32)>,
@@ -476,35 +563,8 @@ fn alpha_items(
     let one_channel = add(full_box(*b"pixi", 0, 0, &[1, 8]));
     let is_alpha = add(full_box(*b"auxC", 0, 0, b"urn:mpeg:hevc:2015:auxid:1\0"));
     let marks = vec![(shown_size, false), (one_channel, false), (is_alpha, false)];
-    if let Some(size) = grid {
-        items.push(Item {
-            id: 3,
-            kind: *b"grid",
-            hidden: false,
-            data: grid_data(size),
-            properties: marks,
-            content_type: None,
-        });
-        items.push(Item {
-            id: 4,
-            kind: *b"hvc1",
-            hidden: true,
-            data: alpha.frame.clone(),
-            properties: vec![(configuration, true), (coded_size, false)],
-            content_type: None,
-        });
-    } else {
-        let mut all = vec![(configuration, true)];
-        all.extend(marks);
-        items.push(Item {
-            id: 3,
-            kind: *b"hvc1",
-            hidden: false,
-            data: alpha.frame.clone(),
-            properties: all,
-            content_type: None,
-        });
-    }
+    let coded = [(configuration, true), (coded_size, false)];
+    picture_items(3, &alpha.frame, grid, marks, coded, items);
 }
 
 /// Adds the items of an HDR gain map: the gain map picture, and what ties it to the primary
@@ -695,6 +755,7 @@ pub(crate) fn write_file(parts: &Parts, format: Format) -> Result<Vec<u8>, Strin
     } = *parts;
     let (mut brands, name) = match format {
         Format::Heic => (b"heic\0\0\0\0mif1heic".to_vec(), "a HEIC"),
+        Format::HeicTenBit => (b"heix\0\0\0\0mif1heix".to_vec(), "a HEIC"),
         Format::Avif => (b"avif\0\0\0\0avifmif1miaf".to_vec(), "an AVIF"),
     };
     // The `tmap` brand says that the file may hold a gain map.
@@ -797,6 +858,7 @@ mod tests {
                 color: coded(7),
                 alpha: None,
                 gain_map: None,
+                hdr: None,
             },
             Some(b"a color profile"),
             Some(&Metadata {
@@ -833,6 +895,7 @@ mod tests {
                 color: coded(7),
                 alpha: Some(coded(9)),
                 gain_map: None,
+                hdr: None,
             },
             None,
             None,
@@ -858,6 +921,37 @@ mod tests {
     }
 
     #[test]
+    fn an_hdr_picture_gets_its_own_brand_and_color_description() {
+        let hdr = HdrColor {
+            primaries: 9,
+            transfer: crate::hdr::PQ,
+            light_level: Some((1000, 180)),
+        };
+        let file = container(
+            &Picture {
+                size: (641, 480),
+                coded: (642, 480),
+                color: coded(7),
+                alpha: None,
+                gain_map: None,
+                hdr: Some(hdr),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        // A HEIC with 10 bits per channel is not the profile every reader of `heic` knows.
+        assert_eq!(&file[4..24], b"ftypheix\0\0\0\0mif1heix");
+        // Read back: PQ with BT.2020 primaries and the light levels, also under a grid.
+        assert_eq!(crate::heif::read_properties(&file).hdr, Some(hdr));
+        // The matrix that goes with the primaries, full range; ten bits in three channels.
+        let coding = [&b"colrnclx"[..], &[0, 9, 0, 16, 0, 9, 0x80]].concat();
+        assert!(file.windows(coding.len()).any(|w| w == coding));
+        let depth = [&b"pixi"[..], &[0, 0, 0, 0, 3, 10, 10, 10]].concat();
+        assert!(file.windows(depth.len()).any(|w| w == depth));
+    }
+
+    #[test]
     fn a_gain_map_stored_as_an_auxiliary_picture_is_written_that_way() {
         use crate::heif::AuxiliaryMap;
         let note = crate::exif::apple_hdr_note(&apple_exif()).unwrap();
@@ -879,6 +973,7 @@ mod tests {
                     properties: vec![(boxed(*b"hvcC", &[1, 5, 5]), true)],
                     description: &description,
                 }),
+                hdr: None,
             };
             container(&picture, None, metadata).unwrap()
         };

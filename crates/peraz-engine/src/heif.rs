@@ -48,7 +48,13 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         "-c:v",
         "png",
         "-pix_fmt",
-        if has_alpha { "rgba" } else { "rgb24" },
+        // An HDR picture at 16 bits per channel, with its values as they are stored.
+        match (properties.hdr.is_some(), has_alpha) {
+            (false, false) => "rgb24",
+            (false, true) => "rgba",
+            (true, false) => "rgb48be",
+            (true, true) => "rgba64be",
+        },
         "-f",
         "image2pipe",
         "pipe:1",
@@ -100,6 +106,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         jpeg_gain_map: None,
         heif_gain_map,
         jxl_gain_map: None,
+        hdr: properties.hdr,
         png_color: crate::image::PngColor::default(),
     })
 }
@@ -424,6 +431,9 @@ pub struct Properties {
     pub tone_map: Option<ToneMap>,
     /// The gain map as iPhones stored it before that standard, when the file has one that way.
     pub auxiliary_map: Option<AuxiliaryMap>,
+    /// The picture is HDR by its transfer function (PQ or HLG), as its color description
+    /// (`colr` of type `nclx`) says, with its light levels (`clli`) when it has them.
+    pub hdr: Option<crate::hdr::HdrColor>,
 }
 
 impl Properties {
@@ -639,6 +649,24 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         .find_map(icc_of)
         .or_else(|| layout.properties.iter().find_map(icc_of));
     let transforms = transforms_of(&own);
+    // The color description may be on a grid's tiles only: the items the primary one is
+    // derived from. (Another item's is not the picture's: a gain map's HDR rendition has one.)
+    let described = |b: &Bx| hdr_color(b.payload).filter(|_| &b.kind == b"colr");
+    let tiles = layout.derived.iter().filter(|(from, _)| *from == primary);
+    let hdr = own
+        .iter()
+        .find_map(described)
+        .or_else(|| {
+            tiles
+                .flat_map(|(_, tile)| layout.properties_of(*tile))
+                .find_map(|b| described(&b))
+        })
+        .map(|mut color| {
+            // `clli`: the brightest pixel and the brightest frame average, 16 bits each.
+            let levels = own.iter().find(|b| &b.kind == b"clli").map(|b| b.payload);
+            color.light_level = levels.and_then(|l| Some((be16(l, 0)?, be16(l, 2)?)));
+            color
+        });
     Some(Properties {
         primary: Some(primary),
         alpha,
@@ -647,7 +675,18 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         gain_map,
         tone_map,
         auxiliary_map,
+        hdr,
     })
+}
+
+/// `colr` of type `nclx`: the primaries and the transfer function (16 bits each, then the
+/// matrix and the range), when the transfer function is an HDR one.
+fn hdr_color(colr: &[u8]) -> Option<crate::hdr::HdrColor> {
+    if colr.get(..4)? != b"nclx" {
+        return None;
+    }
+    let code = |at: usize| u8::try_from(be16(colr, at)?).ok();
+    crate::hdr::HdrColor::of_codes(code(4)?, code(6)?)
 }
 
 /// The parts of a HEIF file's `meta` box that say what its items are and how they belong

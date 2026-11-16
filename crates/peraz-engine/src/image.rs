@@ -44,6 +44,9 @@ pub struct Decoded {
     pub heif_gain_map: Option<crate::heif::GainMap>,
     /// The gain map of a JPEG XL, which a JPEG XL made from it can carry.
     pub jxl_gain_map: Option<crate::jxl::JxlGainMap>,
+    /// The pixels are HDR by their transfer function (PQ or HLG): what they mean. Such a
+    /// picture is held at 16 bits per channel.
+    pub hdr: Option<crate::hdr::HdrColor>,
     /// What a PNG says about its colors without a profile (gamma, primaries, "this is sRGB").
     pub png_color: PngColor,
 }
@@ -78,6 +81,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         jpeg_gain_map,
         heif_gain_map,
         jxl_gain_map,
+        hdr,
         png_color,
     } = decoded;
     if let Some((w, h)) = fit_within(
@@ -95,6 +99,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         jpeg_gain_map,
         heif_gain_map,
         jxl_gain_map,
+        hdr,
         png_color,
     }
 }
@@ -121,7 +126,6 @@ fn encode_image_inner(
         image,
         icc,
         metadata,
-        png_color,
         ..
     } = prepared;
     // The metadata to write: only on request, and only when there is any.
@@ -158,21 +162,13 @@ fn encode_image_inner(
         ImageEncoding::Png {
             min_quality,
             max_quality,
-        } => {
-            // A PNG states its gamma and primaries in its own chunks, not in a profile made
-            // from them.
-            let profile = icc.as_deref().filter(|_| !png_color.profile_from_chunks);
-            // A size target may have cut the palette down below what the quality range gives.
-            let palette = plan.target.and_then(|target| target.palette);
-            let (png, encoder, reduced) =
-                encode_png(image, min_quality, max_quality, profile, palette)?;
-            warnings.extend(reduced);
-            let png = with_png_chunks(&png, &png_color.chunks);
-            (
-                kept.map_or_else(|| png.clone(), |m| m.into_png(&png)),
-                encoder,
-            )
-        }
+        } => png_of(
+            prepared,
+            plan,
+            (min_quality, max_quality),
+            kept,
+            &mut warnings,
+        )?,
         ImageEncoding::Webp { quality } => (
             encode_webp(&image.to_rgba8(), quality, icc.as_deref(), kept)?,
             format!("libwebp q{quality}"),
@@ -192,10 +188,10 @@ fn encode_image_inner(
             let tools = tools.ok_or("HEIC output needs FFmpeg, which was not found")?;
             let (heic, with_gain_map) = crate::heic::encode(tools, prepared, quality, kept)?;
             kept_gain_map = with_gain_map;
-            let note = if with_gain_map {
-                ", HDR gain map kept"
-            } else {
-                ""
+            let note = match (with_gain_map, prepared.hdr) {
+                (true, _) => ", HDR gain map kept",
+                (false, Some(_)) => ", 10-bit, HDR kept",
+                (false, None) => "",
             };
             (
                 heic,
@@ -323,8 +319,9 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
             map
         });
     } else if bytes.starts_with(b"\x89PNG") {
-        let (color, profile) = png_color(bytes, decoded.icc.is_some());
+        let (color, profile, hdr) = png_color(bytes, decoded.icc.is_some());
         decoded.png_color = color;
+        decoded.hdr = hdr;
         if let Some(profile) = profile {
             decoded.icc = Some(profile);
         }
@@ -360,6 +357,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
         jpeg_gain_map: None,
         heif_gain_map: None,
         jxl_gain_map: None,
+        hdr: None,
         png_color: PngColor::default(),
     })
 }
@@ -484,6 +482,41 @@ fn jpeg_is_complete(bytes: &[u8]) -> bool {
     bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
+/// The picture as a PNG, with the encoder's name: with what a PNG input said about its
+/// colors, and with the metadata of `kept`. `quality` is the range a palette must reach.
+fn png_of(
+    prepared: &Decoded,
+    plan: &ImagePlan,
+    (min_quality, max_quality): (u8, u8),
+    kept: Option<&Metadata>,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<u8>, String), String> {
+    let png_color = &prepared.png_color;
+    // A PNG states its gamma and primaries in its own chunks, not in a profile made
+    // from them.
+    let profile = prepared
+        .icc
+        .as_deref()
+        .filter(|_| !png_color.profile_from_chunks);
+    // A size target may have cut the palette down below what the quality range gives.
+    let palette = plan.target.and_then(|target| target.palette);
+    let every_shade = prepared.hdr.is_some();
+    let (png, encoder, reduced) = encode_png(
+        &prepared.image,
+        min_quality,
+        max_quality,
+        profile,
+        palette,
+        every_shade,
+    )?;
+    warnings.extend(reduced);
+    let png = with_png_chunks(&png, &png_color.chunks);
+    Ok((
+        kept.map_or_else(|| png.clone(), |m| m.into_png(&png)),
+        encoder,
+    ))
+}
+
 /// The picture as a TIFF, with its color profile and the metadata of `kept`.
 fn tiff_of(
     image: &DynamicImage,
@@ -515,6 +548,14 @@ fn avif_of(
     kept: Option<&Metadata>,
     warnings: &mut Vec<String>,
 ) -> Result<(Vec<u8>, String, bool), String> {
+    // A picture that is HDR by its transfer function is written at 10 bits, as it is.
+    // Its values tell more shades apart than a standard picture's: a finer setting, as for
+    // transparency.
+    if let Some(color) = prepared.hdr {
+        let finer = quality.saturating_add(10).min(100);
+        let file = crate::avif::encode_hdr(&prepared.image, color, finer, kept)?;
+        return Ok((file, format!("rav1e q{finer}, 10-bit, HDR kept"), false));
+    }
     let icc = prepared.icc.as_deref();
     let mut rgba = prepared.image.to_rgba8();
     let avif = encode_avif(&rgba, quality)?;
@@ -772,6 +813,7 @@ fn encode_png(
     max_quality: u8,
     icc: Option<&[u8]>,
     cut: Option<peraz_core::PngPalette>,
+    every_shade: bool,
 ) -> Result<(Vec<u8>, String, Option<String>), String> {
     let (width, height) = (image.width(), image.height());
     // 16 bits per channel: kept on the lossless path, reduced by a palette (which holds 8-bit
@@ -779,6 +821,8 @@ fn encode_png(
     let deep = image.color().bytes_per_pixel() / image.color().channel_count() == 2;
     let rgba = image.to_rgba8();
     let quantized = match cut {
+        // An HDR picture needs every shade it has: no palette.
+        _ if every_shade => None,
         Some(cut) => Some(quantize_cut(&rgba, cut)?),
         None => quantize(&rgba, min_quality, max_quality)?,
     };
@@ -854,7 +898,7 @@ const PNG_COLOR_CHUNKS: [&[u8; 4]; 4] = [b"gAMA", b"cHRM", b"sRGB", b"cICP"];
 
 /// A PNG with color chunks (as taken from another PNG) added right after its header, where
 /// they belong: before the palette and the picture data.
-fn with_png_chunks(png: &[u8], chunks: &[u8]) -> Vec<u8> {
+pub(crate) fn with_png_chunks(png: &[u8], chunks: &[u8]) -> Vec<u8> {
     // The signature (8 bytes), then the header chunk (25 bytes with its frame).
     const AFTER_HEADER: usize = 33;
     if chunks.is_empty() || png.len() < AFTER_HEADER {
@@ -866,7 +910,10 @@ fn with_png_chunks(png: &[u8], chunks: &[u8]) -> Vec<u8> {
 /// Reads what a PNG says about its colors: the chunks themselves, and, when they describe
 /// something other than sRGB and the file has no profile, a color profile that says the same
 /// for the formats that cannot hold the chunks.
-fn png_color(png: &[u8], has_profile: bool) -> (PngColor, Option<Vec<u8>>) {
+fn png_color(
+    png: &[u8],
+    has_profile: bool,
+) -> (PngColor, Option<Vec<u8>>, Option<crate::hdr::HdrColor>) {
     let mut color = PngColor::default();
     let (mut gamma, mut primaries, mut is_srgb, mut cicp) = (None, None, false, None);
     let mut at = 8;
@@ -902,7 +949,11 @@ fn png_color(png: &[u8], has_profile: bool) -> (PngColor, Option<Vec<u8>>) {
         _ => None,
     };
     color.profile_from_chunks = profile.is_some();
-    (color, profile)
+    // PQ and HLG, which no profile says: the picture is HDR.
+    let hdr = cicp.and_then(|[primaries, transfer, _, _]| {
+        crate::hdr::HdrColor::of_codes(primaries, transfer)
+    });
+    (color, profile, hdr)
 }
 
 /// A color profile for what a `cICP` chunk says (primaries, transfer function, matrix, range).
@@ -1397,7 +1448,7 @@ mod tests {
         }
         let icc = b"fake icc profile bytes".to_vec();
         let picture = DynamicImage::ImageRgba8(rgba.clone());
-        let (png, encoder, _) = encode_png(&picture, 0, 100, Some(&icc), None).unwrap();
+        let (png, encoder, _) = encode_png(&picture, 0, 100, Some(&icc), None, false).unwrap();
         assert!(encoder.starts_with("imagequant"), "{encoder}");
         let mut decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&png)).unwrap();
         assert_eq!(decoder.icc_profile().unwrap(), Some(icc));

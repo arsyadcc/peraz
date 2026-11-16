@@ -1,11 +1,12 @@
-//! HDR photos: until Peraz carries a gain map over, the report says when one was left out.
-//! The JPEG XL part needs libjxl's tools and is skipped (with a note) without them.
+//! HDR pictures: gain maps that are kept, or reported when they are left out, and pictures
+//! that are HDR by their transfer function, which are kept or converted to standard range.
+//! The JPEG XL parts need libjxl's tools and are skipped (with a note) without them.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use peraz_core::{
-    ExistingOutput, ImageFormat, Job, Outcome, OutputTarget, Recipe, Report, SkipReason,
+    ExistingOutput, HdrHandling, ImageFormat, Job, Outcome, OutputTarget, Plan, Recipe, Report,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
@@ -293,25 +294,279 @@ fn a_heic_or_avif_gain_map_that_is_left_out_is_reported() {
     }
 }
 
+/// What the report's plan says became of a picture's HDR.
+fn hdr_of(report: &Report) -> Option<HdrHandling> {
+    match &report.plan {
+        Some(Plan::Image(plan)) => plan.hdr,
+        _ => None,
+    }
+}
+
+/// The mean of a standard picture's stored values (0 to 255).
+fn mean_level(path: &Path) -> f64 {
+    let pixels = image::open(path).unwrap().to_rgb8();
+    let sum: u64 = pixels.as_raw().iter().map(|v| u64::from(*v)).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let mean = sum as f64 / pixels.as_raw().len() as f64;
+    mean
+}
+
+/// How far two pictures' stored values are apart on average, as a part of their range.
+fn apart(a: &image::DynamicImage, b: &image::DynamicImage) -> f64 {
+    let (a, b) = (a.to_rgb16(), b.to_rgb16());
+    assert_eq!(a.dimensions(), b.dimensions());
+    let sum: u64 = a
+        .as_raw()
+        .iter()
+        .zip(b.as_raw())
+        .map(|(p, q)| u64::from(p.abs_diff(*q)))
+        .sum();
+    #[allow(clippy::cast_precision_loss)]
+    let mean = sum as f64 / a.as_raw().len() as f64 / 65535.0;
+    mean
+}
+
+/// Checks that a compressed HDR picture was reported as kept.
+fn assert_kept(report: &Report, name: &str) {
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{name}: {:?}",
+        report.outcome
+    );
+    assert_eq!(report.warnings, Vec::<String>::new(), "{name}");
+    assert_eq!(hdr_of(report), Some(HdrHandling::Kept), "{name}");
+}
+
+/// Checks that a compressed HDR picture was reported as converted to standard range, and
+/// that the result is a standard picture of ordinary brightness.
+fn assert_converted(report: &Report, output: &Path, name: &str) {
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{name}: {:?}",
+        report.outcome
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("converted to standard range")),
+        "{name}: {:?}",
+        report.warnings
+    );
+    assert_eq!(hdr_of(report), Some(HdrHandling::Converted), "{name}");
+    let level = mean_level(output);
+    assert!(
+        (60.0..=220.0).contains(&level),
+        "{name}: mean level {level}"
+    );
+}
+
 #[test]
-fn a_picture_that_is_hdr_by_its_transfer_function_is_left_alone() {
+fn a_picture_that_is_hdr_by_its_transfer_function_stays_hdr() {
+    use peraz_engine::heif::{decode, read_properties};
     let dir = dir("pq");
     let Some(input) = sample("hdr-pq.avif") else {
         return;
     };
     let Some(tools) = ffmpeg() else { return };
-    // Read as a standard picture, its values come out dark and flat: until Peraz can keep or
-    // convert them, the file is skipped, in every format.
-    for format in [ImageFormat::Keep, ImageFormat::Jpeg, ImageFormat::Avif] {
-        let output = dir.0.join("out.bin");
+    // The sample's values are PQ, with sRGB's primaries, and it says how bright it gets.
+    let before = read_properties(&std::fs::read(&input).unwrap())
+        .hdr
+        .expect("the sample is PQ");
+    assert_eq!((before.primaries, before.transfer), (1, 16));
+    assert_eq!(before.light_level, Some((707, 165)));
+    let source = decode(&tools.0, &input).unwrap();
+    assert_eq!(source.hdr, Some(before));
+    // Decoded at 16 bits per channel.
+    assert_eq!(source.image.color(), image::ColorType::Rgb16);
+
+    // As an AVIF and as a HEIC it is the same picture at 10 bits, and the file says the same
+    // about its values.
+    for (format, name) in [
+        (ImageFormat::Keep, "out.avif"),
+        (ImageFormat::Heic, "out.heic"),
+    ] {
+        if format == ImageFormat::Heic && !tools.1.has_encoder("libx265") {
+            eprintln!("skipped: this FFmpeg has no libx265");
+            continue;
+        }
+        let output = dir.0.join(name);
         let report = run_with(Some(&tools), &input, &output, format);
-        let Outcome::Skipped { reason, message } = &report.outcome else {
-            panic!("{format}: unexpected outcome: {:?}", report.outcome)
-        };
-        assert_eq!(*reason, SkipReason::Unsupported, "{format}");
-        assert!(message.contains("HDR (PQ or HLG)"), "{format}: {message}");
-        assert!(!output.exists(), "{format}");
+        assert_kept(&report, name);
+        assert!(
+            report.encoder.unwrap().contains("10-bit, HDR kept"),
+            "{name}"
+        );
+        let file = std::fs::read(&output).unwrap();
+        assert_eq!(read_properties(&file).hdr, Some(before), "{name}");
+        // The stream itself says so too, which is what FFmpeg reads.
+        let probed = peraz_engine::probe::probe(&tools.0, &output).unwrap();
+        let picture = probed.video.unwrap();
+        assert!(picture.color.is_hdr(), "{name}: {:?}", picture.color);
+        assert!(
+            picture.pixel_format.unwrap().contains("10"),
+            "{name}: 10 bits"
+        );
+        let result = decode(&tools.0, &output).unwrap();
+        assert_eq!(result.hdr, Some(before), "{name}");
+        let difference = apart(&source.image, &result.image);
+        assert!(difference < 0.012, "{name}: {difference} apart");
     }
+
+    // Scaled down, it is still HDR.
+    let mut recipe = Recipe::default();
+    recipe.image.max_width = Some(200);
+    let output = dir.0.join("small.avif");
+    let job = Job {
+        input: input.clone(),
+        output: OutputTarget::File(output.clone()),
+        recipe,
+        existing: ExistingOutput::Replace,
+        recompress: true,
+    };
+    let report = compress(Some(&tools.0), &tools.1, &job, &mut |_| {}, &NOT_CANCELLED);
+    assert_kept(&report, "scaled");
+    let result = decode(&tools.0, &output).unwrap();
+    assert_eq!((result.image.width(), result.hdr), (200, Some(before)));
+}
+
+#[test]
+fn an_hdr_picture_becomes_a_standard_one_where_the_format_holds_nothing_else() {
+    let dir = dir("pq-standard");
+    let Some(input) = sample("hdr-pq.avif") else {
+        return;
+    };
+    let Some(tools) = ffmpeg() else { return };
+    for (format, name) in [
+        (ImageFormat::Jpeg, "out.jpg"),
+        (ImageFormat::Webp, "out.webp"),
+        (ImageFormat::Png, "out.png"),
+    ] {
+        let output = dir.0.join(name);
+        let report = run_with(Some(&tools), &input, &output, format);
+        assert_converted(&report, &output, name);
+        assert!(!report.encoder.unwrap().contains("HDR"), "{name}");
+        // macOS shows this picture in standard range with a mean level of 160. Read as it
+        // is stored, the picture is dark and flat: a mean level of 130.
+        let level = mean_level(&output);
+        assert!(
+            (152.0..=172.0).contains(&level),
+            "{name}: mean level {level}"
+        );
+    }
+    // The sky is bright but keeps its clouds: it is not one flat white.
+    let jpeg = image::open(dir.0.join("out.jpg")).unwrap().to_luma8();
+    let sky: Vec<u8> = (0..400).map(|x| jpeg.get_pixel(x, 40)[0]).collect();
+    let (darkest, brightest) = (*sky.iter().min().unwrap(), *sky.iter().max().unwrap());
+    assert!(
+        darkest > 150 && brightest - darkest > 12,
+        "{darkest}..{brightest}"
+    );
+}
+
+#[test]
+fn an_hlg_picture_is_kept_and_converted_like_a_pq_one() {
+    use peraz_engine::hdr::{HLG, HdrColor};
+    use peraz_engine::heif::{decode, read_properties};
+    let dir = dir("hlg");
+    let Some(pq) = sample("hdr-pq.avif") else {
+        return;
+    };
+    let Some(tools) = ffmpeg() else { return };
+    // No HLG sample is at hand: the PQ sample's values are written out as an HLG picture
+    // with BT.2020 primaries. It is another picture, but a proper HLG one.
+    let hlg = HdrColor {
+        primaries: 9,
+        transfer: HLG,
+        light_level: None,
+    };
+    let pixels = decode(&tools.0, &pq).unwrap().image;
+    let input = dir.0.join("hlg.avif");
+    let file = peraz_engine::avif::encode_hdr(&pixels, hlg, 95, None).unwrap();
+    std::fs::write(&input, file).unwrap();
+    assert_eq!(
+        read_properties(&std::fs::read(&input).unwrap()).hdr,
+        Some(hlg)
+    );
+    let probed = peraz_engine::probe::probe(&tools.0, &input).unwrap();
+    let color = probed.video.unwrap().color;
+    assert_eq!(color.transfer.as_deref(), Some("arib-std-b67"));
+    assert_eq!(color.primaries.as_deref(), Some("bt2020"));
+
+    let output = dir.0.join("out.avif");
+    let report = run_with(Some(&tools), &input, &output, ImageFormat::Keep);
+    assert_kept(&report, "avif");
+    let result = decode(&tools.0, &output).unwrap();
+    assert_eq!(result.hdr, Some(hlg));
+    let difference = apart(&decode(&tools.0, &input).unwrap().image, &result.image);
+    assert!(difference < 0.012, "{difference} apart");
+
+    let output = dir.0.join("out.jpg");
+    let report = run_with(Some(&tools), &input, &output, ImageFormat::Jpeg);
+    assert_converted(&report, &output, "jpeg");
+}
+
+#[test]
+fn hdr_in_png_and_jpeg_xl_is_found_and_handled_the_same_way() {
+    let dir = dir("pq-others");
+    let Some(input) = sample("hdr-pq.avif") else {
+        return;
+    };
+    let Some(tools) = ffmpeg() else { return };
+    // A PNG says it with a `cICP` chunk: FFmpeg writes one for this picture.
+    let png = dir.0.join("hdr.png");
+    let made = std::process::Command::new(&tools.0.ffmpeg)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&input)
+        .args(["-frames:v", "1", "-pix_fmt", "rgb48be"])
+        .arg(&png)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(
+        std::fs::read(&png)
+            .unwrap()
+            .windows(4)
+            .any(|w| w == b"cICP")
+    );
+    // It stays a PNG with every shade it has: 16 bits, no palette, and the chunk.
+    let output = dir.0.join("out.png");
+    let report = run_with(Some(&tools), &png, &output, ImageFormat::Keep);
+    assert_kept(&report, "png");
+    let file = std::fs::read(&output).unwrap();
+    assert_eq!((file[24], file[25]), (16, 2), "16 bits per channel, RGB");
+    assert!(file.windows(8).any(|w| w == b"cICP\x01\x10\x00\x01"));
+    // As a JPEG it is converted, with FFmpeg or without it.
+    for with_ffmpeg in [true, false] {
+        let output = dir.0.join("from-png.jpg");
+        let tools = with_ffmpeg.then_some(&tools);
+        let report = run_with(tools, &png, &output, ImageFormat::Jpeg);
+        assert_converted(&report, &output, "png to jpeg");
+    }
+
+    if JxlTools::locate().is_none_or(|tools| tools.djxl.is_none()) {
+        eprintln!("skipped: cjxl and djxl not found");
+        return;
+    }
+    // A JPEG XL says it in its header. Made from the AVIF, it is PQ; it stays PQ as a JPEG
+    // XL, and is converted as a JPEG.
+    let jxl = dir.0.join("hdr.jxl");
+    let report = run_with(Some(&tools), &input, &jxl, ImageFormat::Jxl);
+    assert_kept(&report, "avif to jxl");
+    let header = |path: &Path| peraz_engine::jxl_header::sniff(path).unwrap().unwrap();
+    let hdr = header(&jxl).hdr.expect("a PQ JPEG XL");
+    assert_eq!((hdr.primaries, hdr.transfer), (1, 16));
+    let again = dir.0.join("again.jxl");
+    let recipe = Recipe {
+        quality: peraz_core::Quality::Smallest,
+        ..Recipe::default()
+    };
+    let report = run_recipe(&jxl, &again, recipe);
+    assert_kept(&report, "jxl");
+    assert_eq!(header(&again).hdr, Some(hdr));
+    let output = dir.0.join("from-jxl.jpg");
+    let report = run(&jxl, &output, ImageFormat::Jpeg);
+    assert_converted(&report, &output, "jxl to jpeg");
 }
 
 fn boxed(kind: [u8; 4], body: &[u8]) -> Vec<u8> {

@@ -148,7 +148,7 @@ What happened to one input, in `compress` results and `watch` lines.
 | `score.target` | integer or null | The score asked for; null when the result was only measured (`--measure-quality`). |
 | `score.score` | number | The score measured on the result, against the input at the output's size; below `score.target` when no setting could reach it. |
 | `score.sampled` | boolean | `true` when measured on samples of a longer video rather than the whole of it. |
-| `warnings[]` | array of strings | What a compressed result does not carry over from the input, as text: an HDR gain map that was removed, metadata that `--keep-metadata` could not keep. Empty when there is nothing to say. |
+| `warnings[]` | array of strings | What a compressed result does not carry over from the input, as text: an HDR gain map that was removed, an HDR picture that was converted to standard range, metadata that `--keep-metadata` could not keep. Empty when there is nothing to say. |
 | `elapsed_seconds` | number | Time spent on this file. |
 
 `outcome.status` decides the exit code: any `cancelled` makes it 130, otherwise any `failed`

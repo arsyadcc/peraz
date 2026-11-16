@@ -261,9 +261,17 @@ map box of its container (`jhgm`): as it is when the picture keeps its size, and
 map encoded again when the picture is scaled down. A gain map is not yet carried from one of
 these layouts to another: between JPEG, JPEG XL, and the other formats, and from an older
 iPhone's HEIC to AVIF. Such a photo is compressed as its standard picture, and the report warns
-that the gain map was removed. A picture that is HDR by its transfer function alone (PQ or HLG,
-such as a 10-bit AVIF) is skipped, because read as a standard picture it would come out dark and
-flat.
+that the gain map was removed.
+
+A picture can also be HDR by its pixel values alone, without a gain map: they are stored with
+the PQ or the HLG curve, usually at 10 bits (AVIF and HEIC from photo editors, screenshots of
+HDR games, JPEG XL, PNG with a `cICP` chunk). Such a picture stays HDR as an AVIF and as a HEIC
+(10 bits per channel, with its color description and light levels), as a JPEG XL, and as a PNG
+that stays a PNG (which is then never reduced to a palette). JPEG, WebP, TIFF, and a PNG made
+from another format hold standard pictures only: for them the picture is converted to standard
+range, with its light compressed so that its brightest parts are white (Reinhard's curve up to
+the picture's own peak) and its colors brought into sRGB, and the report warns that it is no
+longer HDR.
 
 JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
 and upload forms that read nothing else. A picture with sharp colored edges (colored text and

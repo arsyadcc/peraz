@@ -150,9 +150,6 @@ pub enum PlanError {
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
     UnsupportedImage { codec: String, hint: &'static str },
-    /// The picture is HDR by its transfer function (PQ or HLG), which Peraz cannot keep or
-    /// convert yet: treated as a standard picture, it would come out dark and flat.
-    HdrImage,
     /// A score target was combined with hardware encoding, which has no setting to search.
     ScoreNeedsSoftware,
     /// An animated JPEG XL that stays JPEG XL cannot be scaled down.
@@ -201,11 +198,6 @@ impl std::fmt::Display for PlanError {
             Self::UnsupportedImage { codec, hint } => {
                 write!(f, "{codec} images are not supported yet{hint}")
             }
-            Self::HdrImage => write!(
-                f,
-                "this picture is HDR (PQ or HLG), which Peraz cannot keep or convert to a \
-                 standard picture yet; it is left as it is"
-            ),
             Self::ScoreNeedsSoftware => write!(
                 f,
                 "--target-vmaf needs a software encoder; leave out --encoder hardware"
@@ -686,6 +678,37 @@ pub struct ImagePlan {
     /// Present when the picture must fit a file size; `encoding` then holds the setting the
     /// search starts from (and, once done, the one used).
     pub target: Option<ImageSizeTarget>,
+    /// Present for a picture that is HDR by its transfer function (PQ or HLG): what becomes
+    /// of that.
+    pub hdr: Option<HdrHandling>,
+}
+
+/// What becomes of a still picture that is HDR by its transfer function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HdrHandling {
+    /// The output format can say what the pixel values mean: they are kept, at 10 bits or
+    /// more.
+    Kept,
+    /// The output format holds standard pictures only: the picture is converted to standard
+    /// range, with its highlights rolled off.
+    Converted,
+}
+
+impl HdrHandling {
+    /// What becomes of an HDR picture stored with `codec` when it is written with
+    /// `encoding`. AVIF, HEIC, and JPEG XL describe such pixels; a PNG that does stays as it
+    /// is.
+    #[must_use]
+    pub fn of(encoding: &ImageEncoding, codec: &str) -> Self {
+        match encoding {
+            ImageEncoding::Avif { .. } | ImageEncoding::Heic { .. } | ImageEncoding::Jxl { .. } => {
+                Self::Kept
+            }
+            ImageEncoding::Png { .. } if codec == "png" => Self::Kept,
+            _ => Self::Converted,
+        }
+    }
 }
 
 /// The size a still image must fit in, and what the search found.
@@ -825,10 +848,6 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
             hint: "",
         });
     };
-    // Decoded as a standard picture, PQ or HLG values come out dark and flat.
-    if picture.color.is_hdr() {
-        return Err(PlanError::HdrImage);
-    }
     let source = source_format(codec);
     let format = match (recipe.image.format, codec) {
         // A still GIF is a graphic: PNG keeps it lossless, with its transparency. A BMP is
@@ -900,7 +919,6 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     let default_png = recipe.image.format == ImageFormat::Keep && matches!(codec, "gif" | "bmp");
     let flatten_alpha = format == ImageFormat::Jpeg && picture.alpha != Alpha::Absent;
     Ok(ImagePlan {
-        encoding,
         max_width: recipe.image.max_width,
         max_height: recipe.image.max_height,
         flatten_alpha,
@@ -911,6 +929,12 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         target_ssimulacra2: recipe.image.target_ssimulacra2,
         keep_metadata: recipe.image.keep_metadata,
         target,
+        // Read as a standard picture, PQ or HLG values come out dark and flat.
+        hdr: picture
+            .color
+            .is_hdr()
+            .then(|| HdrHandling::of(&encoding, codec)),
+        encoding,
     })
 }
 
@@ -945,6 +969,7 @@ fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
         target_ssimulacra2: None,
         keep_metadata: false,
         target: None,
+        hdr: None,
     })
 }
 
@@ -975,6 +1000,7 @@ fn plan_icon(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> 
         target_ssimulacra2: None,
         keep_metadata: false,
         target: None,
+        hdr: None,
     })
 }
 
@@ -1124,6 +1150,7 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
         target_ssimulacra2: None,
         keep_metadata: false,
         target: None,
+        hdr: None,
     })
 }
 
@@ -1530,6 +1557,7 @@ impl DocumentPlan {
             target_ssimulacra2: None,
             keep_metadata: false,
             target: None,
+            hdr: None,
         }
     }
 }
@@ -2216,22 +2244,49 @@ mod tests {
     }
 
     #[test]
-    fn hdr_stills_are_refused_until_they_can_be_kept() {
+    fn hdr_stills_are_kept_where_the_format_can_hold_them() {
+        let hdr = |codec: &str, container: &str, transfer: &str, format| {
+            let mut info = image_info(codec, container, Alpha::Absent);
+            info.video.as_mut().unwrap().color.transfer = Some(transfer.to_owned());
+            let mut recipe = Recipe::default();
+            recipe.image.format = format;
+            plan_image(&info, &recipe).unwrap().hdr
+        };
         for transfer in ["smpte2084", "arib-std-b67"] {
-            let mut avif = image_info("av1", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Absent);
-            avif.video.as_mut().unwrap().color.transfer = Some(transfer.to_owned());
-            for format in [ImageFormat::Keep, ImageFormat::Jpeg, ImageFormat::Avif] {
-                let mut recipe = Recipe::default();
-                recipe.image.format = format;
-                let error = plan_image(&avif, &recipe).unwrap_err();
-                assert_eq!(error, PlanError::HdrImage, "{transfer}, {format}");
-                assert!(error.to_string().contains("HDR (PQ or HLG)"), "{error}");
+            let avif = |format| hdr("av1", "mov,mp4,m4a,3gp,3g2,mj2", transfer, format);
+            for format in [
+                ImageFormat::Keep,
+                ImageFormat::Avif,
+                ImageFormat::Heic,
+                ImageFormat::Jxl,
+            ] {
+                assert_eq!(
+                    avif(format),
+                    Some(HdrHandling::Kept),
+                    "{transfer}, {format}"
+                );
             }
+            for format in [
+                ImageFormat::Jpeg,
+                ImageFormat::Webp,
+                ImageFormat::Png,
+                ImageFormat::Tiff,
+            ] {
+                let converted = Some(HdrHandling::Converted);
+                assert_eq!(avif(format), converted, "{transfer}, {format}");
+            }
+            // A PNG that says its pixels are HDR stays as it is.
+            let png = hdr("png", "png_pipe", transfer, ImageFormat::Keep);
+            assert_eq!(png, Some(HdrHandling::Kept), "{transfer}");
         }
-        // A standard picture with the same shape is planned as usual.
-        let mut avif = image_info("av1", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Absent);
-        avif.video.as_mut().unwrap().color.transfer = Some("iec61966-2-1".to_owned());
-        assert!(plan_image(&avif, &Recipe::default()).is_ok());
+        // A standard picture has nothing to say about it.
+        let standard = hdr(
+            "av1",
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "iec61966-2-1",
+            ImageFormat::Keep,
+        );
+        assert_eq!(standard, None);
     }
 
     #[test]

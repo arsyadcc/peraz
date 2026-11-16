@@ -21,6 +21,8 @@ pub struct Header {
     pub animated: bool,
     /// How the stored picture is turned for display, as EXIF numbers it (1 is upright).
     pub orientation: u8,
+    /// The picture is HDR by its transfer function (PQ or HLG), as its color encoding says.
+    pub hdr: Option<crate::hdr::HdrColor>,
 }
 
 const CODESTREAM: &[u8] = &[0xFF, 0x0A];
@@ -265,6 +267,7 @@ pub fn parse(codestream: &[u8]) -> Option<Header> {
         alpha: Alpha::Absent,
         animated: false,
         orientation: 1,
+        hdr: None,
     };
     // ImageMetadata.
     if bits.flag()? {
@@ -293,6 +296,13 @@ pub fn parse(codestream: &[u8]) -> Option<Header> {
     }
     let _modular_16_bit_buffers = bits.flag()?;
     let extra_channels = bits.u32([Val(0), Val(1), Offset(4, 2), Offset(12, 1)])?;
+    // What follows the extra channels says what the pixel values mean. A header that cannot
+    // be followed that far still gives the rest.
+    let mut ahead = Bits {
+        bytes: bits.bytes,
+        position: bits.position,
+    };
+    header.hdr = color_encoding(&mut ahead, extra_channels);
     if extra_channels > 0 {
         // The first extra channel is alpha when it has the default settings (an alpha channel)
         // or its type is 0 (alpha). Other kinds (depth, spot colors) come first only rarely.
@@ -304,6 +314,94 @@ pub fn parse(codestream: &[u8]) -> Option<Header> {
             };
     }
     Some(header)
+}
+
+/// An enumerated value: small ones in a few bits.
+const ENUM: [Dist; 4] = [Val(0), Val(1), Offset(4, 2), Offset(6, 18)];
+
+/// Reads past the extra channels to the color encoding, and gives the picture's HDR color
+/// when the encoding names PQ or HLG as its transfer function (a profile, a gamma, and every
+/// other transfer function give `None`).
+fn color_encoding(bits: &mut Bits, extra_channels: u32) -> Option<crate::hdr::HdrColor> {
+    // Values of the color space, and of a white point or primaries given by coordinates.
+    const GRAY: u32 = 1;
+    const XYB: u32 = 2;
+    const CUSTOM: u32 = 2;
+    for _ in 0..extra_channels {
+        // An alpha channel with the usual settings says nothing more.
+        if bits.flag()? {
+            continue;
+        }
+        let kind = bits.u32(ENUM)?;
+        if bits.flag()? {
+            bits.u32([Val(32), Val(16), Val(24), Offset(6, 1)])?;
+            bits.read(4)?;
+        } else {
+            bits.u32([Val(8), Val(10), Val(12), Offset(6, 1)])?;
+        }
+        bits.u32([Val(0), Val(3), Val(4), Offset(3, 1)])?; // how much smaller it is stored
+        let name = bits.u32([Val(0), Offset(4, 0), Offset(5, 16), Offset(10, 48)])?;
+        for _ in 0..name {
+            bits.read(8)?;
+        }
+        match kind {
+            // Alpha: whether the colors are multiplied by it.
+            0 => {
+                bits.flag()?;
+            }
+            // A spot color: red, green, blue, and solidity, 16 bits each.
+            2 => {
+                bits.read(32)?;
+                bits.read(32)?;
+            }
+            // A color filter array channel.
+            5 => {
+                bits.u32([Val(1), Offset(2, 0), Offset(4, 3), Offset(8, 19)])?;
+            }
+            _ => {}
+        }
+    }
+    let _xyb_encoded = bits.flag()?;
+    // All defaults is sRGB; a profile says nothing by name.
+    if bits.flag()? || bits.flag()? {
+        return None;
+    }
+    // A point given by its coordinates: two numbers.
+    let point = |bits: &mut Bits| -> Option<()> {
+        for _ in 0..2 {
+            bits.u32([
+                Offset(19, 0),
+                Offset(19, 524_288),
+                Offset(20, 1_048_576),
+                Offset(21, 2_097_152),
+            ])?;
+        }
+        Some(())
+    };
+    let color_space = bits.u32(ENUM)?;
+    if color_space != XYB && bits.u32(ENUM)? == CUSTOM {
+        point(bits)?; // the white point
+    }
+    let mut primaries = 1;
+    if color_space != XYB && color_space != GRAY {
+        primaries = bits.u32(ENUM)?;
+        if primaries == CUSTOM {
+            for _ in 0..3 {
+                point(bits)?;
+            }
+        }
+    }
+    if bits.flag()? {
+        return None; // a gamma
+    }
+    let transfer = u8::try_from(bits.u32(ENUM)?).ok()?;
+    // JPEG XL numbers the primaries as ITU-T H.273 does, but for Display P3.
+    let primaries = match primaries {
+        9 => 9,
+        11 => 12,
+        _ => 1,
+    };
+    crate::hdr::HdrColor::of_codes(primaries, transfer)
 }
 
 /// `SizeHeader`: the picture's height, and its width directly or as a ratio of the height.
@@ -446,6 +544,7 @@ mod tests {
             alpha,
             animated,
             orientation: 1,
+            hdr: None,
         };
         assert_eq!(
             parse(OPAQUE_1600X1200),
@@ -474,6 +573,7 @@ mod tests {
                 alpha: Alpha::Absent,
                 animated: false,
                 orientation: 1,
+                hdr: None,
             })
         );
         // Explicit 300x7000 (9 and 13 bits), a preview, then 10-bit with a non-alpha channel.
@@ -498,8 +598,45 @@ mod tests {
                 alpha: Alpha::Unknown,
                 animated: false,
                 orientation: 6,
+                hdr: None,
             })
         );
+    }
+
+    #[test]
+    fn reads_the_transfer_function_past_the_extra_channels() {
+        // 64x64 with two extra channels: a depth channel with a name, and an alpha channel
+        // with the usual settings. Then the color encoding: BT.2020 primaries with PQ.
+        let with = |primaries: (u32, u32), transfer: (u32, u32)| {
+            let mut w = Writer::default();
+            w.put(1, 1).put(5, 7).put(3, 1); // small size, ratio 1
+            w.put(1, 0).put(1, 0); // not all defaults, no extra fields
+            w.put(1, 0).put(2, 2); // 12-bit integers
+            w.put(1, 0).put(2, 2).put(4, 0); // 8-bit buffers no; two extra channels
+            w.put(1, 0).put(2, 1); // not default: depth
+            w.put(1, 0).put(2, 0).put(2, 1); // 8-bit integers, stored at an eighth
+            w.put(2, 1).put(4, 2).put(8, 0x64).put(8, 0x7A); // a name of two bytes
+            w.put(1, 1); // the alpha channel
+            w.put(1, 0); // not XYB
+            w.put(1, 0).put(1, 0); // a color encoding, by name
+            w.put(2, 0).put(2, 1); // RGB, D65
+            w.put(2, 2).put(4, primaries.0);
+            w.put(1, 0); // no gamma
+            w.put(2, transfer.0).put(transfer.1, 14);
+            w.put(2, 1);
+            parse(&w.codestream()).unwrap()
+        };
+        // Primaries 9 (2 + 7), transfer function 16 (2 + 14).
+        let pq = with((7, 0), (2, 4));
+        let hdr = pq.hdr.expect("PQ");
+        assert_eq!((hdr.primaries, hdr.transfer), (9, crate::hdr::PQ));
+        assert_eq!((pq.width, pq.height, pq.alpha), (64, 64, Alpha::Unknown));
+        // Display P3 is 11 here and 12 in the code points everything else uses.
+        let p3 = with((9, 0), (2, 4));
+        assert_eq!(p3.hdr.map(|hdr| hdr.primaries), Some(12));
+        // The sRGB transfer function (13 = selector 2 with 11) is no HDR: the same header
+        // with a 0-bit value for the selector 1 is the transfer function 1.
+        assert_eq!(with((7, 0), (1, 0)).hdr, None);
     }
 
     #[test]

@@ -191,12 +191,25 @@ pub fn encode(
     let workdir = crate::compress::work_folder()?;
     let input = workdir.join("in.png");
     let output = workdir.join("out.jxl");
-    let result = write_png(&prepared.image, prepared.icc.as_deref(), &input)
-        .and_then(|()| match metadata {
-            Some(metadata) => std::fs::read(&input)
-                .and_then(|png| std::fs::write(&input, metadata.into_png(&png)))
-                .map_err(|e| format!("cannot write a work file: {e}")),
-            None => Ok(()),
+    // What the values of an HDR picture mean is said by a `cICP` chunk, which cjxl reads; a
+    // profile would say something else.
+    let icc = prepared.icc.as_deref().filter(|_| prepared.hdr.is_none());
+    let described = |png: Vec<u8>| match prepared.hdr {
+        Some(hdr) => {
+            let chunk = crate::metadata::png_chunk(*b"cICP", &hdr.cicp());
+            crate::image::with_png_chunks(&png, &chunk)
+        }
+        None => png,
+    };
+    let result = write_png(&prepared.image, icc, &input)
+        .and_then(|()| {
+            if metadata.is_none() && prepared.hdr.is_none() {
+                return Ok(());
+            }
+            std::fs::read(&input)
+                .map(|png| metadata.map_or(png.clone(), |metadata| metadata.into_png(&png)))
+                .and_then(|png| std::fs::write(&input, described(png)))
+                .map_err(|e| format!("cannot write a work file: {e}"))
         })
         .and_then(|()| run_cjxl(&tools.cjxl, &input, &output, &["-q", &quality.to_string()]));
     let _ = std::fs::remove_dir_all(&workdir);
@@ -275,6 +288,15 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
         decoded.gain_map = crate::jxl_header::has_gain_map(input).unwrap_or(false);
         if decoded.gain_map {
             decoded.jxl_gain_map = stored_gain_map(input, &decoded.image);
+        }
+        // The header says when the values are PQ or HLG; the profile djxl writes for them
+        // says the same in another way, and is not needed then.
+        decoded.hdr = crate::jxl_header::sniff(input)
+            .ok()
+            .flatten()
+            .and_then(|header| header.hdr);
+        if decoded.hdr.is_some() {
+            decoded.icc = None;
         }
         decoded
     })
@@ -423,6 +445,7 @@ fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String
         jpeg_gain_map: None,
         heif_gain_map: None,
         jxl_gain_map: None,
+        hdr: None,
         png_color: crate::image::PngColor::default(),
     })
 }

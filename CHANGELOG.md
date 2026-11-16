@@ -33,6 +33,18 @@ between alpha versions.
   rendition's colors). Its bytes count toward `--target-size`. Before, the result was the
   standard picture alone, with a warning.
 
+- Pictures that are HDR by their pixel values (PQ or HLG, without a gain map) are compressed
+  instead of skipped. As an AVIF, a HEIC, and a JPEG XL such a picture stays HDR: AVIF and
+  HEIC are written with 10 bits per channel, with the picture's color description (its
+  primaries, PQ or HLG) and its light levels, and JPEG XL gets the same description. A PNG
+  that says so with a `cICP` chunk stays a 16-bit PNG, never reduced to a palette. As a JPEG,
+  a WebP, a TIFF, or a PNG made from another format, the picture is converted to standard
+  range: its light is compressed so that its brightest parts are white, its colors are
+  brought into sRGB, and the report warns that it is no longer HDR. Such pictures are now
+  also found in JPEG XL (from its header) and in PNG without FFmpeg. **Interface:**
+  `plan.hdr` is `kept` or `converted` for such a picture (else `null`); the `encoder` text
+  says `10-bit, HDR kept`; a skipped result no longer has this cause.
+
 ### Fixed
 
 - The XMP packet of a HEIC's gain map is no longer taken for the picture's own XMP when the

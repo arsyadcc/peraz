@@ -766,6 +766,7 @@ mod tests {
             target_ssimulacra2: Some(80),
             keep_metadata: false,
             target: None,
+            hdr: None,
         }
     }
 
@@ -783,6 +784,7 @@ mod tests {
                 jpeg_gain_map: None,
                 heif_gain_map: None,
                 jxl_gain_map: None,
+                hdr: None,
                 png_color: crate::image::PngColor::default(),
             };
             let (encoded, score) =
@@ -811,6 +813,7 @@ mod tests {
             jpeg_gain_map: None,
             heif_gain_map: None,
             jxl_gain_map: None,
+            hdr: None,
             png_color: crate::image::PngColor::default(),
         };
         let (_, score) =

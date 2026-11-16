@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 use peraz_core::plan::fit_within;
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
-    Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, SkipReason, TrimMethod,
-    VideoOutput, plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng, plan_document,
-    plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
+    Clip, ExistingOutput, HdrHandling, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo,
+    MediaKind, Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, SkipReason,
+    TrimMethod, VideoOutput, plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng,
+    plan_document, plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
 };
 
 use crate::batch::{Batch, Lane};
@@ -407,7 +407,6 @@ fn make_image(
         Ok(plan) => plan,
         Err(
             e @ (PlanError::UnsupportedImage { .. }
-            | PlanError::HdrImage
             | PlanError::SvgConversion { .. }
             | PlanError::IconConversion { .. }),
         ) => {
@@ -431,6 +430,12 @@ fn make_image(
         Err(outcome) => return outcome,
     };
     let (decoded, rebuilt_jpeg) = decode_image(tools, &job.input, plan.decoder);
+    let codec = info
+        .video
+        .as_ref()
+        .map_or("", |picture| picture.codec.as_str());
+    let decoded = decoded.map(|decoded| settle_hdr(decoded, &mut plan, codec));
+    report.plan = Some(Plan::Image(plan.clone()));
     if rebuilt_jpeg.is_some()
         && let ImageEncoding::Jxl { from_jpeg, .. } = &mut plan.encoding
     {
@@ -488,6 +493,9 @@ fn make_image(
         if gain_map && !kept_gain_map && !(identical && plan.keep_metadata) {
             report.warnings.push(GAIN_MAP_REMOVED.to_owned());
         }
+        if plan.hdr == Some(HdrHandling::Converted) {
+            report.warnings.push(HDR_CONVERTED.to_owned());
+        }
     }
     // Only results that are kept are measured.
     if let (Outcome::Compressed { .. }, Some(reference)) = (&outcome, reference) {
@@ -500,6 +508,33 @@ fn make_image(
 /// What the report says about a photo whose HDR gain map is not in the result.
 const GAIN_MAP_REMOVED: &str = "this photo's HDR gain map was removed: the result is its \
                                 standard picture, without the extra brightness on HDR screens";
+
+/// Settles what becomes of a picture that is HDR by its transfer function: what its pixels
+/// say counts, whatever the probe saw. Where the output cannot hold it, it becomes a
+/// standard picture here, before anything else is done with it.
+fn settle_hdr(
+    decoded: crate::image::Decoded,
+    plan: &mut peraz_core::ImagePlan,
+    codec: &str,
+) -> crate::image::Decoded {
+    plan.hdr = decoded.hdr.map(|_| HdrHandling::of(&plan.encoding, codec));
+    match (plan.hdr, decoded.hdr) {
+        (Some(HdrHandling::Converted), Some(color)) => crate::image::Decoded {
+            image: crate::hdr::to_standard(&decoded.image, color),
+            icc: None,
+            hdr: None,
+            png_color: crate::image::PngColor::default(),
+            ..decoded
+        },
+        _ => decoded,
+    }
+}
+
+/// What the report says about a picture that was HDR by its transfer function and is not
+/// any more.
+const HDR_CONVERTED: &str = "this picture was HDR (PQ or HLG) and was converted to standard \
+                             range, which is all the output format holds: its highlights \
+                             were rolled off";
 
 /// Encodes a picture at the plan's setting, or to its score target, or, with a size target, at
 /// the best setting that fits; the plan in the report then says what a search found.

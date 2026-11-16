@@ -493,7 +493,11 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
             frame_rate: None,
             frame_count: Some(1),
             pixel_format: None,
-            color: ColorInfo::default(),
+            color: Some(codec)
+                .filter(|codec| *codec == "png")
+                .and_then(|_| png_hdr(path))
+                .map(hdr_color_info)
+                .unwrap_or_default(),
             alpha,
             bit_rate: None,
         }),
@@ -682,12 +686,47 @@ fn jpeg_xl_info(path: &Path, size_bytes: u64) -> Result<Option<MediaInfo>, Engin
             frame_rate: None,
             frame_count: (!header.animated).then_some(1),
             pixel_format: None,
-            color: ColorInfo::default(),
+            color: header.hdr.map(hdr_color_info).unwrap_or_default(),
             alpha: header.alpha,
             bit_rate: None,
         }),
         audio: Vec::new(),
     }))
+}
+
+/// The color description of a picture that is HDR by its transfer function, in FFmpeg's
+/// names.
+fn hdr_color_info(hdr: crate::hdr::HdrColor) -> ColorInfo {
+    let (primaries, transfer) = hdr.names();
+    ColorInfo {
+        primaries: Some(primaries.to_owned()),
+        transfer: Some(transfer.to_owned()),
+        matrix: None,
+        range: None,
+    }
+}
+
+/// What a PNG's `cICP` chunk says, when it says the picture is HDR (PQ or HLG). The chunk
+/// comes before the picture data; the chunks before it are skipped over.
+fn png_hdr(path: &Path) -> Option<crate::hdr::HdrColor> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(8)).ok()?;
+    loop {
+        let mut head = [0u8; 8];
+        file.read_exact(&mut head).ok()?;
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        match &head[4..] {
+            b"IDAT" | b"IEND" => return None,
+            b"cICP" => {
+                let mut codes = [0u8; 4];
+                file.read_exact(&mut codes).ok()?;
+                return crate::hdr::HdrColor::of_codes(codes[0], codes[1]);
+            }
+            // The chunk's data and its checksum.
+            _ => file.seek(SeekFrom::Current(i64::from(length) + 4)).ok()?,
+        };
+    }
 }
 
 /// The codec name for JPEG XL (FFmpeg's).
