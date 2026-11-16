@@ -37,6 +37,11 @@ between alpha versions.
 
 ### Changed
 
+- The bundled FFmpeg build is smaller: `ffprobe` is now built without the encoders and their
+  libraries, which it never used. It reads everything it read before. The `peraz-full`
+  archives are 20% to 22% smaller (5.5 MB to 11.5 MB less), and an installed build takes
+  20 MB to 35 MB less disk space. `peraz ffmpeg install` downloads the new build
+  (`ffmpeg-9.0.2-4`).
 - With `--target-size`, a PNG that is too large at the lowest palette quality gets a palette
   of fewer colors (128 down to 8) before it is scaled down, with dithering or without it,
   whichever scores better. Flat graphics keep their size that way (scaling them down made
