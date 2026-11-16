@@ -541,7 +541,7 @@ fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
             max_quality: quality,
         },
         // Lossless, or not pixels at all: there is no setting to search.
-        ImageEncoding::Tiff | ImageEncoding::Svg { .. } => encoding,
+        ImageEncoding::Tiff | ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => encoding,
     }
 }
 
@@ -553,7 +553,7 @@ fn quality_of(encoding: ImageEncoding) -> u8 {
         | ImageEncoding::Avif { quality }
         | ImageEncoding::Jxl { quality, .. } => quality,
         ImageEncoding::Png { max_quality, .. } => max_quality,
-        ImageEncoding::Tiff | ImageEncoding::Svg { .. } => 100,
+        ImageEncoding::Tiff | ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => 100,
     }
 }
 

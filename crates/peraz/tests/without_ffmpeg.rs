@@ -235,6 +235,41 @@ fn an_svg_is_minified_without_ffmpeg() {
 }
 
 #[test]
+fn an_icon_file_is_compressed_without_ffmpeg() {
+    let dir = setup("icon");
+    // An ICO holding one 256-pixel PNG, barely compressed.
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 256, 256);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fastest);
+        let mut writer = encoder.write_header().unwrap();
+        let pixels = image::RgbaImage::from_fn(256, 256, |x, y| {
+            image::Rgba([byte(x), byte(y), byte(x ^ y), 255])
+        });
+        writer.write_image_data(pixels.as_raw()).unwrap();
+        writer.finish().unwrap();
+    }
+    let mut ico = vec![0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 32, 0];
+    ico.extend(u32::try_from(png.len()).unwrap().to_le_bytes());
+    ico.extend(22u32.to_le_bytes());
+    ico.extend(png);
+    std::fs::write(dir.0.join("favicon.ico"), ico).unwrap();
+    let output = peraz(
+        &dir.0,
+        &["compress", "--json", "--out-dir", "out", "favicon.ico"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &json["results"][0];
+    assert_eq!(result["kind"], "image", "{json}");
+    assert_eq!(result["outcome"]["status"], "compressed", "{json}");
+    assert_eq!(result["plan"]["encoding"]["format"], "icon", "{json}");
+    assert!(dir.0.join("out/favicon-1.ico").is_file());
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(

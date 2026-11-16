@@ -158,6 +158,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL, TIFF, BMP | JPEG, PNG, WebP, AVIF, JPEG XL, TIFF |
 | Animation | GIF, animated PNG, animated WebP, animated JPEG XL, video | GIF, animated PNG, animated WebP, animated AVIF, animated JPEG XL, MP4 |
 | Vector | SVG, SVGZ | Same format, minified |
+| Icons | ICO, CUR, ICNS | Same format and sizes, smaller pictures inside |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
 A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
@@ -186,6 +187,7 @@ peraz --format jxl -q highest *.jpg        # JPEG XL: JPEGs about 20% smaller, p
 peraz IMG_0042.HEIC                        # → IMG_0042-1.jpg, upright, colors kept
 peraz scan.tiff screenshot.bmp             # lossless TIFF (16-bit stays 16-bit); BMP → PNG
 peraz logo.svg icons/*.svg                 # minified SVG that renders the same
+peraz favicon.ico AppIcon.icns             # same sizes inside, recompressed
 peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12 fps)
 peraz -q small reaction.gif                # smaller GIF, same timing
 peraz --format webp clip.mp4               # animated WebP (or avif: smallest)
@@ -278,6 +280,17 @@ drawing made at a tiny scale survives. IDs, class names, `viewBox`, style sheets
 and `<foreignObject>` content are never changed, so pages and style sheets that refer into the
 file keep working. An SVG is not converted to another format: with a `--format` for pictures it
 is skipped.
+
+### Icon files
+
+An ICO, CUR, or ICNS file stays what it is, with every picture at its size, kept only when
+smaller. The PNG pictures inside are recompressed, and a 256-pixel bitmap in an ICO becomes a
+PNG, which Windows reads at that size since Vista; `-q highest` keeps every pixel, and lower
+levels also reduce colors where that makes a picture smaller. PNG pictures stay 8-bit RGBA, the
+form Windows and macOS expect in an icon. Everything else is kept byte for byte: smaller bitmaps
+in an ICO, JPEG 2000 and old run-length pictures and masks in an ICNS, a cursor's hotspots, and
+an ICNS's dark-mode variant (whose own pictures are recompressed). An icon file is not converted
+to another format: with a `--format` for pictures it is skipped.
 
 ### PDF and EPUB
 
@@ -396,7 +409,7 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
   plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
   [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
 - Without FFmpeg, Peraz still compresses JPEG, PNG, animated PNG, WebP, BMP, TIFF, JPEG XL, and
-  SVG images, PDFs, and EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
+  SVG images, icon files, PDFs, and EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 
 ## Building from source
 

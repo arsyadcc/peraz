@@ -375,7 +375,11 @@ fn make_image(
     let failed = |message: String| Outcome::Failed { message };
     let mut plan = match plan_image(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e @ (PlanError::UnsupportedImage { .. } | PlanError::SvgConversion { .. })) => {
+        Err(
+            e @ (PlanError::UnsupportedImage { .. }
+            | PlanError::SvgConversion { .. }
+            | PlanError::IconConversion { .. }),
+        ) => {
             return Outcome::Skipped {
                 message: e.to_string(),
             };
@@ -383,11 +387,9 @@ fn make_image(
         Err(e) => return failed(e.to_string()),
     };
     report.plan = Some(Plan::Image(plan.clone()));
-    if let ImageEncoding::Svg { decimals } = plan.encoding {
-        return make_svg(batch, job, info, plan.extension, decimals, progress, report);
-    }
-    if let Some(skipped) = multi_page_tiff(info, &job.input) {
-        return skipped;
+    // SVGs and icon files are rewritten whole; a TIFF with several pages is skipped.
+    if let Some(outcome) = make_without_pixels(batch, job, info, &plan, progress, report) {
+        return outcome;
     }
     let output = match choose_output(batch, job, plan.extension) {
         Ok(output) => output,
@@ -478,6 +480,40 @@ fn make_image(
     outcome
 }
 
+/// The outcome for the files that are not encoded from pixels: an SVG and an icon file are
+/// rewritten in their own format, and a TIFF with several pages is skipped. `None` for a
+/// picture that goes through the pixel pipeline.
+fn make_without_pixels(
+    batch: &Batch,
+    job: &Job,
+    info: &MediaInfo,
+    plan: &peraz_core::ImagePlan,
+    progress: Progress,
+    report: &mut Report,
+) -> Option<Outcome> {
+    match plan.encoding {
+        ImageEncoding::Svg { decimals } => Some(make_svg(
+            batch,
+            job,
+            info,
+            plan.extension,
+            decimals,
+            progress,
+            report,
+        )),
+        ImageEncoding::Icon { palette_quality } => Some(make_icon(
+            batch,
+            job,
+            info,
+            plan.extension,
+            palette_quality,
+            progress,
+            report,
+        )),
+        _ => multi_page_tiff(info, &job.input),
+    }
+}
+
 /// Minifies an SVG, which stays an SVG: gzip-compressed again when it was.
 fn make_svg(
     batch: &Batch,
@@ -519,6 +555,48 @@ fn make_svg(
         }
         .to_owned(),
     );
+    let partial = partial_path(&output);
+    if let Err(e) = std::fs::write(&partial, &bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return failed(format!("cannot write {}: {e}", output.display()));
+    }
+    progress(1.0);
+    finish(&partial, &output, info.size_bytes, false)
+}
+
+/// Compresses the pictures inside an icon file, which keeps its format and sizes.
+fn make_icon(
+    batch: &Batch,
+    job: &Job,
+    info: &MediaInfo,
+    extension: &str,
+    palette_quality: Option<(u8, u8)>,
+    progress: Progress,
+    report: &mut Report,
+) -> Outcome {
+    let failed = |message: String| Outcome::Failed { message };
+    let output = match choose_output(batch, job, extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    let bytes = match std::fs::read(&job.input) {
+        Ok(bytes) => bytes,
+        Err(e) => return failed(format!("cannot read {}: {e}", job.input.display())),
+    };
+    let (bytes, stats) = match crate::icon::compress(&bytes, palette_quality) {
+        Ok(done) => done,
+        Err(message) => return failed(format!("{}: {message}", job.input.display())),
+    };
+    report.encoder = Some(format!(
+        "{} · {} of {} pictures recompressed",
+        if palette_quality.is_some() {
+            "imagequant + oxipng"
+        } else {
+            "oxipng (lossless)"
+        },
+        stats.recompressed,
+        stats.pictures
+    ));
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);

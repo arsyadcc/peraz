@@ -115,7 +115,7 @@ pub struct SettingsArgs {
 #[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)] // command-line switches
 pub struct Args {
-    /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF, JPEG XL, TIFF, BMP, SVG), GIFs, PDFs, and EPUBs.
+    /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF, JPEG XL, TIFF, BMP, SVG, ICO, ICNS), GIFs, PDFs, and EPUBs.
     #[arg(required = true)]
     files: Vec<PathBuf>,
 
@@ -434,8 +434,7 @@ fn check_jpeg_xl_inputs(files: &[PathBuf]) -> Result<(), u8> {
 }
 
 /// What Peraz compresses without FFmpeg (everything it decodes and encodes in process).
-pub const WITHOUT_FFMPEG: &str =
-    "JPEG, PNG, animated PNG, WebP, BMP, TIFF, JPEG XL, and SVG images, PDFs, and EPUBs";
+pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, animated PNG, WebP, BMP, TIFF, JPEG XL, and SVG images, icon files, PDFs, and EPUBs";
 
 /// Finds FFmpeg. Without one, the run goes on only when FFmpeg was not chosen explicitly (with
 /// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz compresses itself; otherwise it

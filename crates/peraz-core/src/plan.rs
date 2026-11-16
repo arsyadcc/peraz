@@ -154,6 +154,8 @@ pub enum PlanError {
     AnimatedJxlResize,
     /// An SVG is only minified: it has no pixels to encode in another format.
     SvgConversion { format: ImageFormat },
+    /// An icon file holds several sizes of one picture and stays an icon file.
+    IconConversion { format: ImageFormat },
 }
 
 impl std::fmt::Display for PlanError {
@@ -205,6 +207,10 @@ impl std::fmt::Display for PlanError {
             Self::SvgConversion { format } => write!(
                 f,
                 "an SVG is minified, not converted to {format}; leave out --format to minify it"
+            ),
+            Self::IconConversion { format } => write!(
+                f,
+                "an icon file holds several sizes of one picture and is not converted to {format}; leave out --format to compress it"
             ),
         }
     }
@@ -630,6 +636,10 @@ pub enum ImageEncoding {
     /// SVG, minified: comments, editor metadata, and needless whitespace removed, numbers
     /// written in their shortest form and rounded to `decimals` places (`None`: not rounded).
     Svg { decimals: Option<u8> },
+    /// An icon file (ICO, CUR, ICNS) written back in its own format with the same sizes: the
+    /// PNG pictures inside are recompressed, reduced to a palette's colors within this quality
+    /// range (0–100, pngquant-style) when it can be met; `None` keeps every pixel.
+    Icon { palette_quality: Option<(u8, u8)> },
 }
 
 /// A complete plan for compressing one still image.
@@ -700,6 +710,9 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     let codec = picture.codec.as_str();
     if codec == "svg" {
         return plan_svg(info, recipe);
+    }
+    if matches!(codec, "ico" | "icns") {
+        return plan_icon(info, recipe);
     }
     let decoder = if NATIVE_IMAGES.contains(&codec) {
         ImageDecoder::Native
@@ -814,6 +827,33 @@ fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
             "svg"
         },
         decoder: ImageDecoder::Text,
+        converts_format: false,
+        target_ssimulacra2: None,
+    })
+}
+
+/// Plans the compression of an icon file, which keeps its format and every size it holds. The
+/// container is `ico`, `cur`, or `icns`.
+fn plan_icon(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
+    if recipe.image.format != ImageFormat::Keep {
+        return Err(PlanError::IconConversion {
+            format: recipe.image.format,
+        });
+    }
+    Ok(ImagePlan {
+        encoding: ImageEncoding::Icon {
+            palette_quality: apng_palette_quality(recipe.quality),
+        },
+        // Every size in the file is kept as it is, and there is no single picture to score.
+        max_width: None,
+        max_height: None,
+        flatten_alpha: false,
+        extension: match info.container.as_str() {
+            "icns" => "icns",
+            "cur" => "cur",
+            _ => "ico",
+        },
+        decoder: ImageDecoder::Native,
         converts_format: false,
         target_ssimulacra2: None,
     })
@@ -980,6 +1020,7 @@ pub fn wants_apng(info: &MediaInfo, recipe: &Recipe) -> bool {
 /// The palette quality range (0–100, pngquant-style) for an animated PNG at a quality level:
 /// the frames share one palette of at most 256 colors when it reaches the minimum, and stay
 /// true-color (lossless) otherwise. `None` at the highest level, which is always lossless.
+/// Icon files use the same ranges for the pictures inside them.
 pub fn apng_palette_quality(quality: Quality) -> Option<(u8, u8)> {
     [
         None,
@@ -1837,6 +1878,44 @@ mod tests {
         );
         assert!(
             error.to_string().contains("not converted to webp"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_icon_file_keeps_its_format_and_sizes() {
+        let mut recipe = Recipe::default();
+        recipe.image.max_width = Some(64);
+        for (container, codec, extension) in [
+            ("ico", "ico", "ico"),
+            ("cur", "ico", "cur"),
+            ("icns", "icns", "icns"),
+        ] {
+            let plan = plan_image(&image_info(codec, container, Alpha::Unknown), &recipe).unwrap();
+            assert_eq!(
+                plan.encoding,
+                ImageEncoding::Icon {
+                    palette_quality: Some((65, 85))
+                }
+            );
+            assert_eq!(
+                (plan.extension, plan.converts_format, plan.max_width),
+                (extension, false, None)
+            );
+        }
+        recipe.quality = Quality::Highest;
+        assert_eq!(
+            plan_image(&image_info("ico", "ico", Alpha::Unknown), &recipe)
+                .unwrap()
+                .encoding,
+            ImageEncoding::Icon {
+                palette_quality: None
+            }
+        );
+        recipe.image.format = ImageFormat::Png;
+        let error = plan_image(&image_info("icns", "icns", Alpha::Unknown), &recipe).unwrap_err();
+        assert!(
+            error.to_string().contains("not converted to png"),
             "{error}"
         );
     }

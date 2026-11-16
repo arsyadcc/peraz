@@ -13,6 +13,7 @@ mod error;
 pub mod ffmpeg;
 pub mod gif;
 pub mod heif;
+pub mod icon;
 pub mod image;
 pub mod jxl;
 pub mod jxl_header;

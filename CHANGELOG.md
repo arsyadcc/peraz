@@ -37,6 +37,16 @@ between alpha versions.
   **Interface:** in `peraz probe` and reports an SVG has `kind` `image`, with `codec` `svg` and
   the container `svg` or `svgz`; the report's `plan.type` is `image`; `peraz watch` picks up
   `.svg` and `.svgz` files.
+- Icon files: an ICO, CUR, or ICNS file is compressed and stays what it is, with every picture
+  at its size, kept only when smaller. PNG pictures inside are recompressed as 8-bit RGBA
+  (losslessly at `--quality highest`, with reduced colors below it where that is smaller), a
+  256-pixel bitmap in an ICO becomes a PNG, and everything else is kept byte for byte: smaller
+  bitmaps, JPEG 2000 and run-length pictures and masks in an ICNS, cursor hotspots. An ICNS's
+  table of contents and its dark-mode variant are rewritten to match. With a `--format` that
+  names a picture format, an icon file is skipped. No FFmpeg is needed. **Interface:** in
+  `peraz probe` and reports an icon file has `kind` `image`, the container `ico`, `cur`, or
+  `icns`, and the size of its largest picture; the report's `plan.type` is `image`; `peraz
+  watch` picks up `.ico`, `.cur`, and `.icns` files.
 - A BMP is compressed without `--format`: it becomes a PNG, kept only when smaller. Before, a BMP
   or TIFF needed an explicit `--format` and was skipped without one.
 - `peraz compress --cancel-on-stdin` cancels the run like the first Ctrl-C when standard input

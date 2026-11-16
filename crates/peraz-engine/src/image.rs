@@ -86,9 +86,9 @@ fn encode_image_inner(prepared: &Decoded, plan: &ImagePlan) -> Result<EncodedIma
             crate::tiff::encode(image, icc.as_deref())?,
             crate::tiff::ENCODER.to_owned(),
         ),
-        // An SVG is minified as text and never reaches the pixel encoders.
-        ImageEncoding::Svg { .. } => {
-            return Err("internal error: an SVG has no pixels to encode".to_owned());
+        // SVGs and icon files are rewritten whole and never reach the pixel encoders.
+        ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => {
+            return Err("internal error: this file is not encoded from pixels".to_owned());
         }
         ImageEncoding::Avif { quality } => {
             let mut rgba = image.to_rgba8();
@@ -341,7 +341,7 @@ pub(crate) fn quantize(
     Ok(Some((palette, indexes, achieved)))
 }
 
-enum PngPixels<'a> {
+pub(crate) enum PngPixels<'a> {
     Indexed {
         palette: &'a [u8],
         alpha: &'a [u8],
@@ -351,7 +351,7 @@ enum PngPixels<'a> {
     Rgba(&'a [u8]),
 }
 
-fn write_png(
+pub(crate) fn write_png(
     width: u32,
     height: u32,
     pixels: &PngPixels,
