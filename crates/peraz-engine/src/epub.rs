@@ -134,7 +134,7 @@ fn recompress_picture(
     plan: &DocumentPlan,
 ) -> Option<Vec<u8>> {
     let decoded = decode_native_bytes(bytes, name).ok()?;
-    encode_image(decoded, &plan.image_plan(format))
+    encode_image(None, decoded, &plan.image_plan(format))
         .ok()
         .map(|encoded| encoded.bytes)
 }

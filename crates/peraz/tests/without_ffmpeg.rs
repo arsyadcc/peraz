@@ -270,6 +270,28 @@ fn an_icon_file_is_compressed_without_ffmpeg() {
 }
 
 #[test]
+fn heic_output_without_ffmpeg_stops_the_run_before_any_work() {
+    let dir = setup("heic");
+    for spelling in ["heic", "heif"] {
+        let output = peraz(
+            &dir.0,
+            &[
+                "compress",
+                "--format",
+                spelling,
+                "--out-dir",
+                "out",
+                "photo.png",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(ENVIRONMENT));
+        let message = stderr(&output);
+        assert!(message.contains("--format heic needs FFmpeg"), "{message}");
+    }
+    assert!(!dir.0.join("out/photo-1.heic").exists());
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(

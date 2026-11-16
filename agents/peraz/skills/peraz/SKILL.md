@@ -60,7 +60,7 @@ result, and `--out-dir <folder>` for a batch so the results land together.
 | Media information only | `peraz probe --json <files>` |
 
 `peraz compress --help` lists every flag. HDR videos become 10-bit HEVC; `--codec h264` on one
-is an error. HEIC photos become JPEG unless `--format` says otherwise.
+is an error. HEIC photos stay HEIC (smaller); `--format jpeg` turns them into JPEG.
 
 Images take seconds; videos can take minutes each. For a batch of videos, run the command in the
 background and report when it finishes.

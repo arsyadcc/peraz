@@ -133,8 +133,8 @@ peraz doctor                             # which FFmpeg is used and what it can 
   and JPEG XL, which also shrinks JPEGs losslessly.
   EXIF orientation is applied, the color profile is kept, and other metadata, including GPS
   location, is removed.
-- **iPhone photos** — HEIC and AVIF input, upright and with their colors, converted to JPEG by
-  default.
+- **iPhone photos** — HEIC and AVIF in and out, upright and with their colors: a HEIC comes
+  back as a smaller HEIC, or as a JPEG with `--format jpeg`.
 - **GIFs done properly** — Peraz encodes GIFs itself: a palette per frame, dithering, only the
   pixels that changed, and identical frames merged.
 - **Modern animation** — turn videos and GIFs into animated WebP or AVIF, or a GIF into an MP4
@@ -155,7 +155,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Kind | Input | Output |
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
-| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL, TIFF, BMP | JPEG, PNG, WebP, AVIF, JPEG XL, TIFF |
+| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL, TIFF, BMP | JPEG, PNG, WebP, AVIF, HEIC, JPEG XL, TIFF |
 | Animation | GIF, animated PNG, animated WebP, animated JPEG XL, video | GIF, animated PNG, animated WebP, animated AVIF, animated JPEG XL, MP4 |
 | Vector | SVG, SVGZ | Same format, minified |
 | Icons | ICO, CUR, ICNS | Same format and sizes, smaller pictures inside |
@@ -184,7 +184,8 @@ peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
 peraz --format jpeg --max-width 2000 *.png
 peraz --format webp *.png *.jpg            # or --format avif (smallest, slower)
 peraz --format jxl -q highest *.jpg        # JPEG XL: JPEGs about 20% smaller, pixels unchanged
-peraz IMG_0042.HEIC                        # → IMG_0042-1.jpg, upright, colors kept
+peraz IMG_0042.HEIC                        # → IMG_0042-1.heic, smaller, colors kept
+peraz --format jpeg IMG_0042.HEIC          # → IMG_0042-1.jpg, upright, opens everywhere
 peraz scan.tiff screenshot.bmp             # lossless TIFF (16-bit stays 16-bit); BMP → PNG
 peraz logo.svg icons/*.svg                 # minified SVG that renders the same
 peraz favicon.ico AppIcon.icns             # same sizes inside, recompressed
@@ -230,9 +231,15 @@ clip can always be copied.
 The EXIF orientation is applied and the color profile is kept; other metadata (EXIF, XMP,
 including GPS location) is removed. Transparent images converted to JPEG are placed on white.
 Every output format, AVIF and WebP included, carries the color profile, so wide-gamut photos
-(Display P3) stay wide-gamut. HEIC photos become JPEG by default (use `--format` for WebP,
-AVIF, or PNG); transparent HEIC and AVIF pictures keep their transparency. When the format
-changes on purpose, the result is kept even if it is larger, and the report shows the increase.
+(Display P3) stay wide-gamut. Transparent HEIC and AVIF pictures keep their transparency. When
+the format changes on purpose, the result is kept even if it is larger, and the report shows
+the increase.
+
+A HEIC photo stays a HEIC, kept only when smaller; `--format jpeg` makes the JPEG that opens
+everywhere, and `--format heic` makes a HEIC from any picture. FFmpeg encodes it with libx265
+(the build from `peraz ffmpeg install` has it), 8 bits per channel with 4:2:0 color, as phones
+do; Peraz writes the HEIF container itself. A picture with transparency carries it as a second
+picture, the way Apple's software stores it.
 
 `--format jxl` writes JPEG XL with libjxl's `cjxl` (from `peraz ffmpeg install`, your package
 manager, or `PERAZ_CJXL`). At the same quality level it scores like JPEG on SSIMULACRA2 at
@@ -340,7 +347,7 @@ A recipe is a named set of settings, written in TOML with the same keys as the f
 version = 1                      # recipe format version
 description = "Pictures for our website"
 quality = "balanced"             # highest, high, balanced, small, smallest
-format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, apng, mp4
+format = "webp"                  # keep, jpeg, png, webp, avif, jxl, heic, tiff, gif, apng, mp4
 max_width = 2000                 # pixels; never scales up
 max_height = 2000
 codec = "h264"                   # h264, hevc

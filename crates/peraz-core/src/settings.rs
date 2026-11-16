@@ -7,7 +7,7 @@
 //! version = 1                      # recipe format version (required to be 1 for now)
 //! description = "Small pictures for websites"
 //! quality = "balanced"             # highest, high, balanced, small, smallest
-//! format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, apng, mp4
+//! format = "webp"                  # keep, jpeg, png, webp, avif, jxl, heic, tiff, gif, apng, mp4
 //! max_width = 2000                 # pixels; never scales up
 //! max_height = 2000
 //! codec = "h264"                   # video codec: h264, hevc (default: h264, hevc for HDR)
@@ -114,7 +114,7 @@ pub struct OutputFormat {
 impl OutputFormat {
     /// Every value `format` accepts, in the order help lists them.
     pub const NAMES: &'static [&'static str] = &[
-        "keep", "jpeg", "png", "webp", "avif", "jxl", "tiff", "gif", "apng", "mp4",
+        "keep", "jpeg", "png", "webp", "avif", "jxl", "heic", "tiff", "gif", "apng", "mp4",
     ];
 }
 
@@ -132,6 +132,7 @@ impl std::str::FromStr for OutputFormat {
     /// | webp  | WebP         | animated WebP | animated WebP |
     /// | avif  | AVIF         | animated AVIF | animated AVIF |
     /// | jxl   | JPEG XL      | MP4           | GIF           |
+    /// | heic  | HEIC         | MP4           | GIF           |
     /// | tiff  | TIFF         | MP4           | GIF           |
     /// | gif   | same format  | GIF           | GIF           |
     /// | apng  | PNG          | animated PNG  | animated PNG  |
@@ -144,6 +145,7 @@ impl std::str::FromStr for OutputFormat {
             "webp" => (ImageFormat::Webp, VideoOutput::Webp),
             "avif" => (ImageFormat::Avif, VideoOutput::Avif),
             "jxl" => (ImageFormat::Jxl, VideoOutput::Keep),
+            "heic" | "heif" => (ImageFormat::Heic, VideoOutput::Keep),
             "tiff" | "tif" => (ImageFormat::Tiff, VideoOutput::Keep),
             "gif" => (ImageFormat::Keep, VideoOutput::Gif),
             "apng" => (ImageFormat::Png, VideoOutput::Apng),

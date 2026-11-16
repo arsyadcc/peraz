@@ -13,6 +13,14 @@ between alpha versions.
 
 ### Added
 
+- HEIC output: `--format heic` (recipe value `heic`, also spelled `heif`) writes a HEIC from
+  any still picture, with its color profile, its transparency (as an alpha picture, the way
+  Apple's software stores it), and any size, odd ones included. FFmpeg encodes the picture with
+  libx265 at 8 bits per channel with 4:2:0 color, and Peraz writes the HEIF container. The
+  quality levels use x265 CRF 17, 21, 24, 27, and 30, set by SSIMULACRA2 scores against the JPEG
+  levels; `--target-ssimulacra2` and `--measure-quality` work. **Interface:** new `--format`
+  and recipe `format` value `heic`; exit code `3` before any work when `--format heic` is given
+  and FFmpeg is missing or has no libx265.
 - TIFF output: `--format tiff` (recipe value `tiff`) writes a TIFF with lossless Deflate
   compression that keeps the bit depth (8-bit, 16-bit, floating point), transparency, and color
   profile, and a TIFF input stays a TIFF by default, kept only when smaller. Every quality level
@@ -56,11 +64,20 @@ between alpha versions.
 
 ### Changed
 
+- A HEIC stays a HEIC by default, kept only when smaller; before, it became a JPEG. `--format
+  jpeg` still makes the JPEG. With an FFmpeg that has no libx265, a HEIC without `--format`
+  fails with a message that says so. **Interface:** the default output of HEIC inputs changed
+  from JPEG to HEIC.
 - An animated PNG is an animation, not a video: `kind` is `animation` in `peraz probe` and in
   reports (it was `video`), and by default it stays an animated PNG instead of becoming an MP4;
   `--format mp4` still makes a video from it. An animated PNG with a single frame is a still
   image and is compressed as a PNG. **Interface:** the `kind` and the default output of animated
   PNG inputs changed.
+
+### Fixed
+
+- A HEIC or AVIF stored as a tile grid with an odd width or height lost its last column or row
+  of pixels when read.
 
 ## [0.5.0] - 2026-11-16
 

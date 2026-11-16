@@ -630,6 +630,9 @@ pub enum ImageEncoding {
     /// `from_jpeg`: the input is a JPEG, so it is also recompressed losslessly (its pixels kept
     /// exactly) when it is not resized, and the smaller of the two files is kept.
     Jxl { quality: u8, from_jpeg: bool },
+    /// HEIC: an HEVC still picture (libx265, through FFmpeg) at this quality (0–100; the CRF
+    /// is half of what is missing to 100), with transparency when present.
+    Heic { quality: u8 },
     /// TIFF with lossless Deflate compression: the pixels and their bit depth are kept at every
     /// quality level.
     Tiff,
@@ -692,6 +695,7 @@ fn source_format(codec: &str) -> Option<ImageFormat> {
         "png" | "apng" => Some(ImageFormat::Png),
         "webp" => Some(ImageFormat::Webp),
         "av1" => Some(ImageFormat::Avif),
+        "hevc" => Some(ImageFormat::Heic),
         "jpegxl" => Some(ImageFormat::Jxl),
         "tiff" => Some(ImageFormat::Tiff),
         _ => None,
@@ -701,6 +705,12 @@ fn source_format(codec: &str) -> Option<ImageFormat> {
 /// `cjxl` quality per level. Its scale follows libjpeg's: at the same setting, SSIMULACRA2 scores
 /// were within a point of mozjpeg's on photos, at about 10% smaller files.
 const JXL_QUALITY: [u8; 5] = [90, 85, 78, 70, 60];
+
+/// HEIC quality per level: x265 CRF 17, 21, 24, 27, 30. Measured with SSIMULACRA2 against the
+/// JPEG levels on two photos and a graphic: the CRF that scored like each JPEG level ranged
+/// from 11–23 (a very detailed photo) to 24–29, and these sit in between. At equal scores the
+/// HEIC was a third larger than the JPEG on the detailed photo and 40–50% smaller on the others.
+const HEIC_QUALITY: [u8; 5] = [66, 58, 52, 46, 40];
 
 /// Plans the compression of a still image.
 pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
@@ -728,8 +738,6 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     };
     let source = source_format(codec);
     let format = match (recipe.image.format, codec) {
-        // Peraz cannot write HEIC; JPEG opens everywhere, which is why people convert HEIC.
-        (ImageFormat::Keep, "hevc") => ImageFormat::Jpeg,
         // A still GIF is a graphic: PNG keeps it lossless, with its transparency. A BMP is
         // uncompressed: PNG holds the same picture in far fewer bytes.
         (ImageFormat::Keep, "gif" | "bmp") => ImageFormat::Png,
@@ -737,7 +745,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         (ImageFormat::Keep, other) => {
             return Err(PlanError::UnsupportedImage {
                 codec: other.to_owned(),
-                hint: " as an output format; choose --format jpeg, png, webp, avif, jxl, or tiff",
+                hint: " as an output format; choose --format jpeg, png, webp, avif, jxl, heic, or tiff",
             });
         }
         (chosen, _) => chosen,
@@ -783,6 +791,12 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
                 from_jpeg: codec == "mjpeg",
             },
             "jxl",
+        ),
+        ImageFormat::Heic => (
+            ImageEncoding::Heic {
+                quality: HEIC_QUALITY[level],
+            },
+            "heic",
         ),
         ImageFormat::Tiff => (ImageEncoding::Tiff, "tiff"),
         ImageFormat::Keep => unreachable!("resolved above"),
@@ -1309,8 +1323,13 @@ impl DocumentPlan {
                 },
                 "avif",
             ),
-            // Documents never hold JPEG XL or TIFF pictures Peraz would keep in that format.
-            ImageFormat::Jpeg | ImageFormat::Jxl | ImageFormat::Tiff | ImageFormat::Keep => (
+            // Documents never hold JPEG XL, HEIC, or TIFF pictures Peraz would keep in that
+            // format.
+            ImageFormat::Jpeg
+            | ImageFormat::Jxl
+            | ImageFormat::Heic
+            | ImageFormat::Tiff
+            | ImageFormat::Keep => (
                 ImageEncoding::Jpeg {
                     quality: self.jpeg_quality,
                 },
@@ -2034,19 +2053,30 @@ mod tests {
     }
 
     #[test]
-    fn heic_becomes_jpeg_and_avif_stays_avif() {
-        let heic = plan_image(
-            &image_info("hevc", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Unknown),
-            &Recipe::default(),
-        )
-        .unwrap();
-        assert_eq!(heic.extension, "jpg");
+    fn heic_stays_heic_and_avif_stays_avif() {
+        let info = image_info("hevc", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Unknown);
+        let heic = plan_image(&info, &Recipe::default()).unwrap();
+        assert_eq!(heic.encoding, ImageEncoding::Heic { quality: 52 });
+        assert_eq!(heic.extension, "heic");
         assert_eq!(heic.decoder, ImageDecoder::Ffmpeg);
-        assert!(heic.converts_format);
+        assert!(!heic.converts_format, "kept only when smaller");
+        assert!(!heic.flatten_alpha, "HEIC keeps transparency");
+        // JPEG, which opens everywhere, is still one flag away.
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Jpeg;
+        let jpeg = plan_image(&info, &recipe).unwrap();
+        assert_eq!(jpeg.extension, "jpg");
+        assert!(jpeg.converts_format);
         assert!(
-            heic.flatten_alpha,
+            jpeg.flatten_alpha,
             "unknown alpha is flattened rather than turned black"
         );
+        // Any picture becomes HEIC on request.
+        recipe.image.format = ImageFormat::Heic;
+        recipe.quality = Quality::Highest;
+        let from_png = plan_image(&image_info("png", "png_pipe", Alpha::Present), &recipe).unwrap();
+        assert_eq!(from_png.encoding, ImageEncoding::Heic { quality: 66 });
+        assert!(from_png.converts_format && !from_png.flatten_alpha);
         let avif = plan_image(
             &image_info("av1", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Unknown),
             &Recipe::default(),

@@ -531,6 +531,7 @@ fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
         ImageEncoding::Jpeg { .. } => ImageEncoding::Jpeg { quality },
         ImageEncoding::Webp { .. } => ImageEncoding::Webp { quality },
         ImageEncoding::Avif { .. } => ImageEncoding::Avif { quality },
+        ImageEncoding::Heic { .. } => ImageEncoding::Heic { quality },
         ImageEncoding::Jxl { from_jpeg, .. } => ImageEncoding::Jxl { quality, from_jpeg },
         ImageEncoding::Png { .. } if quality >= 100 => ImageEncoding::Png {
             min_quality: 100,
@@ -551,6 +552,7 @@ fn quality_of(encoding: ImageEncoding) -> u8 {
         ImageEncoding::Jpeg { quality }
         | ImageEncoding::Webp { quality }
         | ImageEncoding::Avif { quality }
+        | ImageEncoding::Heic { quality }
         | ImageEncoding::Jxl { quality, .. } => quality,
         ImageEncoding::Png { max_quality, .. } => max_quality,
         ImageEncoding::Tiff | ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => 100,
@@ -569,12 +571,12 @@ pub(crate) fn encode_image_to_ssimulacra2(
 ) -> Result<(EncodedImage, Option<f64>), String> {
     let prepared = prepare(decoded, plan);
     if prepared.image.width() < 8 || prepared.image.height() < 8 {
-        return Ok((encode_prepared(&prepared, plan)?, None));
+        return Ok((encode_prepared(tools, &prepared, plan)?, None));
     }
     let reference = linear_input(&prepared.image)?;
     // A lossless format has one result, whatever the target.
     if plan.encoding == ImageEncoding::Tiff {
-        let encoded = encode_prepared(&prepared, plan)?;
+        let encoded = encode_prepared(tools, &prepared, plan)?;
         let image = decode_encoded(tools, &encoded.bytes, plan.extension)?;
         let score = ssimulacra2::compute_frame_ssimulacra2(reference, linear_input(&image)?)
             .map_err(|e| format!("SSIMULACRA2: {e}"))?;
@@ -594,7 +596,7 @@ pub(crate) fn encode_image_to_ssimulacra2(
             }
             let mut probe = plan.clone();
             probe.encoding = with_quality(plan.encoding, 100 - loss);
-            let encoded = encode_prepared(&prepared, &probe)?;
+            let encoded = encode_prepared(tools, &prepared, &probe)?;
             let image = decode_encoded(tools, &encoded.bytes, plan.extension)?;
             let score =
                 ssimulacra2::compute_frame_ssimulacra2(reference.clone(), linear_input(&image)?)
@@ -630,23 +632,22 @@ fn linear_input(image: &image::DynamicImage) -> Result<ssimulacra2::Rgb, String>
     .map_err(|e| format!("SSIMULACRA2: {e}"))
 }
 
-/// Reads back an image Peraz just encoded. AVIF goes through FFmpeg, like AVIF inputs, and
-/// JPEG XL through djxl.
+/// Reads back an image Peraz just encoded. AVIF and HEIC go through FFmpeg, like such inputs,
+/// and JPEG XL through djxl.
 fn decode_encoded(
     tools: Option<&Toolchain>,
     bytes: &[u8],
     extension: &str,
 ) -> Result<image::DynamicImage, String> {
     match extension {
-        "avif" => {}
+        "avif" | "heic" => {}
         "jxl" => return crate::jxl::decode(bytes),
         _ => return image::load_from_memory(bytes).map_err(|e| format!("cannot read back: {e}")),
     }
-    let tools = tools.ok_or(
-        "--target-ssimulacra2 with AVIF output needs FFmpeg, to read each try back".to_owned(),
-    )?;
+    let tools =
+        tools.ok_or("scoring an AVIF or HEIC result needs FFmpeg, to read it back".to_owned())?;
     let workdir = crate::compress::work_folder()?;
-    let file = workdir.join("probe.avif");
+    let file = workdir.join(format!("probe.{extension}"));
     let decoded = std::fs::write(&file, bytes)
         .map_err(|e| format!("cannot write a work file: {e}"))
         .and_then(|()| crate::heif::decode(tools, &file));

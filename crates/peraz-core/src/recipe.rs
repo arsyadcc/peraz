@@ -139,6 +139,9 @@ pub enum ImageFormat {
     Jxl,
     /// TIFF with lossless compression, for scans and exports from photo and design tools.
     Tiff,
+    /// HEIC (an HEVC picture in a HEIF container): what phones store photos in. Smaller than
+    /// JPEG, supports transparency; needs FFmpeg with libx265, and opens in fewer programs.
+    Heic,
 }
 
 /// Settings for still images.
@@ -205,7 +208,7 @@ text_enum!(Quality { Highest => "highest", High => "high", Balanced => "balanced
 text_enum!(VideoCodec { H264 => "h264", Hevc => "hevc" });
 text_enum!(EncoderPreference { Auto => "auto", Software => "software", Hardware => "hardware" });
 text_enum!(VideoOutput { Keep => "keep", Mp4 => "mp4", Gif => "gif", Webp => "webp", Avif => "avif", Apng => "apng" });
-text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif", Jxl => "jxl", Tiff => "tiff" });
+text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif", Jxl => "jxl", Tiff => "tiff", Heic => "heic" });
 
 /// A string that is not one of an enum's accepted spellings.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,6 +17,9 @@ any input needs FFmpeg, the run stops before any work with exit code `3` and nam
 An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
 `peraz probe`, `peraz doctor`, and `peraz watch` need FFmpeg.
 
+`--format heic` needs FFmpeg with the libx265 encoder; without FFmpeg, or with one that lacks
+it, the run stops before any work with exit code `3`.
+
 `--format jxl` needs libjxl's `cjxl` instead (and `djxl` with `--target-ssimulacra2`), found
 through `PERAZ_CJXL`, the bundled build, or `PATH`; without it the run stops before any work with
 exit code `3`. JPEG XL inputs are read with `djxl`, likewise exit code `3` when it is missing.
@@ -74,7 +77,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--encoder` | `auto`, `software`, `hardware` | Default `auto`: software if available, else hardware. |
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
 | `--max-height` | pixels | Scale down to at most this height; never scales up. |
-| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `tiff`, `gif`, `apng`, `mp4` | Output format. Default `keep`: every file stays in its format, except that a HEIC becomes a JPEG, and a BMP or a still GIF becomes a PNG when that is smaller. `jxl` (JPEG XL) applies to still images and animated JPEG XL. `tiff` applies to still images and is always lossless: Deflate compression at the picture's own bit depth, so `--quality` and `--target-ssimulacra2` do not change it. For videos and animations (GIF, animated PNG, animated JPEG XL), `webp` and `avif` make animated images, `gif` makes a GIF, `apng` makes an animated PNG, and `mp4` turns an animation into a video. `apng` keeps every frame of a GIF, an animated WebP, or an animated JPEG XL with its timing, takes frames from a video at `--fps`, and makes a PNG from a still image. An animated PNG stays an animated PNG with `keep`. |
+| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `heic`, `tiff`, `gif`, `apng`, `mp4` | Output format. Default `keep`: every file stays in its format, except that a BMP or a still GIF becomes a PNG when that is smaller. `heic` applies to still images. `jxl` (JPEG XL) applies to still images and animated JPEG XL. `tiff` applies to still images and is always lossless: Deflate compression at the picture's own bit depth, so `--quality` and `--target-ssimulacra2` do not change it. For videos and animations (GIF, animated PNG, animated JPEG XL), `webp` and `avif` make animated images, `gif` makes a GIF, `apng` makes an animated PNG, and `mp4` turns an animation into a video. `apng` keeps every frame of a GIF, an animated WebP, or an animated JPEG XL with its timing, takes frames from a video at `--fps`, and makes a PNG from a still image. An animated PNG stays an animated PNG with `keep`. |
 | `--fps` | 1–50 | Frame rate of GIFs, animated WebP/AVIF, and animated PNGs made from videos; never above the source. An animated PNG made from an animation keeps every frame instead. |
 | `--start` | time | Start this far into a video: seconds (`12.5`) or `[h:]m:ss`. |
 | `--duration` | time | Use at most this much of a video. |
@@ -162,7 +165,7 @@ flags do not apply to it, and with a `--format` that names a picture format it i
 | `0` | Success, including files kept or skipped. |
 | `1` | At least one input failed. |
 | `2` | Invalid usage. |
-| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), or `cjxl` not found with `--format jxl` (`djxl` with a JPEG XL input). |
+| `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), `cjxl` not found with `--format jxl` (`djxl` with a JPEG XL input), or an FFmpeg without libx265 with `--format heic`. |
 | `4` | `--check` found files that could be smaller. |
 | `130` | Cancelled with Ctrl-C, SIGTERM, or `--cancel-on-stdin`; the current file's partial output is removed. |
 

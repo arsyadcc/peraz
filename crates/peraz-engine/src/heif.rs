@@ -279,8 +279,9 @@ fn grid_filter(grid: &TileGrid, label: &str) -> String {
         .iter()
         .map(|t| format!("{}_{}", t.x, t.y))
         .collect();
+    // `exact`: an odd size is cropped as asked, not rounded down to the color subsampling.
     let crop = format!(
-        "crop={}:{}:{}:{}",
+        "crop={}:{}:{}:{}:exact=1",
         grid.width, grid.height, grid.horizontal_offset, grid.vertical_offset
     );
     if grid.subcomponents.len() == 1 {
@@ -918,7 +919,7 @@ mod tests {
         assert_eq!(item_id(group.id.as_ref()), Some(14));
         assert_eq!(
             grid_filter(&group.grid().unwrap(), "alpha"),
-            "[0:2][0:3]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=900:400:0:0[alpha]"
+            "[0:2][0:3]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=900:400:0:0:exact=1[alpha]"
         );
     }
 
@@ -970,7 +971,7 @@ mod tests {
         };
         assert_eq!(
             grid_filter(&grid, "out"),
-            "[0:0][0:1]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=1000:600:0:0[out]"
+            "[0:0][0:1]xstack=inputs=2:layout=0_0|512_0:fill=black,crop=1000:600:0:0:exact=1[out]"
         );
     }
 }

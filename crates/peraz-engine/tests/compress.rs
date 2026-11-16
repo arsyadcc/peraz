@@ -554,10 +554,12 @@ fn converts_heic_to_jpeg_with_full_tile_grid() {
         return;
     }
     let output = env.out.join("photo.jpg");
+    let mut job = job(input, output.clone(), Quality::Balanced);
+    job.recipe.image.format = ImageFormat::Jpeg;
     let report = compress(
         Some(&env.tools),
         &env.caps,
-        &job(input, output.clone(), Quality::Balanced),
+        &job,
         &mut no_progress,
         &NOT_CANCELLED,
     );

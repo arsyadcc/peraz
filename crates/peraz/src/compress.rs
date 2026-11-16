@@ -55,7 +55,7 @@ pub struct SettingsArgs {
     #[arg(long, value_name = "PIXELS")]
     pub max_height: Option<u32>,
 
-    /// Output format: keep (default), jpeg, png, webp, avif, jxl, tiff, gif, apng, mp4. For videos
+    /// Output format: keep (default), jpeg, png, webp, avif, jxl, heic, tiff, gif, apng, mp4. For videos
     /// and animations, webp/avif/apng make animated images, gif makes a GIF, and mp4 turns an
     /// animation into a video.
     #[arg(long, value_parser = parse_format)]
@@ -371,7 +371,8 @@ fn inspect(tools: Option<&Toolchain>) -> Result<(Option<BuildInfo>, Capabilities
 }
 
 /// Stops before any work when the recipe needs a tool that is missing: `--format jxl` needs
-/// libjxl's cjxl, and `--target-vmaf` FFmpeg's libvmaf filter.
+/// libjxl's cjxl, `--format heic` FFmpeg with libx265, and `--target-vmaf` FFmpeg's libvmaf
+/// filter.
 pub(crate) fn check_tools(
     recipe: &Recipe,
     tools: Option<&Toolchain>,
@@ -383,6 +384,23 @@ pub(crate) fn check_tools(
             "Run `peraz ffmpeg install` to get a build that has it, install libjxl's tools, or point Peraz to cjxl with {CJXL_ENV}."
         );
         return Err(exit::ENVIRONMENT);
+    }
+    if recipe.image.format == ImageFormat::Heic {
+        let problem = match tools {
+            None => Some("--format heic needs FFmpeg, which was not found".to_owned()),
+            Some(tools) if !caps.has_encoder(peraz_engine::heic::ENCODER) => Some(format!(
+                "--format heic needs FFmpeg with libx265, and {} has none",
+                tools.ffmpeg.display()
+            )),
+            Some(_) => None,
+        };
+        if let Some(problem) = problem {
+            eprintln!("error: {problem}");
+            eprintln!(
+                "Run `peraz ffmpeg install` to get a build that has it, or point Peraz to another one with --ffmpeg."
+            );
+            return Err(exit::ENVIRONMENT);
+        }
     }
     // Pictures can still be measured, so this is not a reason to stop.
     if recipe.measure_quality

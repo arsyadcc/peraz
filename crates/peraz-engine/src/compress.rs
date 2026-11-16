@@ -196,7 +196,9 @@ fn run(
         );
     }
     match info.kind {
-        MediaKind::Image => return make_image(batch, tools, job, info, progress, cancel, report),
+        MediaKind::Image => {
+            return make_image(batch, tools, caps, job, info, progress, cancel, report);
+        }
         MediaKind::Pdf | MediaKind::Epub => {
             return make_document(batch, job, info, progress, cancel, report);
         }
@@ -366,6 +368,7 @@ fn probe_input(tools: Option<&Toolchain>, input: &Path) -> Result<MediaInfo, Str
 fn make_image(
     batch: &Batch,
     tools: Option<&Toolchain>,
+    caps: &Capabilities,
     job: &Job,
     info: &MediaInfo,
     progress: Progress,
@@ -387,8 +390,11 @@ fn make_image(
         Err(e) => return failed(e.to_string()),
     };
     report.plan = Some(Plan::Image(plan.clone()));
-    // SVGs and icon files are rewritten whole; a TIFF with several pages is skipped.
-    if let Some(outcome) = make_without_pixels(batch, job, info, &plan, progress, report) {
+    // SVGs and icon files are rewritten whole; a TIFF with several pages is skipped, and a
+    // HEIC without its encoder fails.
+    let early = make_without_pixels(batch, job, info, &plan, progress, report)
+        .or_else(|| missing_heic_encoder(&plan, tools, caps).map(failed));
+    if let Some(outcome) = early {
         return outcome;
     }
     let output = match choose_output(batch, job, plan.extension) {
@@ -402,23 +408,10 @@ fn make_image(
         *from_jpeg = true;
         report.plan = Some(Plan::Image(plan.clone()));
     }
-    // When the pixels stay as they are, a JPEG's own data can be kept losslessly: recompressed
-    // into JPEG XL, or, for a JPEG rebuilt from JPEG XL that becomes JPEG again, as it is.
-    let unresized = decoded.as_ref().is_ok_and(|d| {
-        fit_within(
-            (d.image.width(), d.image.height()),
-            plan.max_width,
-            plan.max_height,
-        )
-        .is_none()
-    });
-    let lossless = match plan.encoding {
-        ImageEncoding::Jxl {
-            from_jpeg: true, ..
-        } if unresized => Some(Lossless::JpegXl),
-        ImageEncoding::Jpeg { .. } if unresized && rebuilt_jpeg.is_some() => Some(Lossless::Jpeg),
-        _ => None,
-    };
+    let lossless = decoded
+        .as_ref()
+        .ok()
+        .and_then(|d| lossless_route(&plan, d, rebuilt_jpeg.is_some()));
     // A copy of the picture to measure the result against, when only measuring.
     let reference = match &decoded {
         Ok(d) if job.recipe.measure_quality && plan.target_ssimulacra2.is_none() => Some(d.clone()),
@@ -426,7 +419,7 @@ fn make_image(
     };
     let encoded = match (decoded, plan.target_ssimulacra2) {
         (Err(message), _) => Err(message),
-        (Ok(d), None) => encode_image(d, &plan),
+        (Ok(d), None) => encode_image(tools, d, &plan),
         (Ok(d), Some(target)) => crate::score::encode_image_to_ssimulacra2(
             tools, d, &mut plan, target, cancel,
         )
@@ -478,6 +471,48 @@ fn make_image(
     }
     progress(1.0);
     outcome
+}
+
+/// When the pixels stay as they are, a JPEG's own data can be kept losslessly: recompressed
+/// into JPEG XL, or, for a JPEG rebuilt from JPEG XL that becomes JPEG again, as it is.
+fn lossless_route(
+    plan: &peraz_core::ImagePlan,
+    decoded: &crate::image::Decoded,
+    rebuilt_jpeg: bool,
+) -> Option<Lossless> {
+    let size = (decoded.image.width(), decoded.image.height());
+    if fit_within(size, plan.max_width, plan.max_height).is_some() {
+        return None;
+    }
+    match plan.encoding {
+        ImageEncoding::Jxl {
+            from_jpeg: true, ..
+        } => Some(Lossless::JpegXl),
+        ImageEncoding::Jpeg { .. } if rebuilt_jpeg => Some(Lossless::Jpeg),
+        _ => None,
+    }
+}
+
+/// Why a HEIC cannot be written here, when the plan asks for one: FFmpeg encodes it, with
+/// libx265.
+fn missing_heic_encoder(
+    plan: &peraz_core::ImagePlan,
+    tools: Option<&Toolchain>,
+    caps: &Capabilities,
+) -> Option<String> {
+    if !matches!(plan.encoding, ImageEncoding::Heic { .. }) {
+        return None;
+    }
+    let Some(tools) = tools else {
+        return Some(format!("HEIC output needs FFmpeg: {NEEDS_FFMPEG}"));
+    };
+    (!caps.has_encoder(crate::heic::ENCODER)).then(|| {
+        format!(
+            "HEIC output needs FFmpeg with libx265, and {} has none; run `peraz ffmpeg \
+             install` for a build that has it, or choose another --format",
+            tools.ffmpeg.display()
+        )
+    })
 }
 
 /// The outcome for the files that are not encoded from pixels: an SVG and an icon file are

@@ -12,6 +12,7 @@ pub mod epub;
 mod error;
 pub mod ffmpeg;
 pub mod gif;
+pub mod heic;
 pub mod heif;
 pub mod icon;
 pub mod image;
