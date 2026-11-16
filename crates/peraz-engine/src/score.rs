@@ -748,6 +748,7 @@ mod tests {
                 icc: None,
                 metadata: crate::metadata::Metadata::default(),
                 gain_map: false,
+                png_color: crate::image::PngColor::default(),
             };
             let (encoded, score) =
                 encode_image_to_ssimulacra2(None, decoded, &mut plan, target, &cancel).unwrap();
@@ -772,6 +773,7 @@ mod tests {
             icc: None,
             metadata: crate::metadata::Metadata::default(),
             gain_map: false,
+            png_color: crate::image::PngColor::default(),
         };
         let (_, score) =
             encode_image_to_ssimulacra2(None, decoded, &mut plan, 80, &AtomicBool::new(false))

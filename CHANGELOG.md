@@ -125,6 +125,11 @@ between alpha versions.
   converted to sRGB through its profile, or by the plain formula when it has none, and a color
   profile that does not describe the pixels written (CMYK on RGB, gray on color) is never
   embedded.
+- A 16-bit PNG dropped to 8 bits even when it was kept lossless. It now stays 16-bit on the
+  lossless path; when a palette reduces it, the report's `warnings` say so.
+- A PNG that says what its colors mean with `gAMA`, `cHRM`, `sRGB`, or `cICP` chunks instead of
+  a profile lost them, and rendered differently afterwards. A PNG made from it now carries the
+  same chunks, and other formats get a color profile that says the same.
 - A grayscale JPEG stays grayscale instead of being stored as three-channel color.
 - With `--keep-metadata`, an orientation stated in the XMP packet (`tiff:Orientation`) is reset
   like the one in EXIF, so no viewer turns the picture a second time; and EXIF or XMP too large

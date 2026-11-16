@@ -36,6 +36,18 @@ pub struct Decoded {
     pub metadata: Metadata,
     /// The file holds an HDR gain map next to this picture, which no output carries yet.
     pub gain_map: bool,
+    /// What a PNG says about its colors without a profile (gamma, primaries, "this is sRGB").
+    pub png_color: PngColor,
+}
+
+/// The chunks of a PNG that say what its colors mean: `gAMA`, `cHRM`, `sRGB`, and `cICP`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PngColor {
+    /// The chunks as they are in the file, to be written into a PNG made from it.
+    pub chunks: Vec<u8>,
+    /// The picture's color profile was made from these chunks, for formats that cannot hold
+    /// them: a PNG gets the chunks, not the profile.
+    pub profile_from_chunks: bool,
 }
 
 /// Encodes a decoded picture according to `plan`. `tools` is the FFmpeg to use for the formats
@@ -55,6 +67,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         icc,
         metadata,
         gain_map,
+        png_color,
     } = decoded;
     if let Some((w, h)) = fit_within(
         (image.width(), image.height()),
@@ -68,6 +81,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         icc,
         metadata,
         gain_map,
+        png_color,
     }
 }
 
@@ -93,6 +107,7 @@ fn encode_image_inner(
         image,
         icc,
         metadata,
+        png_color,
         ..
     } = prepared;
     // The metadata to write: only on request, and only when there is any.
@@ -122,8 +137,12 @@ fn encode_image_inner(
             min_quality,
             max_quality,
         } => {
-            let (png, encoder) =
-                encode_png(&image.to_rgba8(), min_quality, max_quality, icc.as_deref())?;
+            // A PNG states its gamma and primaries in its own chunks, not in a profile made
+            // from them.
+            let profile = icc.as_deref().filter(|_| !png_color.profile_from_chunks);
+            let (png, encoder, reduced) = encode_png(image, min_quality, max_quality, profile)?;
+            warnings.extend(reduced);
+            let png = with_png_chunks(&png, &png_color.chunks);
             (
                 kept.map_or_else(|| png.clone(), |m| m.into_png(&png)),
                 encoder,
@@ -232,6 +251,12 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
                 .filter(|profile| profile_fits(profile, decoded.image.color()));
         }
         decoded.gain_map = crate::metadata::has_gain_map(bytes);
+    } else if bytes.starts_with(b"\x89PNG") {
+        let (color, profile) = png_color(bytes, decoded.icc.is_some());
+        decoded.png_color = color;
+        if let Some(profile) = profile {
+            decoded.icc = Some(profile);
+        }
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         decoded.metadata.photoshop = crate::tiff::photoshop_resources(bytes);
     }
@@ -255,6 +280,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
         image,
         metadata,
         gain_map: false,
+        png_color: PngColor::default(),
     })
 }
 
@@ -464,13 +490,18 @@ fn jpeg_profile_segments(icc: &[u8]) -> Vec<Vec<u8>> {
 /// Quantizes to a palette when the quality range can be met, otherwise keeps true color; then
 /// optimizes losslessly. Returns the PNG and a description of the encoder.
 fn encode_png(
-    rgba: &RgbaImage,
+    image: &DynamicImage,
     min_quality: u8,
     max_quality: u8,
     icc: Option<&[u8]>,
-) -> Result<(Vec<u8>, String), String> {
-    let (width, height) = rgba.dimensions();
-    let quantized = quantize(rgba, min_quality, max_quality)?;
+) -> Result<(Vec<u8>, String, Option<String>), String> {
+    let (width, height) = (image.width(), image.height());
+    // 16 bits per channel: kept on the lossless path, reduced by a palette (which holds 8-bit
+    // colors), and then the report says so.
+    let deep = image.color().bytes_per_pixel() / image.color().channel_count() == 2;
+    let rgba = image.to_rgba8();
+    let quantized = quantize(&rgba, min_quality, max_quality)?;
+    let mut reduced = None;
     let (png, encoder) = if let Some((palette, indexes, achieved)) = quantized {
         let rgb: Vec<u8> = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
         let mut alpha: Vec<u8> = palette.iter().map(|c| c.a).collect();
@@ -482,9 +513,34 @@ fn encode_png(
             alpha: &alpha,
             indexes: &indexes,
         };
+        if deep {
+            reduced = Some(
+                "the 16-bit picture was reduced to a palette of 8-bit colors; use -q highest \
+                 to keep its depth where a palette is not good enough"
+                    .to_owned(),
+            );
+        }
         (
             write_png(width, height, &pixels, icc)?,
             format!("imagequant q{achieved} + oxipng"),
+        )
+    } else if deep {
+        let (color, samples): (png::ColorType, Vec<u16>) = match image {
+            DynamicImage::ImageLuma16(gray) => (png::ColorType::Grayscale, gray.as_raw().clone()),
+            DynamicImage::ImageLumaA16(gray) => {
+                (png::ColorType::GrayscaleAlpha, gray.as_raw().clone())
+            }
+            DynamicImage::ImageRgb16(rgb) => (png::ColorType::Rgb, rgb.as_raw().clone()),
+            other => (png::ColorType::Rgba, other.to_rgba16().into_raw()),
+        };
+        // PNG stores the high byte first.
+        let data = samples
+            .iter()
+            .flat_map(|sample| sample.to_be_bytes())
+            .collect();
+        (
+            write_png(width, height, &PngPixels::Deep { color, data }, icc)?,
+            "oxipng (lossless)".to_owned(),
         )
     } else {
         let opaque = rgba.pixels().all(|p| p[3] == 255);
@@ -504,7 +560,127 @@ fn encode_png(
     };
     let optimized =
         oxipng::optimize_from_memory(&png, &options).map_err(|e| format!("oxipng: {e}"))?;
-    Ok((optimized, encoder))
+    Ok((optimized, encoder, reduced))
+}
+
+/// The names of the PNG chunks that say what the colors mean when there is no profile.
+const PNG_COLOR_CHUNKS: [&[u8; 4]; 4] = [b"gAMA", b"cHRM", b"sRGB", b"cICP"];
+
+/// A PNG with color chunks (as taken from another PNG) added right after its header, where
+/// they belong: before the palette and the picture data.
+fn with_png_chunks(png: &[u8], chunks: &[u8]) -> Vec<u8> {
+    // The signature (8 bytes), then the header chunk (25 bytes with its frame).
+    const AFTER_HEADER: usize = 33;
+    if chunks.is_empty() || png.len() < AFTER_HEADER {
+        return png.to_vec();
+    }
+    [&png[..AFTER_HEADER], chunks, &png[AFTER_HEADER..]].concat()
+}
+
+/// Reads what a PNG says about its colors: the chunks themselves, and, when they describe
+/// something other than sRGB and the file has no profile, a color profile that says the same
+/// for the formats that cannot hold the chunks.
+fn png_color(png: &[u8], has_profile: bool) -> (PngColor, Option<Vec<u8>>) {
+    let mut color = PngColor::default();
+    let (mut gamma, mut primaries, mut is_srgb, mut cicp) = (None, None, false, None);
+    let mut at = 8;
+    while let Some(head) = png.get(at..at + 8) {
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(whole) = png.get(at..at + length + 12) else {
+            break;
+        };
+        let data = &whole[8..8 + length];
+        let word = |index: usize| {
+            data.get(index * 4..index * 4 + 4)
+                .map(|b| f64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])) / 100_000.0)
+        };
+        match &head[4..] {
+            b"IDAT" | b"IEND" => break,
+            b"gAMA" => gamma = word(0),
+            b"cHRM" => primaries = (0..8).map(word).collect::<Option<Vec<f64>>>(),
+            b"sRGB" => is_srgb = true,
+            b"cICP" => cicp = data.get(..4).map(|c| [c[0], c[1], c[2], c[3]]),
+            _ => {}
+        }
+        if PNG_COLOR_CHUNKS.iter().any(|name| head[4..] == **name) {
+            color.chunks.extend_from_slice(whole);
+        }
+        at += length + 12;
+    }
+    // In order of precedence: `cICP`, a profile, `sRGB`, then gamma and primaries.
+    let profile = match (cicp, gamma) {
+        (Some(cicp), _) => profile_from_cicp(cicp),
+        (None, Some(gamma)) if !has_profile && !is_srgb && gamma > 0.0 => {
+            profile_from_gamma(gamma, primaries.as_deref())
+        }
+        _ => None,
+    };
+    color.profile_from_chunks = profile.is_some();
+    (color, profile)
+}
+
+/// A color profile for what a `cICP` chunk says (primaries, transfer function, matrix, range).
+/// `None` for sRGB, which an unmarked picture is taken for anyway, and for what a profile
+/// cannot say (HDR transfer functions).
+fn profile_from_cicp([primaries, transfer, _, _]: [u8; 4]) -> Option<Vec<u8>> {
+    // BT.709 primaries with the sRGB curve; and PQ (16) and HLG (18), which are HDR.
+    if (primaries, transfer) == (1, 13) || matches!(transfer, 16 | 18) {
+        return None;
+    }
+    let cicp = moxcms::CicpProfile {
+        color_primaries: primaries.try_into().ok()?,
+        transfer_characteristics: transfer.try_into().ok()?,
+        matrix_coefficients: moxcms::MatrixCoefficients::Identity,
+        full_range: true,
+    };
+    let mut profile = moxcms::ColorProfile::new_from_cicp(cicp);
+    // Code points without known primaries or curve leave the profile empty.
+    if profile.red_trc.is_none() || profile.red_colorant.x == 0.0 {
+        return None;
+    }
+    // A plain profile, for every reader: the code points are in the PNG chunk already.
+    profile.cicp = None;
+    profile.encode().ok()
+}
+
+/// A color profile for pixels with this PNG gamma (the encoding exponent: 0.45455 for the
+/// usual 2.2) and these chromaticities (white, red, green, blue, as x and y), or sRGB's when
+/// none are given. `None` when that is what an unmarked picture is taken for anyway: a gamma
+/// of 2.2 with sRGB's primaries.
+fn profile_from_gamma(gamma: f64, primaries: Option<&[f64]>) -> Option<Vec<u8>> {
+    const SRGB: [f64; 8] = [0.3127, 0.3290, 0.64, 0.33, 0.30, 0.60, 0.15, 0.06];
+    let usual = (gamma - 1.0 / 2.2).abs() < 0.001
+        && primaries.is_none_or(|p| p.iter().zip(SRGB).all(|(a, b)| (a - b).abs() < 0.001));
+    if usual {
+        return None;
+    }
+    let p = primaries.unwrap_or(&SRGB);
+    let mut profile = moxcms::ColorProfile::new_srgb();
+    #[allow(clippy::cast_possible_truncation)]
+    let point = |index: usize| moxcms::Chromaticity {
+        x: p[index * 2] as f32,
+        y: p[index * 2 + 1] as f32,
+    };
+    profile.update_rgb_colorimetry(
+        moxcms::XyY {
+            x: p[0],
+            y: p[1],
+            yb: 1.0,
+        },
+        moxcms::ColorPrimaries {
+            red: point(1),
+            green: point(2),
+            blue: point(3),
+        },
+    );
+    // Decoding raises the stored values to the inverse of the encoding exponent.
+    #[allow(clippy::cast_possible_truncation)]
+    let curve = moxcms::ToneReprCurve::Parametric(vec![(1.0 / gamma) as f32]);
+    profile.red_trc = Some(curve.clone());
+    profile.green_trc = Some(curve.clone());
+    profile.blue_trc = Some(curve);
+    profile.cicp = None;
+    profile.encode().ok()
 }
 
 /// Palette, per-pixel indexes, and achieved quality; `None` when the minimum quality is out of reach.
@@ -547,6 +723,11 @@ pub(crate) enum PngPixels<'a> {
     },
     Rgb(Vec<u8>),
     Rgba(&'a [u8]),
+    /// 16 bits per sample, high byte first, in this color type.
+    Deep {
+        color: png::ColorType,
+        data: Vec<u8>,
+    },
 }
 
 pub(crate) fn write_png(
@@ -578,6 +759,11 @@ pub(crate) fn write_png(
         }
         PngPixels::Rgba(data) => {
             info.color_type = png::ColorType::Rgba;
+            data
+        }
+        PngPixels::Deep { color, data } => {
+            info.color_type = *color;
+            info.bit_depth = png::BitDepth::Sixteen;
             data
         }
     };
@@ -843,7 +1029,8 @@ mod tests {
             *p = image::Rgba([v, 255 - v, (y * 8) as u8, if x < 8 { 0 } else { 255 }]);
         }
         let icc = b"fake icc profile bytes".to_vec();
-        let (png, encoder) = encode_png(&rgba, 0, 100, Some(&icc)).unwrap();
+        let picture = DynamicImage::ImageRgba8(rgba.clone());
+        let (png, encoder, _) = encode_png(&picture, 0, 100, Some(&icc)).unwrap();
         assert!(encoder.starts_with("imagequant"), "{encoder}");
         let mut decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&png)).unwrap();
         assert_eq!(decoder.icc_profile().unwrap(), Some(icc));
