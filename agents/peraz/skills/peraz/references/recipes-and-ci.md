@@ -14,8 +14,10 @@ max_height = 2000
 codec = "h264"                   # h264, hevc
 encoder = "auto"                 # auto, software, hardware
 no_audio = false
-target_size = "25MB"             # SI units; videos only
+target_size = "25MB"             # SI units; videos, and pictures that would be larger
 fps = 12                         # 1-50; GIFs and animated WebP/AVIF
+jpeg_mode = "progressive"        # progressive, baseline (for systems that read nothing else)
+background = "#ffffff"           # what transparency is placed on in JPEGs and animated AVIF
 ```
 
 Every key except `version` is optional; unknown keys and invalid values are errors.

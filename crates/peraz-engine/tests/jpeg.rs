@@ -298,3 +298,273 @@ fn metadata_too_large_for_a_jpeg_segment_is_reported() {
     );
     assert_eq!(report.warnings, Vec::<String>::new());
 }
+
+fn run_recipe(input: &Path, output: &Path, recipe: Recipe) -> Report {
+    let job = Job {
+        input: input.to_owned(),
+        output: OutputTarget::File(output.to_owned()),
+        recipe,
+        existing: ExistingOutput::Replace,
+        recompress: true,
+    };
+    let report = compress(
+        None,
+        &Capabilities::default(),
+        &job,
+        &mut |_| {},
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{}: {:?}",
+        output.display(),
+        report.outcome
+    );
+    report
+}
+
+/// How a JPEG file stores its picture: the marker of its frame header (0xC0 for a baseline
+/// JPEG, 0xC2 for a progressive one), each component's sampling factors (across, down), and
+/// the number of scans.
+fn structure(path: &Path) -> (u8, Vec<(u8, u8)>, usize) {
+    let bytes = std::fs::read(path).unwrap();
+    // In picture data a 0xFF is always followed by a zero, so these bytes are a marker.
+    let scans = bytes.windows(2).filter(|w| w == &[0xFF, 0xDA]).count();
+    let mut at = 2;
+    loop {
+        assert_eq!(bytes[at], 0xFF, "a marker at {at}");
+        let marker = bytes[at + 1];
+        let length = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        if matches!(marker, 0xC0..=0xC3) {
+            let body = &bytes[at + 4..at + 2 + length];
+            let sampling = body[6..]
+                .chunks(3)
+                .map(|component| (component[1] >> 4, component[1] & 15))
+                .collect();
+            return (marker, sampling, scans);
+        }
+        at += 2 + length;
+    }
+}
+
+/// The quantization tables of a JPEG file, as stored.
+fn quantization_tables(path: &Path) -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut tables = Vec::new();
+    let mut at = 2;
+    while bytes[at + 1] != 0xDA {
+        let length = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        if bytes[at + 1] == 0xDB {
+            tables.push(bytes[at + 4..at + 2 + length].to_vec());
+        }
+        at += 2 + length;
+    }
+    tables
+}
+
+/// A photo-like PNG: smooth color with grain.
+fn photo_png(path: &Path, width: u32, height: u32) {
+    image::RgbImage::from_fn(width, height, |x, y| {
+        let grain = (x.wrapping_mul(2_654_435_761).wrapping_add(y * 40_503) >> 28) & 15;
+        let channel = |v: u32| u8::try_from(v.min(255)).unwrap();
+        image::Rgb([
+            channel(x * 220 / width + grain),
+            channel(y * 220 / height + grain),
+            channel(90 + grain),
+        ])
+    })
+    .save(path)
+    .unwrap();
+}
+
+fn jpeg_recipe(quality: Quality) -> Recipe {
+    let mut recipe = Recipe {
+        quality,
+        ..Recipe::default()
+    };
+    recipe.image.format = ImageFormat::Jpeg;
+    recipe
+}
+
+#[test]
+fn a_baseline_jpeg_on_request_really_is_one() {
+    let dir = dir("baseline");
+    let input = dir.0.join("photo.png");
+    photo_png(&input, 480, 360);
+    for quality in [
+        Quality::Highest,
+        Quality::High,
+        Quality::Balanced,
+        Quality::Small,
+        Quality::Smallest,
+    ] {
+        // As usual: progressive, in several scans.
+        let usual = dir.0.join("usual.jpg");
+        let report = run_recipe(&input, &usual, jpeg_recipe(quality));
+        let (frame, sampling, scans) = structure(&usual);
+        assert_eq!(frame, 0xC2, "{quality:?}: progressive");
+        assert!(scans > 1, "{quality:?}: {scans} scans");
+        assert_eq!(sampling, [(2, 2), (1, 1), (1, 1)], "{quality:?}: 4:2:0");
+        assert!(!report.encoder.as_deref().unwrap().contains("baseline"));
+
+        // On request: the baseline frame header, and the whole picture in one scan.
+        let mut recipe = jpeg_recipe(quality);
+        recipe.image.jpeg_mode = peraz_core::JpegMode::Baseline;
+        let plain = dir.0.join("baseline.jpg");
+        let report = run_recipe(&input, &plain, recipe);
+        let (frame, sampling, scans) = structure(&plain);
+        assert_eq!((frame, scans), (0xC0, 1), "{quality:?}: baseline");
+        assert_eq!(sampling, [(2, 2), (1, 1), (1, 1)], "{quality:?}");
+        let encoder = report.encoder.as_deref().unwrap();
+        assert!(encoder.ends_with("baseline"), "{encoder}");
+        // Baseline tables hold 8-bit values (a table with larger ones starts with 0x10 or
+        // 0x11), and they are the usual tables wherever those fit in 8 bits.
+        let tables = quantization_tables(&plain);
+        assert!(
+            tables.iter().all(|table| table[0] >> 4 == 0),
+            "{quality:?}: 8-bit tables"
+        );
+        if quality <= Quality::Small {
+            assert_eq!(tables, quantization_tables(&usual), "{quality:?}");
+        }
+        // The same picture either way, and not much larger.
+        let (a, b) = (
+            image::open(&usual).unwrap().to_rgb8(),
+            image::open(&plain).unwrap().to_rgb8(),
+        );
+        let apart = a
+            .pixels()
+            .zip(b.pixels())
+            .map(|(p, q)| (0..3).map(|c| u64::from(p[c].abs_diff(q[c]))).sum::<u64>())
+            .sum::<u64>()
+            / (480 * 360 * 3);
+        assert!(apart <= 2, "{quality:?}: {apart} apart on average");
+        let (usual, plain) = (
+            std::fs::metadata(&usual).unwrap().len(),
+            std::fs::metadata(&plain).unwrap().len(),
+        );
+        assert!(
+            plain * 10 <= usual * 12,
+            "{quality:?}: {plain} against {usual}"
+        );
+    }
+    // The lowest setting a size target goes to is baseline as well.
+    let mut recipe = jpeg_recipe(Quality::Balanced);
+    recipe.image.jpeg_mode = peraz_core::JpegMode::Baseline;
+    recipe.image.target_bytes = Some(9_000);
+    recipe.image.keep_dimensions = true;
+    let fitted = dir.0.join("fitted.jpg");
+    run_recipe(&input, &fitted, recipe);
+    assert_eq!(structure(&fitted).0, 0xC0);
+}
+
+#[test]
+fn transparency_goes_on_the_color_asked_for() {
+    let dir = dir("background");
+    let input = dir.0.join("logo.png");
+    // Left: see-through. Middle: half see-through black. Right: an opaque color.
+    image::RgbaImage::from_fn(240, 80, |x, _| match x / 80 {
+        0 => image::Rgba([255, 0, 0, 0]),
+        1 => image::Rgba([0, 0, 0, 128]),
+        _ => image::Rgba([40, 160, 90, 255]),
+    })
+    .save(&input)
+    .unwrap();
+    let shown = |path: &Path, x: u32| image::open(path).unwrap().to_rgb8().get_pixel(x, 40).0;
+    let near = |got: [u8; 3], want: [u8; 3]| (0..3).all(|c| got[c].abs_diff(want[c]) <= 6);
+
+    // Without a color: white.
+    let white = dir.0.join("white.jpg");
+    let report = run_recipe(&input, &white, jpeg_recipe(Quality::Highest));
+    assert!(
+        near(shown(&white, 40), [255, 255, 255]),
+        "{:?}",
+        shown(&white, 40)
+    );
+    assert!(
+        near(shown(&white, 120), [127, 127, 127]),
+        "{:?}",
+        shown(&white, 120)
+    );
+    let Some(peraz_core::Plan::Image(plan)) = &report.plan else {
+        panic!("{:?}", report.plan)
+    };
+    assert_eq!(plan.background, Some(peraz_core::Color::WHITE));
+
+    // With one: that color shows where the picture was see-through.
+    let mut recipe = jpeg_recipe(Quality::Highest);
+    recipe.background = Some(peraz_core::Color([30, 30, 46]));
+    let dark = dir.0.join("dark.jpg");
+    let report = run_recipe(&input, &dark, recipe.clone());
+    assert!(
+        near(shown(&dark, 40), [30, 30, 46]),
+        "{:?}",
+        shown(&dark, 40)
+    );
+    assert!(
+        near(shown(&dark, 120), [15, 15, 23]),
+        "{:?}",
+        shown(&dark, 120)
+    );
+    assert!(
+        near(shown(&dark, 200), [40, 160, 90]),
+        "{:?}",
+        shown(&dark, 200)
+    );
+    let Some(peraz_core::Plan::Image(plan)) = &report.plan else {
+        panic!("{:?}", report.plan)
+    };
+    assert_eq!(plan.background, Some(peraz_core::Color([30, 30, 46])));
+
+    // A format that keeps transparency has no use for the color.
+    recipe.image.format = ImageFormat::Webp;
+    let kept = dir.0.join("kept.webp");
+    let report = run_recipe(&input, &kept, recipe);
+    assert_eq!(
+        image::open(&kept).unwrap().to_rgba8().get_pixel(40, 40)[3],
+        0
+    );
+    let Some(peraz_core::Plan::Image(plan)) = &report.plan else {
+        panic!("{:?}", report.plan)
+    };
+    assert_eq!(plan.background, None);
+}
+
+#[test]
+fn colored_text_keeps_its_color_at_every_pixel() {
+    let dir = dir("chroma");
+    // A screenshot of colored text: thin red and blue strokes on a dark background.
+    let input = dir.0.join("text.png");
+    image::RgbImage::from_fn(480, 360, |x, y| {
+        if y % 16 < 9 && x % 7 == 3 {
+            image::Rgb(if (x / 60) % 2 == 0 {
+                [240, 70, 80]
+            } else {
+                [90, 160, 250]
+            })
+        } else {
+            image::Rgb([30, 30, 46])
+        }
+    })
+    .save(&input)
+    .unwrap();
+    let output = dir.0.join("text.jpg");
+    let report = run_recipe(&input, &output, jpeg_recipe(Quality::Balanced));
+    let (_, sampling, _) = structure(&output);
+    assert_eq!(sampling, [(1, 1), (1, 1), (1, 1)], "4:4:4");
+    assert_eq!(report.encoder.as_deref(), Some("mozjpeg q78 4:4:4"));
+    // The strokes keep their colors: red stays red, blue stays blue.
+    let shown = image::open(&output).unwrap().to_rgb8();
+    let red = shown.get_pixel(3, 4).0;
+    let blue = shown.get_pixel(66, 4).0;
+    assert!(red[0] > 170 && red[2] < 140, "{red:?}");
+    assert!(blue[2] > 180 && blue[0] < 150, "{blue:?}");
+
+    // A photo keeps the usual sampling, and a gray picture has no color to sample.
+    let photo = dir.0.join("photo.png");
+    photo_png(&photo, 480, 360);
+    let output = dir.0.join("photo.jpg");
+    let report = run_recipe(&photo, &output, jpeg_recipe(Quality::Balanced));
+    assert_eq!(structure(&output).1, [(2, 2), (1, 1), (1, 1)]);
+    assert_eq!(report.encoder.as_deref(), Some("mozjpeg q78"));
+}

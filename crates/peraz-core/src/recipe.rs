@@ -144,6 +144,79 @@ pub enum ImageFormat {
     Heic,
 }
 
+/// How a JPEG stores its picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JpegMode {
+    /// In several passes, from coarse to fine: smaller, and what the web expects.
+    #[default]
+    Progressive,
+    /// In one pass, top to bottom: for old systems, printers, and upload forms that read
+    /// nothing else.
+    Baseline,
+}
+
+/// An opaque color, written `#rrggbb`, `#rgb`, `white`, or `black`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Color(pub [u8; 3]);
+
+impl Color {
+    pub const WHITE: Self = Self([255; 3]);
+}
+
+impl fmt::Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [red, green, blue] = self.0;
+        write!(f, "#{red:02x}{green:02x}{blue:02x}")
+    }
+}
+
+impl FromStr for Color {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let wrong =
+            || format!("`{text}` is not a color; write it as #rrggbb, #rgb, white, or black");
+        match text {
+            "white" => return Ok(Self::WHITE),
+            "black" => return Ok(Self([0; 3])),
+            _ => {}
+        }
+        let digits = text.strip_prefix('#').unwrap_or(text);
+        if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+            return Err(wrong());
+        }
+        let channel = |part: &str| u8::from_str_radix(part, 16).map_err(|_| wrong());
+        match digits.len() {
+            6 => Ok(Self([
+                channel(&digits[..2])?,
+                channel(&digits[2..4])?,
+                channel(&digits[4..])?,
+            ])),
+            // Each digit stands for itself twice: `#18f` is `#1188ff`.
+            3 => {
+                let double = |at: usize| channel(&digits[at..=at]).map(|value| value * 17);
+                Ok(Self([double(0)?, double(1)?, double(2)?]))
+            }
+            _ => Err(wrong()),
+        }
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Settings for still images.
 ///
 /// EXIF/XMP metadata is removed unless `keep_metadata` is set (it can hold location and device
@@ -170,6 +243,9 @@ pub struct ImageRecipe {
     /// alone cannot fit.
     #[serde(default)]
     pub keep_dimensions: bool,
+    /// Progressive (the default) or baseline JPEG output.
+    #[serde(default)]
+    pub jpeg_mode: JpegMode,
 }
 
 /// Everything that decides how a file is compressed.
@@ -185,6 +261,10 @@ pub struct Recipe {
     /// for videos, SSIMULACRA2 for still images. Encoding does not change.
     #[serde(default)]
     pub measure_quality: bool,
+    /// The color that transparent areas are placed on where the output has no transparency
+    /// (JPEG pictures, animated AVIF). `None` is white.
+    #[serde(default)]
+    pub background: Option<Color>,
 }
 
 macro_rules! text_enum {
@@ -219,6 +299,7 @@ macro_rules! text_enum {
 
 text_enum!(Quality { Highest => "highest", High => "high", Balanced => "balanced", Small => "small", Smallest => "smallest" });
 text_enum!(VideoCodec { H264 => "h264", Hevc => "hevc" });
+text_enum!(JpegMode { Progressive => "progressive", Baseline => "baseline" });
 text_enum!(EncoderPreference { Auto => "auto", Software => "software", Hardware => "hardware" });
 text_enum!(VideoOutput { Keep => "keep", Mp4 => "mp4", Gif => "gif", Webp => "webp", Avif => "avif", Apng => "apng" });
 text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif", Jxl => "jxl", Tiff => "tiff", Heic => "heic" });
@@ -258,6 +339,30 @@ mod tests {
             err.to_string()
                 .contains("highest, high, balanced, small, smallest")
         );
+    }
+
+    #[test]
+    fn colors_are_read_and_written() {
+        assert_eq!("#1e1e2e".parse(), Ok(Color([30, 30, 46])));
+        assert_eq!("1E1E2E".parse(), Ok(Color([30, 30, 46])));
+        assert_eq!("#18f".parse(), Ok(Color([0x11, 0x88, 0xff])));
+        assert_eq!("white".parse(), Ok(Color::WHITE));
+        assert_eq!("black".parse(), Ok(Color([0; 3])));
+        assert_eq!(Color([30, 30, 46]).to_string(), "#1e1e2e");
+        for wrong in ["", "#12", "#12345", "#gggggg", "red", "#1e1e2e80", "+1e1e2"] {
+            let error = wrong.parse::<Color>().unwrap_err();
+            assert!(error.contains("#rrggbb"), "{wrong}: {error}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Color([30, 30, 46])).unwrap(),
+            "\"#1e1e2e\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Color>("\"#fff\"").unwrap(),
+            Color::WHITE
+        );
+        assert_eq!("baseline".parse::<JpegMode>(), Ok(JpegMode::Baseline));
+        assert_eq!(JpegMode::default(), JpegMode::Progressive);
     }
 
     #[test]

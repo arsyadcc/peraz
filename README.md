@@ -242,7 +242,14 @@ clip can always be copied.
 The EXIF orientation is applied and the color profile is kept; other metadata (EXIF, XMP,
 including GPS location) is removed unless you pass `--keep-metadata`, which keeps EXIF, XMP, and
 IPTC where the output format can hold them (with the orientation reset, since the pixels are
-stored upright). Transparent images converted to JPEG are placed on white.
+stored upright). Transparent images converted to JPEG are placed on white, or on the color
+given with `--background` (a page's background, for example).
+
+JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
+and upload forms that read nothing else. A picture with sharp colored edges (colored text and
+thin lines, as in screenshots and charts) keeps its color at every pixel (4:4:4) instead of
+the usual one color value for each two-by-two block (4:2:0), which smears such edges; photos
+keep 4:2:0, which they do not show.
 Every output format, AVIF and WebP included, carries the color profile, so wide-gamut photos
 (Display P3) stay wide-gamut. Transparent HEIC and AVIF pictures keep their transparency. When
 the format changes on purpose, the result is kept even if it is larger, and the report shows
@@ -393,6 +400,8 @@ target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2
 fps = 12                         # GIF, animated WebP/AVIF, and animated PNG from a video
 measure_quality = false          # score every result, also without a target
 keep_metadata = false            # keep EXIF, XMP, and IPTC (with the GPS location) in pictures
+jpeg_mode = "progressive"        # progressive, baseline (for systems that read nothing else)
+background = "#ffffff"           # what transparency is placed on where the output has none
 ```
 
 Every key except `version` is optional, and unknown keys are errors. Use one with

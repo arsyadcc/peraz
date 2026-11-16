@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use crate::media::Alpha;
 use crate::media::{AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
-use crate::recipe::{EncoderPreference, ImageFormat, Quality, Recipe, VideoCodec, VideoOutput};
+use crate::recipe::{
+    Color, EncoderPreference, ImageFormat, JpegMode, Quality, Recipe, VideoCodec, VideoOutput,
+};
 
 /// A video encoder Peraz knows how to drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -617,8 +619,9 @@ pub fn resolution_for_bit_rate(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "format")]
 pub enum ImageEncoding {
-    /// mozjpeg at this quality (0–100).
-    Jpeg { quality: u8 },
+    /// mozjpeg at this quality (0–100), written in several passes (`progressive`) or, on
+    /// request, as a baseline JPEG.
+    Jpeg { quality: u8, progressive: bool },
     /// Palette quantization (pngquant-style) with this quality range (0–100), then lossless
     /// optimization. When the minimum cannot be met, the image stays true-color (lossless).
     Png { min_quality: u8, max_quality: u8 },
@@ -653,8 +656,12 @@ pub struct ImagePlan {
     /// engine computes the final size with [`fit_within`] once the pixels are upright.
     pub max_width: Option<u32>,
     pub max_height: Option<u32>,
-    /// Transparent pixels are composited onto white because the output format has no alpha.
+    /// Transparent pixels are composited onto `background` because the output format has no
+    /// alpha.
     pub flatten_alpha: bool,
+    /// The color transparent pixels are placed on: white unless another was asked for. `None`
+    /// when transparency is kept.
+    pub background: Option<Color>,
     /// File extension for the output, without the dot.
     pub extension: &'static str,
     /// How the input is decoded.
@@ -809,6 +816,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         ImageFormat::Jpeg => (
             ImageEncoding::Jpeg {
                 quality: [90, 85, 78, 70, 60][level],
+                progressive: recipe.image.jpeg_mode == JpegMode::Progressive,
             },
             "jpg",
         ),
@@ -857,11 +865,13 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     let target = size_target(recipe);
     // Formats that become PNG without being asked to: kept only when that is smaller.
     let default_png = recipe.image.format == ImageFormat::Keep && matches!(codec, "gif" | "bmp");
+    let flatten_alpha = format == ImageFormat::Jpeg && picture.alpha != Alpha::Absent;
     Ok(ImagePlan {
         encoding,
         max_width: recipe.image.max_width,
         max_height: recipe.image.max_height,
-        flatten_alpha: format == ImageFormat::Jpeg && picture.alpha != Alpha::Absent,
+        flatten_alpha,
+        background: flatten_alpha.then(|| recipe.background.unwrap_or(Color::WHITE)),
         extension,
         decoder,
         converts_format: source != Some(format) && !default_png,
@@ -891,6 +901,7 @@ fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
         max_width: None,
         max_height: None,
         flatten_alpha: false,
+        background: None,
         extension: if info.container == "svgz" {
             "svgz"
         } else {
@@ -920,6 +931,7 @@ fn plan_icon(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> 
         max_width: None,
         max_height: None,
         flatten_alpha: false,
+        background: None,
         extension: match info.container.as_str() {
             "icns" => "icns",
             "cur" => "cur",
@@ -1054,6 +1066,7 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
         max_width: None,
         max_height: None,
         flatten_alpha: false,
+        background: None,
         extension: "jxl",
         decoder: ImageDecoder::Djxl,
         converts_format: false,
@@ -1080,8 +1093,12 @@ pub struct AnimatedPlan {
     pub height: u32,
     pub start_ms: Option<u64>,
     pub duration_ms: Option<u64>,
-    /// Transparent areas are placed on white because the output format here has no alpha.
+    /// Transparent areas are placed on `background` because the output format here has no
+    /// alpha.
     pub flatten_alpha: bool,
+    /// The color transparent areas are placed on: white unless another was asked for. `None`
+    /// when transparency is kept.
+    pub background: Option<Color>,
     pub extension: &'static str,
     /// FFmpeg arguments between the input and the output (none for an animated PNG).
     pub args: Vec<String>,
@@ -1122,6 +1139,7 @@ pub fn plan_animated_webp(info: &MediaInfo, recipe: &Recipe) -> Result<AnimatedP
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
         flatten_alpha: false,
+        background: None,
         extension: "webp",
         args: Vec::new(),
     })
@@ -1195,6 +1213,7 @@ pub fn plan_apng(info: &MediaInfo, recipe: &Recipe) -> Result<AnimatedPlan, Plan
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
         flatten_alpha: false,
+        background: None,
         // An animated PNG is a PNG file; one made from another format says so in its name.
         extension: if is_apng { "png" } else { "apng" },
         args: Vec::new(),
@@ -1249,6 +1268,7 @@ pub fn plan_animated(
     // GIFs may be transparent. WebP keeps it; AVIF output here does not, so it gets a white matte.
     let maybe_alpha = info.kind == MediaKind::Animation || picture.alpha != Alpha::Absent;
     let flatten_alpha = format == VideoOutput::Avif && maybe_alpha;
+    let background = flatten_alpha.then(|| recipe.background.unwrap_or(Color::WHITE));
     let scale = format!("fps={fps},scale={width}:{height}:flags=lanczos");
     let frames = AnimationFrames {
         scale,
@@ -1257,7 +1277,7 @@ pub fn plan_animated(
         fps,
         level,
         maybe_alpha,
-        flatten_alpha,
+        background,
     };
     let (encoder, extension, args) = if format == VideoOutput::Webp {
         animated_webp_args(&frames, &has_encoder)?
@@ -1273,6 +1293,7 @@ pub fn plan_animated(
         start_ms: recipe.clip.start_ms,
         duration_ms: recipe.clip.duration_ms,
         flatten_alpha,
+        background,
         extension,
         args,
     })
@@ -1286,7 +1307,8 @@ struct AnimationFrames {
     fps: u32,
     level: usize,
     maybe_alpha: bool,
-    flatten_alpha: bool,
+    /// The color transparent areas are placed on, when the output has no transparency.
+    background: Option<Color>,
 }
 
 type EncoderArgs = (&'static str, &'static str, Vec<String>);
@@ -1350,11 +1372,12 @@ fn animated_avif_args(
         level,
         ..
     } = frames;
-    let mut args: Vec<String> = if frames.flatten_alpha {
+    let mut args: Vec<String> = if let Some(Color([red, green, blue])) = frames.background {
         vec![
             "-filter_complex".into(),
             format!(
-                "[0:v:0]{scale},format=rgba[v];color=c=white:s={width}x{height}:r={fps}[bg];\
+                "[0:v:0]{scale},format=rgba[v];\
+                 color=c=0x{red:02x}{green:02x}{blue:02x}:s={width}x{height}:r={fps}[bg];\
                  [bg][v]overlay=shortest=1,format=yuv420p[out]"
             ),
             "-map".into(),
@@ -1439,6 +1462,7 @@ impl DocumentPlan {
             | ImageFormat::Keep => (
                 ImageEncoding::Jpeg {
                     quality: self.jpeg_quality,
+                    progressive: true,
                 },
                 "jpg",
             ),
@@ -1448,6 +1472,7 @@ impl DocumentPlan {
             max_width: self.max_image_side,
             max_height: self.max_image_side,
             flatten_alpha: false,
+            background: None,
             extension,
             decoder: ImageDecoder::Native,
             converts_format: false,
@@ -1927,7 +1952,13 @@ mod tests {
             &Recipe::default(),
         )
         .unwrap();
-        assert_eq!(jpeg.encoding, ImageEncoding::Jpeg { quality: 78 });
+        assert_eq!(
+            jpeg.encoding,
+            ImageEncoding::Jpeg {
+                quality: 78,
+                progressive: true
+            }
+        );
         assert_eq!(jpeg.extension, "jpg");
         let png = plan_image(
             &image_info("png", "png_pipe", Alpha::Present),
@@ -2065,7 +2096,13 @@ mod tests {
             })
         );
         // The search starts from the quality level's setting.
-        assert_eq!(plan.encoding, ImageEncoding::Jpeg { quality: 78 });
+        assert_eq!(
+            plan.encoding,
+            ImageEncoding::Jpeg {
+                quality: 78,
+                progressive: true
+            }
+        );
         recipe.image.keep_dimensions = true;
         assert!(
             plan_image(&jpeg, &recipe)
@@ -2090,7 +2127,10 @@ mod tests {
             assert_eq!(plan.target, None, "{codec}");
         }
         for encoding in [
-            ImageEncoding::Jpeg { quality: 78 },
+            ImageEncoding::Jpeg {
+                quality: 78,
+                progressive: true,
+            },
             ImageEncoding::Heic { quality: 52 },
             ImageEncoding::Png {
                 min_quality: 65,
@@ -2109,6 +2149,50 @@ mod tests {
         let plan = plan_image(&image_info("png", "png_pipe", Alpha::Present), &recipe).unwrap();
         assert!(plan.flatten_alpha);
         assert_eq!(plan.max_width, Some(2000));
+        // On white, unless another color is asked for.
+        assert_eq!(plan.background, Some(Color::WHITE));
+        recipe.background = Some(Color([30, 30, 46]));
+        let plan = plan_image(&image_info("png", "png_pipe", Alpha::Present), &recipe).unwrap();
+        assert_eq!(plan.background, Some(Color([30, 30, 46])));
+        // Nothing is placed on anything where transparency is kept, or where there is none.
+        recipe.image.format = ImageFormat::Webp;
+        let plan = plan_image(&image_info("png", "png_pipe", Alpha::Present), &recipe).unwrap();
+        assert_eq!((plan.flatten_alpha, plan.background), (false, None));
+        recipe.image.format = ImageFormat::Jpeg;
+        let plan = plan_image(&image_info("png", "png_pipe", Alpha::Absent), &recipe).unwrap();
+        assert_eq!((plan.flatten_alpha, plan.background), (false, None));
+    }
+
+    #[test]
+    fn a_jpeg_is_progressive_unless_baseline_is_asked_for() {
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Jpeg;
+        let png = image_info("png", "png_pipe", Alpha::Absent);
+        assert_eq!(
+            plan_image(&png, &recipe).unwrap().encoding,
+            ImageEncoding::Jpeg {
+                quality: 78,
+                progressive: true
+            }
+        );
+        recipe.image.jpeg_mode = JpegMode::Baseline;
+        assert_eq!(
+            plan_image(&png, &recipe).unwrap().encoding,
+            ImageEncoding::Jpeg {
+                quality: 78,
+                progressive: false
+            }
+        );
+        // A JPEG that stays a JPEG follows the same setting.
+        recipe.image.format = ImageFormat::Keep;
+        let jpeg = image_info("mjpeg", "image2", Alpha::Absent);
+        assert!(matches!(
+            plan_image(&jpeg, &recipe).unwrap().encoding,
+            ImageEncoding::Jpeg {
+                progressive: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2663,6 +2747,14 @@ mod tests {
         );
         assert!(avif.flatten_alpha);
         assert!(avif.args.join(" ").contains("overlay=shortest=1"));
+        // Transparent areas go on white, or on the color asked for.
+        assert_eq!(avif.background, Some(Color::WHITE));
+        assert!(avif.args.join(" ").contains("color=c=0xffffff:s=300x200"));
+        recipe.background = Some(Color([30, 30, 46]));
+        let dark = plan_animated(&gif, &recipe, |n| n == "libaom-av1").unwrap();
+        assert_eq!(dark.background, Some(Color([30, 30, 46])));
+        assert!(dark.args.join(" ").contains("color=c=0x1e1e2e:s=300x200"));
+        recipe.background = None;
         assert!(avif.args.contains(&"libaom-av1".to_owned()));
 
         let err = plan_animated(&gif, &recipe, |_| false).unwrap_err();

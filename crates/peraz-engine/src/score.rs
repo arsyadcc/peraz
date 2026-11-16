@@ -528,7 +528,10 @@ const IMAGE_PROBES: usize = 8;
 /// quality, and at 100 stays true-color (lossless) when a palette cannot reach that.
 pub(crate) fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
     match encoding {
-        ImageEncoding::Jpeg { .. } => ImageEncoding::Jpeg { quality },
+        ImageEncoding::Jpeg { progressive, .. } => ImageEncoding::Jpeg {
+            quality,
+            progressive,
+        },
         ImageEncoding::Webp { .. } => ImageEncoding::Webp { quality },
         ImageEncoding::Avif { .. } => ImageEncoding::Avif { quality },
         ImageEncoding::Heic { .. } => ImageEncoding::Heic { quality },
@@ -549,7 +552,7 @@ pub(crate) fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncodin
 /// The quality setting an encoding starts from.
 pub(crate) fn quality_of(encoding: ImageEncoding) -> u8 {
     match encoding {
-        ImageEncoding::Jpeg { quality }
+        ImageEncoding::Jpeg { quality, .. }
         | ImageEncoding::Webp { quality }
         | ImageEncoding::Avif { quality }
         | ImageEncoding::Heic { quality }
@@ -724,10 +727,14 @@ mod tests {
 
     fn jpeg_plan() -> ImagePlan {
         ImagePlan {
-            encoding: ImageEncoding::Jpeg { quality: 80 },
+            encoding: ImageEncoding::Jpeg {
+                quality: 80,
+                progressive: true,
+            },
             max_width: None,
             max_height: None,
             flatten_alpha: false,
+            background: None,
             extension: "jpg",
             decoder: peraz_core::ImageDecoder::Native,
             converts_format: false,
@@ -754,7 +761,7 @@ mod tests {
                 encode_image_to_ssimulacra2(None, decoded, &mut plan, target, &cancel).unwrap();
             let score = score.unwrap();
             assert!(score >= f64::from(target), "{target}: {score}");
-            let ImageEncoding::Jpeg { quality } = plan.encoding else {
+            let ImageEncoding::Jpeg { quality, .. } = plan.encoding else {
                 panic!("still JPEG")
             };
             scores.push((quality, encoded.bytes.len()));
@@ -779,7 +786,13 @@ mod tests {
             encode_image_to_ssimulacra2(None, decoded, &mut plan, 80, &AtomicBool::new(false))
                 .unwrap();
         assert_eq!(score, None);
-        assert_eq!(plan.encoding, ImageEncoding::Jpeg { quality: 80 });
+        assert_eq!(
+            plan.encoding,
+            ImageEncoding::Jpeg {
+                quality: 80,
+                progressive: true
+            }
+        );
     }
 
     #[test]

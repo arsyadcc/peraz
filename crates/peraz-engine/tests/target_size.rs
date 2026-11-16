@@ -107,7 +107,7 @@ fn quality_is_lowered_first_and_the_picture_keeps_its_size() {
     let found = plan.target.expect("a size target");
     assert!(found.reached && found.attempts > 1, "{found:?}");
     assert_eq!((found.target_bytes, found.scaled_to), (target, None));
-    let ImageEncoding::Jpeg { quality } = plan.encoding else {
+    let ImageEncoding::Jpeg { quality, .. } = plan.encoding else {
         panic!("{:?}", plan.encoding)
     };
     assert!((35..78).contains(&quality), "quality {quality}");

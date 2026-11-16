@@ -18,8 +18,8 @@ pub use plan::{
     plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
 };
 pub use recipe::{
-    Clip, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
-    VideoOutput, VideoRecipe,
+    Clip, Color, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, JpegMode, Quality, Recipe,
+    VideoCodec, VideoOutput, VideoRecipe,
 };
 pub use report::{
     DocumentStats, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan, Report,

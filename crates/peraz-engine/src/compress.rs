@@ -568,7 +568,11 @@ fn lossless_route(
         ImageEncoding::Jxl {
             from_jpeg: true, ..
         } => Some(Lossless::JpegXl),
-        ImageEncoding::Jpeg { .. } if rebuilt_jpeg => Some(Lossless::Jpeg),
+        // The rebuilt JPEG is what it was before it became JPEG XL, which may be progressive:
+        // when a baseline JPEG is asked for, the picture is encoded anew.
+        ImageEncoding::Jpeg {
+            progressive: true, ..
+        } if rebuilt_jpeg => Some(Lossless::Jpeg),
         _ => None,
     }
 }
@@ -1109,6 +1113,7 @@ fn webp_frames_for_ffmpeg(
         start_ms: None,
         duration_ms: None,
         flatten_alpha: false,
+        background: None,
         extension: "apng",
         args: Vec::new(),
     };

@@ -115,22 +115,15 @@ fn encode_image_inner(
     let (width, height) = (image.width(), image.height());
     let mut warnings = Vec::new();
     let (bytes, encoder) = match plan.encoding {
-        ImageEncoding::Jpeg { quality } => {
-            let jpeg = if image.color().channel_count() == 1 {
-                // A gray picture stays one channel: smaller, and nothing to get wrong.
-                let gray = image.to_luma8();
-                let space = mozjpeg::ColorSpace::JCS_GRAYSCALE;
-                jpeg_from_pixels(gray.as_raw(), width, height, space, quality, icc.as_deref())?
-            } else if plan.flatten_alpha {
-                let rgb = flatten_on_white(&image.to_rgba8());
-                encode_jpeg(&rgb, quality, icc.as_deref())?
-            } else {
-                encode_jpeg(&image.to_rgb8(), quality, icc.as_deref())?
-            };
+        ImageEncoding::Jpeg {
+            quality,
+            progressive,
+        } => {
+            let (jpeg, settings) = jpeg_of(image, plan, quality, progressive, icc.as_deref())?;
             warnings.extend(kept.map(Metadata::too_large_for_jpeg).unwrap_or_default());
             (
                 kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg)),
-                format!("mozjpeg q{quality}"),
+                settings.name(),
             )
         }
         ImageEncoding::Png {
@@ -404,28 +397,123 @@ fn jpeg_is_complete(bytes: &[u8]) -> bool {
     bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
-/// Composites transparent pixels onto white, for formats without alpha.
-fn flatten_on_white(rgba: &RgbaImage) -> RgbImage {
+/// The picture as a JPEG, with the settings it was written with: gray stays one channel,
+/// transparency goes on the plan's background, and sharp colored edges keep full color.
+fn jpeg_of(
+    image: &DynamicImage,
+    plan: &ImagePlan,
+    quality: u8,
+    progressive: bool,
+    icc: Option<&[u8]>,
+) -> Result<(Vec<u8>, JpegSettings), String> {
+    let (width, height) = (image.width(), image.height());
+    let mut settings = JpegSettings {
+        quality,
+        progressive,
+        full_color: false,
+    };
+    let jpeg = if image.color().channel_count() == 1 {
+        // A gray picture stays one channel: smaller, and nothing to get wrong.
+        let gray = image.to_luma8();
+        let space = mozjpeg::ColorSpace::JCS_GRAYSCALE;
+        jpeg_from_pixels(gray.as_raw(), width, height, space, settings, icc)?
+    } else {
+        let rgb = match plan.background {
+            Some(color) if plan.flatten_alpha => flatten_on(&image.to_rgba8(), color),
+            _ => image.to_rgb8(),
+        };
+        settings.full_color = has_sharp_color_edges(&rgb);
+        let space = mozjpeg::ColorSpace::JCS_RGB;
+        jpeg_from_pixels(rgb.as_raw(), width, height, space, settings, icc)?
+    };
+    Ok((jpeg, settings))
+}
+
+/// Composites transparent pixels onto `background`, for formats without alpha.
+fn flatten_on(rgba: &RgbaImage, background: peraz_core::Color) -> RgbImage {
     RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
         let [red, green, blue, alpha] = rgba.get_pixel(x, y).0;
-        let blend = |channel: u8| {
-            let (c, a) = (u32::from(channel), u32::from(alpha));
-            // Rounded (c·a + 255·(255 − a)) / 255; always fits in u8.
-            u8::try_from((c * a + 255 * (255 - a) + 127) / 255).unwrap_or(u8::MAX)
+        let blend = |channel: u8, under: u8| {
+            let (c, u, a) = (u32::from(channel), u32::from(under), u32::from(alpha));
+            // Rounded (c·a + u·(255 − a)) / 255; always fits in u8.
+            u8::try_from((c * a + u * (255 - a) + 127) / 255).unwrap_or(u8::MAX)
         };
-        image::Rgb([blend(red), blend(green), blend(blue)])
+        let [under_red, under_green, under_blue] = background.0;
+        image::Rgb([
+            blend(red, under_red),
+            blend(green, under_green),
+            blend(blue, under_blue),
+        ])
     })
 }
 
-fn encode_jpeg(rgb: &RgbImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    jpeg_from_pixels(
-        rgb.as_raw(),
-        rgb.width(),
-        rgb.height(),
-        mozjpeg::ColorSpace::JCS_RGB,
-        quality,
-        icc,
-    )
+/// How a JPEG is written.
+#[derive(Debug, Clone, Copy)]
+struct JpegSettings {
+    quality: u8,
+    /// Several passes from coarse to fine; otherwise a baseline JPEG, in one pass.
+    progressive: bool,
+    /// Color at every pixel (4:4:4) instead of one color value for each two-by-two block
+    /// (4:2:0).
+    full_color: bool,
+}
+
+impl JpegSettings {
+    /// The encoder's name for the report.
+    fn name(self) -> String {
+        format!(
+            "mozjpeg q{}{}{}",
+            self.quality,
+            if self.full_color { " 4:4:4" } else { "" },
+            if self.progressive { "" } else { " baseline" }
+        )
+    }
+}
+
+/// How far a color value must be from the average of its two-by-two block to count as a sharp
+/// colored edge (of 255).
+const SHARP_COLOR_STEP: i32 = 32;
+/// The share of such pixels, in a hundred thousand, above which a picture keeps its color at
+/// every pixel: 0.1%.
+const SHARP_COLOR_SHARE: usize = 100;
+
+/// Whether the picture has sharp colored edges: colored text and thin lines, as in screenshots
+/// and charts. A JPEG usually stores one color value for each two-by-two block (4:2:0), which
+/// photos do not show, but which smears such edges.
+///
+/// Measured with SSIMULACRA2 on 24 photos and on screenshots with colored text. Photos reach
+/// the same score in about 13% less space with 4:2:0, and at most 0.06% of their pixels count
+/// here. Screenshots with colored text do not get past a score of 80 with 4:2:0 at any
+/// quality, and reach it in half the space with 4:4:4; 0.13% of their pixels and more count.
+fn has_sharp_color_edges(rgb: &RgbImage) -> bool {
+    // The two color differences of YCbCr, scaled by 256.
+    let color = |pixel: &image::Rgb<u8>| {
+        let [red, green, blue] = pixel.0.map(i32::from);
+        (
+            -43 * red - 85 * green + 128 * blue,
+            128 * red - 107 * green - 21 * blue,
+        )
+    };
+    let (width, height) = (rgb.width() / 2 * 2, rgb.height() / 2 * 2);
+    let mut sharp = 0usize;
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let block = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .map(|(right, down)| color(rgb.get_pixel(x + right, y + down)));
+            let average = (
+                block.iter().map(|c| c.0).sum::<i32>() / 4,
+                block.iter().map(|c| c.1).sum::<i32>() / 4,
+            );
+            sharp += block
+                .iter()
+                .filter(|c| {
+                    (c.0 - average.0).abs().max((c.1 - average.1).abs()) > SHARP_COLOR_STEP * 256
+                })
+                .count();
+        }
+    }
+    let pixels = width as usize * height as usize;
+    pixels > 0 && sharp * 100_000 > pixels * SHARP_COLOR_SHARE
 }
 
 /// Encodes a grayscale or RGB picture as JPEG with mozjpeg (no ICC profile), for documents
@@ -440,8 +528,15 @@ pub(crate) fn encode_jpeg_plain(image: &DynamicImage, quality: u8) -> Result<Vec
         (image.to_rgb8().into_raw(), mozjpeg::ColorSpace::JCS_RGB)
     };
     let (width, height) = (image.width(), image.height());
-    std::panic::catch_unwind(move || jpeg_from_pixels(&pixels, width, height, space, quality, None))
-        .unwrap_or_else(|_| Err("mozjpeg crashed on this picture".to_owned()))
+    let settings = JpegSettings {
+        quality,
+        progressive: true,
+        full_color: false,
+    };
+    std::panic::catch_unwind(move || {
+        jpeg_from_pixels(&pixels, width, height, space, settings, None)
+    })
+    .unwrap_or_else(|_| Err("mozjpeg crashed on this picture".to_owned()))
 }
 
 fn jpeg_from_pixels(
@@ -449,13 +544,27 @@ fn jpeg_from_pixels(
     width: u32,
     height: u32,
     space: mozjpeg::ColorSpace,
-    quality: u8,
+    settings: JpegSettings,
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     let mut compress = mozjpeg::Compress::new(space);
     compress.set_size(width as usize, height as usize);
-    compress.set_quality(f32::from(quality));
-    // mozjpeg's defaults already use progressive scans and optimized Huffman tables.
+    compress.set_quality(f32::from(settings.quality));
+    if settings.full_color && space == mozjpeg::ColorSpace::JCS_RGB {
+        compress.set_chroma_sampling_pixel_sizes((1, 1), (1, 1));
+    }
+    // mozjpeg's defaults already use progressive scans and optimized Huffman tables. Without
+    // its scans, the picture is written in one pass, which makes a baseline JPEG; trellis
+    // quantization and the optimized tables stay.
+    if !settings.progressive {
+        compress.set_optimize_scans(false);
+        // A baseline JPEG has 8-bit quantization tables. mozjpeg's table has values that go
+        // past 255 below quality 70, so the same table is set here with its values held at 255.
+        let quality = f32::from(settings.quality.clamp(1, 100));
+        let table = mozjpeg::qtable::NRobidoux.scaled(quality, quality);
+        compress.set_luma_qtable(&table);
+        compress.set_chroma_qtable(&table);
+    }
     let mut started = compress
         .start_compress(Vec::new())
         .map_err(|e| format!("mozjpeg: {e}"))?;
@@ -1008,16 +1117,78 @@ mod tests {
         assert!(!jpeg_is_complete(cut));
     }
 
+    /// A JPEG of an RGB picture, as the tests need it: progressive, with the usual color
+    /// sampling.
+    fn encode_jpeg(rgb: &RgbImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
+        let settings = JpegSettings {
+            quality,
+            progressive: true,
+            full_color: false,
+        };
+        let space = mozjpeg::ColorSpace::JCS_RGB;
+        jpeg_from_pixels(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            space,
+            settings,
+            icc,
+        )
+    }
+
     #[test]
-    fn flattening_blends_onto_white() {
+    fn flattening_blends_onto_the_background() {
         let mut rgba = RgbaImage::new(3, 1);
         rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255])); // opaque black stays black
         rgba.put_pixel(1, 0, image::Rgba([0, 0, 0, 0])); // fully transparent becomes white
         rgba.put_pixel(2, 0, image::Rgba([0, 0, 0, 128])); // half transparent becomes mid gray
-        let rgb = flatten_on_white(&rgba);
+        let rgb = flatten_on(&rgba, peraz_core::Color::WHITE);
         assert_eq!(rgb.get_pixel(0, 0).0, [0, 0, 0]);
         assert_eq!(rgb.get_pixel(1, 0).0, [255, 255, 255]);
         assert_eq!(rgb.get_pixel(2, 0).0, [127, 127, 127]);
+        // On another color: that color shows through, channel by channel.
+        let rgb = flatten_on(&rgba, peraz_core::Color([30, 60, 200]));
+        assert_eq!(rgb.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(rgb.get_pixel(1, 0).0, [30, 60, 200]);
+        assert_eq!(rgb.get_pixel(2, 0).0, [15, 30, 100]);
+    }
+
+    #[test]
+    fn sharp_colored_edges_are_told_from_photos() {
+        // A photo: colors change slowly, with grain in the brightness.
+        let photo = RgbImage::from_fn(256, 192, |x, y| {
+            let grain = (x.wrapping_mul(2_654_435_761).wrapping_add(y * 40_503) >> 28) & 15;
+            let channel = |v: u32| u8::try_from(v.min(255)).unwrap();
+            image::Rgb([
+                channel(x * 200 / 256 + grain),
+                channel(y * 200 / 192 + grain),
+                channel(90 + grain),
+            ])
+        });
+        assert!(!has_sharp_color_edges(&photo));
+        // Thin red and blue strokes on a dark background, as colored text has them.
+        let text = RgbImage::from_fn(256, 192, |x, y| {
+            if y % 16 < 9 && x % 7 == 3 {
+                image::Rgb(if (x / 40) % 2 == 0 {
+                    [240, 70, 80]
+                } else {
+                    [90, 160, 250]
+                })
+            } else {
+                image::Rgb([30, 30, 46])
+            }
+        });
+        assert!(has_sharp_color_edges(&text));
+        // Black text on white has sharp edges, but no color in them.
+        let plain = RgbImage::from_fn(256, 192, |x, y| {
+            image::Rgb(if y % 16 < 9 && x % 7 == 3 {
+                [0; 3]
+            } else {
+                [255; 3]
+            })
+        });
+        assert!(!has_sharp_color_edges(&plain));
+        assert!(!has_sharp_color_edges(&RgbImage::new(1, 1)));
     }
 
     #[test]

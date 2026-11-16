@@ -19,6 +19,8 @@
 //! target_ssimulacra2 = 80          # still images: smallest file with this SSIMULACRA2 score
 //! measure_quality = false          # score every result (VMAF, SSIMULACRA2), even without a target
 //! keep_metadata = false            # keep EXIF, XMP, and IPTC (with the GPS location) in pictures
+//! jpeg_mode = "progressive"        # progressive, baseline (for systems that read nothing else)
+//! background = "#ffffff"           # what transparency is placed on where the output has none
 //! fps = 12                         # GIF and animated WebP/AVIF frame rate
 //! ```
 //!
@@ -27,8 +29,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::recipe::{
-    Clip, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, Quality, Recipe, VideoCodec,
-    VideoOutput, VideoRecipe,
+    Clip, Color, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, JpegMode, Quality, Recipe,
+    VideoCodec, VideoOutput, VideoRecipe,
 };
 use crate::units::parse_size;
 
@@ -71,6 +73,11 @@ pub struct Settings {
     pub keep_metadata: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_dimensions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jpeg_mode: Option<JpegMode>,
+    /// A color, as `#rrggbb`, `#rgb`, `white`, or `black`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
 }
 
 fn current_version() -> u32 {
@@ -96,6 +103,8 @@ impl Default for Settings {
             measure_quality: None,
             keep_metadata: None,
             keep_dimensions: None,
+            jpeg_mode: None,
+            background: None,
         }
     }
 }
@@ -197,6 +206,11 @@ impl Settings {
         if let Some(size) = &self.target_size {
             parse_size(size).map_err(|e| SettingsError(format!("target_size: {e}")))?;
         }
+        if let Some(color) = &self.background {
+            color
+                .parse::<Color>()
+                .map_err(|e| SettingsError(format!("background: {e}")))?;
+        }
         if self.target_size.is_some() && self.target_vmaf.is_some() {
             return Err(SettingsError(
                 "target_size and target_vmaf cannot be combined: a video either fits a size or reaches a score"
@@ -254,6 +268,8 @@ impl Settings {
             measure_quality: self.measure_quality.or(below.measure_quality),
             keep_metadata: self.keep_metadata.or(below.keep_metadata),
             keep_dimensions: self.keep_dimensions.or(below.keep_dimensions),
+            jpeg_mode: self.jpeg_mode.or(below.jpeg_mode),
+            background: self.background.or_else(|| below.background.clone()),
         }
     }
 
@@ -268,6 +284,10 @@ impl Settings {
         let format: OutputFormat = self.format.as_deref().unwrap_or("keep").parse()?;
         let target_bytes = match &self.target_size {
             Some(size) => Some(parse_size(size).map_err(SettingsError)?),
+            None => None,
+        };
+        let background = match &self.background {
+            Some(color) => Some(color.parse::<Color>().map_err(SettingsError)?),
             None => None,
         };
         Ok(Recipe {
@@ -292,6 +312,7 @@ impl Settings {
                 keep_metadata: self.keep_metadata.unwrap_or(false),
                 target_bytes,
                 keep_dimensions: self.keep_dimensions.unwrap_or(false),
+                jpeg_mode: self.jpeg_mode.unwrap_or_default(),
             },
             gif: GifRecipe { fps: self.fps },
             clip: Clip {
@@ -299,6 +320,7 @@ impl Settings {
                 duration_ms,
             },
             measure_quality: self.measure_quality.unwrap_or(false),
+            background,
         })
     }
 }
@@ -480,10 +502,25 @@ mod tests {
             measure_quality: Some(true),
             keep_metadata: Some(true),
             keep_dimensions: Some(true),
+            jpeg_mode: Some(JpegMode::Baseline),
+            background: Some("#1e1e2e".into()),
             ..Settings::default()
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()).unwrap(), settings);
         let recipe = settings.to_recipe(None, None).unwrap();
+        assert_eq!(recipe.image.jpeg_mode, JpegMode::Baseline);
+        assert_eq!(recipe.background, Some(Color([30, 30, 46])));
+        // Without them: progressive, and white where transparency is lost.
+        let usual = Settings::default().to_recipe(None, None).unwrap();
+        assert_eq!(
+            (usual.image.jpeg_mode, usual.background),
+            (JpegMode::Progressive, None)
+        );
+        // A color that is not one is refused when the recipe is read.
+        let error = Settings::from_toml("version = 1\nbackground = \"sky\"\n").unwrap_err();
+        assert!(error.to_string().contains("background"), "{error}");
+        let error = Settings::from_toml("version = 1\njpeg_mode = \"fast\"\n").unwrap_err();
+        assert!(error.to_string().contains("baseline"), "{error}");
         assert!(recipe.measure_quality && recipe.image.keep_metadata);
         // The size applies to videos and to pictures alike.
         assert_eq!(recipe.video.target_bytes, Some(8_000_000));

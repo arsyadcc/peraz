@@ -8,8 +8,8 @@ use std::sync::{Mutex, PoisonError};
 use peraz_core::settings::{OutputFormat, Settings};
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    EncoderPreference, ExistingOutput, ImageFormat, Job, KeepReason, MediaKind, Metric, Outcome,
-    OutputTarget, Plan, Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoOutput,
+    EncoderPreference, ExistingOutput, ImageFormat, Job, JpegMode, KeepReason, MediaKind, Metric,
+    Outcome, OutputTarget, Plan, Quality, Recipe, Report, Score, TrimPlan, VideoCodec, VideoOutput,
     VideoPlan,
 };
 use peraz_engine::batch::Batch;
@@ -126,6 +126,16 @@ pub struct SettingsArgs {
     /// skipped, unless it was changed since.
     #[arg(long)]
     pub recompress: bool,
+
+    /// How JPEGs are written: progressive (default; smaller) or baseline, for old systems,
+    /// printers, and upload forms that read nothing else.
+    #[arg(long, value_name = "MODE", value_parser = parse::<JpegMode>)]
+    pub jpeg_mode: Option<JpegMode>,
+
+    /// The color that transparent areas are placed on where the output has no transparency
+    /// (JPEG pictures, animated AVIF): #rrggbb, #rgb, white, or black. Default: white.
+    #[arg(long, value_name = "COLOR", value_parser = parse_color)]
+    pub background: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -185,6 +195,11 @@ fn parse_format(s: &str) -> Result<String, String> {
     s.parse::<OutputFormat>()
         .map(|_| s.to_owned())
         .map_err(|e| e.to_string())
+}
+
+/// `--background`: a color such as `#1e1e2e`.
+fn parse_color(s: &str) -> Result<String, String> {
+    s.parse::<peraz_core::Color>().map(|_| s.to_owned())
 }
 
 /// `--target-size`: an SI size such as `25MB`.
@@ -668,6 +683,8 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         measure_quality: args.measure_quality.then_some(true),
         keep_metadata: args.keep_metadata.then_some(true),
         keep_dimensions: args.keep_dimensions.then_some(true),
+        jpeg_mode: args.jpeg_mode,
+        background: args.background.clone(),
         ..Settings::default()
     };
     let project = if args.recipe.is_none() && !args.ignore_project_recipe {

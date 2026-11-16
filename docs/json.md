@@ -251,3 +251,5 @@ makes it 1.
 | `settings.measure_quality` | boolean | |
 | `settings.keep_metadata` | boolean | |
 | `settings.keep_dimensions` | boolean | |
+| `settings.jpeg_mode` | string | One of `progressive`, `baseline`. |
+| `settings.background` | string | A color, as written, e.g. `#1e1e2e`. |

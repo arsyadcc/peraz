@@ -11,6 +11,27 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- `--jpeg-mode baseline` (recipe key `jpeg_mode`) writes baseline JPEGs, for old systems,
+  printers, and upload forms that do not read progressive ones. The default stays progressive.
+  A baseline JPEG keeps mozjpeg's trellis quantization and optimized tables, and is a few
+  percent larger. **Interface:** new flag and recipe key; `settings.jpeg_mode` in `peraz recipe
+  show --json`.
+- `--background <color>` (recipe key `background`) sets the color that transparent areas are
+  placed on where the output has no transparency: pictures converted to JPEG, and animated
+  AVIF. Colors are written `#rrggbb`, `#rgb`, `white`, or `black`; the default stays white.
+  **Interface:** new flag and recipe key; `settings.background` in `peraz recipe show --json`.
+
+### Changed
+
+- JPEG output keeps color at every pixel (4:4:4) for pictures with sharp colored edges: colored
+  text and thin colored lines, as in screenshots and charts. Before, every JPEG stored one color
+  value for each two-by-two block (4:2:0), which smears such edges: measured with SSIMULACRA2,
+  screenshots with colored text did not get past a score of 80 at any quality, and now reach it
+  in half the space. Photos stay 4:2:0, which reaches the same score in about 13% less space
+  for them. The report's `encoder` says `4:4:4` when it was used.
+
 ## [0.6.0] - 2026-11-16
 
 ### Added
