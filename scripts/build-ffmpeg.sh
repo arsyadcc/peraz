@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds the FFmpeg that Peraz bundles: `ffmpeg` and `ffprobe`, linked statically against the
-# encoder libraries Peraz uses, with nothing from the build machine's own libraries. Next to them
-# go libjxl's `cjxl` and `djxl`, for JPEG XL output.
+# Builds the FFmpeg that Peraz bundles: `ffmpeg`, linked statically against the encoder libraries
+# Peraz uses, and an `ffprobe` that reads everything `ffmpeg` reads but has no encoders, with
+# nothing from the build machine's own libraries. Next to them go libjxl's `cjxl` and `djxl`,
+# for JPEG XL output.
 #
 #   scripts/build-ffmpeg.sh [out-dir]                       (default: target/ffmpeg)
 #   PERAZ_FFMPEG_TARGET=windows scripts/build-ffmpeg.sh     (Windows x64, cross-built on Linux)
@@ -311,33 +312,47 @@ install_gpu_headers() {
   cp -R "$dir/AMF" "$prefix/include/"
 }
 
+# FFmpeg is built twice from the same source. `ffmpeg` gets everything: the encoders, their
+# libraries, the filters. `ffprobe` only reads files, so its build has every demuxer, parser,
+# and decoder of the first one (libdav1d included), but no encoders, muxers, filters, or
+# encoder libraries: a third of the size, and nothing in it twice.
 build_ffmpeg() {
   log FFmpeg
   used+=(ffmpeg)
   local dir
   dir=$(fetch ffmpeg)
-  local args=(--prefix="$prefix" --pkg-config=pkg-config --pkg-config-flags=--static
+  local common=(--prefix="$prefix" --pkg-config=pkg-config --pkg-config-flags=--static
     --extra-cflags="-I$prefix/include" --disable-shared --enable-static --enable-gpl
-    --disable-autodetect --disable-doc --disable-ffplay --disable-network --disable-devices
-    --enable-indev=lavfi
-    --enable-zlib --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libdav1d
-    --enable-libwebp --enable-libvmaf)
+    --disable-autodetect --disable-doc --disable-network --enable-zlib --enable-libdav1d)
+  local encoding=(--disable-ffplay --disable-ffprobe --disable-devices --enable-indev=lavfi
+    --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libwebp --enable-libvmaf)
+  # The Opus decoder needs libswresample; nothing else that reads a file needs the rest.
+  local reading=(--disable-programs --enable-ffprobe --disable-avdevice --disable-avfilter
+    --disable-swscale --disable-encoders --disable-muxers --disable-hwaccels)
   case "$system" in
     macos)
-      args+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-videotoolbox
-        --enable-bzlib --enable-iconv --extra-libs=-liconv)
+      common+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-bzlib --enable-iconv
+        --extra-libs=-liconv)
+      encoding+=(--enable-videotoolbox)
       ;;
     linux)
-      args+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads --enable-ffnvcodec --enable-nvenc
-        --enable-amf --extra-libs="-lpthread -lm -ldl")
+      common+=(--extra-ldflags="-L$prefix/lib" --enable-pthreads
+        --extra-libs="-lpthread -lm -ldl")
+      encoding+=(--enable-ffnvcodec --enable-nvenc --enable-amf)
       ;;
     windows)
-      args+=(--extra-ldflags="-L$prefix/lib -static" --target-os=mingw32 --arch=x86_64
-        --cross-prefix="$cross-" --enable-cross-compile --enable-w32threads --enable-ffnvcodec
-        --enable-nvenc --enable-amf)
+      common+=(--extra-ldflags="-L$prefix/lib -static" --target-os=mingw32 --arch=x86_64
+        --cross-prefix="$cross-" --enable-cross-compile --enable-w32threads)
+      encoding+=(--enable-ffnvcodec --enable-nvenc --enable-amf)
       ;;
   esac
-  (cd "$dir" && ./configure "${args[@]}" && make -j"$jobs" && make install)
+  # Each in a build folder of its own, next to the untouched source.
+  mkdir -p "$dir/build-ffmpeg" "$dir/build-ffprobe"
+  (cd "$dir/build-ffmpeg" && ../configure "${common[@]}" "${encoding[@]}" && make -j"$jobs" \
+    && make install)
+  log "FFmpeg: ffprobe"
+  (cd "$dir/build-ffprobe" && ../configure "${common[@]}" "${reading[@]}" && make -j"$jobs" \
+    && cp "ffprobe$exe" "$prefix/bin/")
 }
 
 # The license comment at the top of a header file.

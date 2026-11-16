@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks a bundled FFmpeg build from scripts/build-ffmpeg.sh: the encoders Peraz uses are there
-# and work, cjxl and djxl make and read JPEG XL, and the binaries load only libraries every
-# machine has.
+# and work, ffprobe reads everything ffmpeg reads although it is built without encoders, cjxl
+# and djxl make and read JPEG XL, and the binaries load only libraries every machine has.
 #
 #   scripts/test-ffmpeg-build.sh [dir]     (default: target/ffmpeg)
 #
@@ -95,4 +95,38 @@ cmp -s "$tmp/still.jpg" "$tmp/back.jpg" || fail "djxl did not rebuild the same J
 
 pix_fmt=$("$probe" -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$tmp/hevc10.mp4")
 [[ ${pix_fmt%$'\r'} == yuv420p10le ]] || fail "10-bit HEVC came out as $pix_fmt"
+
+# ffprobe is a build of its own, without encoders, muxers, and filters. It must still read
+# everything ffmpeg reads: the same decoders, and the same demuxers (but for ffmpeg's lavfi
+# source, a device, which the list marks with a `d` in the place of a name).
+probe_version=$("$probe" -hide_banner -version)
+grep -q -- --enable-libx264 <<<"$probe_version" && fail "ffprobe was built with the encoder libraries"
+[[ -z $("$probe" -hide_banner -encoders | sed '1,/^ ------/d') ]] || fail "ffprobe has encoders"
+names() { sed -E '1,/^ *-+$/d' | awk '{print $2}' | sort; }
+for kind in decoders demuxers; do
+  missing=$(comm -23 <("$ff" -hide_banner "-$kind" | names) <("$probe" -hide_banner "-$kind" | names) \
+    | grep -vx d || true)
+  [[ -z $missing ]] || fail "ffprobe lacks these $kind that ffmpeg has: $(tr '\n' ' ' <<<"$missing")"
+done
+ffmpeg_size=$(wc -c < "$ff") probe_size=$(wc -c < "$probe")
+((probe_size * 2 < ffmpeg_size)) || fail "ffprobe is $probe_size bytes: not the lean build"
+# What Peraz asks ffprobe: streams and stream groups as JSON, and packet timing. AV1 goes
+# through libdav1d, Opus needs libswresample, and an AVIF picture is a stream group's item.
+"$ff" "${src[@]}" -frames:v 1 -c:v libsvtav1 "$tmp/still.avif"
+"$ff" "${src[@]}" -c:v libwebp_anim "$tmp/anim.webp"
+"$ff" "${src[@]}" -plays 0 "$tmp/anim.apng"
+"$ff" "${src[@]}" "$tmp/anim.gif"
+"$ff" -v error -f lavfi -i sine=duration=1 -c:a libopus "$tmp/audio.opus" 2>/dev/null \
+  || "$ff" -v error -f lavfi -i sine=duration=1 -c:a opus -strict -2 "$tmp/audio.opus"
+probed() { "$probe" -v error -print_format json -show_format -show_streams -show_stream_groups -i "$1"; }
+for file in h264.mp4 hevc10.mp4 av1.mp4 still.webp still.avif anim.webp anim.apng anim.gif audio.m4a audio.opus still.png still.jpg; do
+  probed "$tmp/$file" > "$tmp/$file.json" || fail "ffprobe cannot read $file"
+  grep -q '"codec_name"' "$tmp/$file.json" || fail "ffprobe found no stream in $file"
+done
+grep -q '"pix_fmt": "yuv420p"' "$tmp/av1.mp4.json" || fail "ffprobe did not decode AV1"
+grep -q '"sample_fmt"' "$tmp/audio.opus.json" || fail "ffprobe did not decode Opus"
+"$probe" -v error -select_streams v:0 -show_entries packet=pts_time,duration_time -of csv=p=0 \
+  -i "$tmp/anim.gif" > "$tmp/packets.csv"
+packets=$(grep -c . "$tmp/packets.csv")
+((packets == 30)) || fail "ffprobe counted $packets frames in a GIF of 30"
 echo "OK: $dir"

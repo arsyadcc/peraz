@@ -102,8 +102,9 @@ jobs:
 
           This build of FFmpeg is licensed under the GNU General Public License, version 3 or
           later, because it includes x264 and x265. It also includes SVT-AV1, dav1d, libvmaf, and
-          libwebp. cjxl and djxl are under libjxl's BSD license. The license texts are in the
-          licenses folder. The complete corresponding source code, with the script that builds
+          libwebp. ffprobe is built from the same FFmpeg source without the encoders and their
+          libraries (it has dav1d), since it only reads files. cjxl and djxl are under libjxl's
+          BSD license. The license texts are in the licenses folder. The complete corresponding source code, with the script that builds
           it, is in $where.
           EOF
           tar -C dist -cJf "peraz-ffmpeg-${{ matrix.target }}.tar.xz" peraz-ffmpeg
@@ -183,7 +184,9 @@ jobs:
           \`peraz-full\` archives of each Peraz release include it.
 
           These are GPL builds (version 3 or later) with x264, x265, SVT-AV1, dav1d, and libwebp.
-          \`peraz-ffmpeg-sources.tar\` holds the exact source archives and the build script.
+          \`ffprobe\` is built without the encoders and their libraries, which makes each archive
+          smaller. \`peraz-ffmpeg-sources.tar\` holds the exact source archives and the build
+          script.
           EOF
       - name: Publish
         run: |

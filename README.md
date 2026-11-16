@@ -466,7 +466,9 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
   `peraz-ffmpeg` folder next to `peraz`, or `ffmpeg` on `PATH`, in that order. `peraz doctor`
   shows which one it found and what it can encode.
 - The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, libwebp, and libvmaf,
-  plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
+  plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh).
+  Its `ffprobe` reads everything `ffmpeg` reads but is built without the encoders, which keeps
+  the download small. The sources are published with the build, in the
   [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
 - Without FFmpeg, Peraz still compresses JPEG, PNG, WebP (animated ones too), GIF, BMP, TIFF,
   JPEG XL, and SVG images, icon files, PDFs, and EPUBs; videos, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
