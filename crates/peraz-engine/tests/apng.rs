@@ -403,3 +403,77 @@ fn a_video_becomes_an_animated_png_at_the_planned_rate_and_size() {
     assert!((seconds - 2.0).abs() < 0.01, "{seconds}");
     assert_eq!(frames[0].0.dimensions(), (160, 90));
 }
+
+/// Older FFmpeg builds cannot read animated WebP: `ffprobe` fails on it, sees no picture, or
+/// takes it for a still. Peraz reads the frames itself, so the result does not depend on that.
+#[cfg(unix)]
+#[test]
+fn an_animated_webp_becomes_an_animated_png_whatever_ffprobe_makes_of_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = dir("old-ffmpeg");
+    let pictures: Vec<RgbaImage> = (0..4).map(sticker).collect();
+    let webp = dir.0.join("moving.webp");
+    {
+        let mut config = webp::WebPConfig::new().unwrap();
+        config.lossless = 1;
+        let mut encoder = webp::AnimEncoder::new(SIZE.0, SIZE.1, &config);
+        for (picture, at) in pictures.iter().zip([0, 100, 350, 420]) {
+            encoder.add_frame(webp::AnimFrame::from_rgba(
+                picture.as_raw(),
+                SIZE.0,
+                SIZE.1,
+                at,
+            ));
+        }
+        std::fs::write(&webp, &*encoder.encode()).unwrap();
+    }
+    let answers = [
+        (
+            "fails",
+            "echo 'moving.webp: Invalid data found when processing input' >&2; exit 1",
+        ),
+        (
+            "no-picture",
+            r#"echo '{"streams":[{"codec_type":"video","codec_name":"webp"}],"format":{"format_name":"webp_pipe"}}'"#,
+        ),
+        (
+            "still",
+            r#"echo '{"streams":[{"codec_type":"video","codec_name":"webp","width":96,"height":64,"pix_fmt":"argb","nb_frames":"1"}],"format":{"format_name":"webp_pipe"}}'"#,
+        ),
+    ];
+    for (name, answer) in answers {
+        let ffprobe = dir.0.join(format!("ffprobe-{name}"));
+        std::fs::write(&ffprobe, format!("#!/bin/sh\n{answer}\n")).unwrap();
+        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // FFmpeg itself is never run for this conversion.
+        let tools = Toolchain {
+            ffmpeg: dir.0.join("no-ffmpeg"),
+            ffprobe,
+            source: peraz_engine::ffmpeg::ToolSource::Flag,
+        };
+        let info = probe(&tools, &webp).unwrap();
+        let picture = info.video.expect("a picture");
+        assert_eq!((picture.width, picture.height), SIZE, "{name}");
+
+        let mut recipe = at_quality(Quality::Highest);
+        recipe.video.output = VideoOutput::Apng;
+        let job = Job {
+            input: webp.clone(),
+            output: OutputTarget::File(dir.0.join(format!("{name}.apng"))),
+            recipe,
+            existing: ExistingOutput::Fail,
+        };
+        let report = compress(
+            Some(&tools),
+            &Capabilities::default(),
+            &job,
+            &mut |_| {},
+            &NOT_CANCELLED,
+        );
+        let (output, _) = compressed(&report);
+        let (frames, _) = read_apng(&output);
+        assert_eq!(frames.len(), 4, "{name}");
+        let shown: Vec<f64> = frames.iter().take(3).map(|(_, shown)| *shown).collect();
+        assert_eq!(shown, [100.0, 250.0, 70.0], "{name}");
+    }
+}

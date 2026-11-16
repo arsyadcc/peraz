@@ -28,6 +28,65 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if let Some(header) = crate::icon::sniff(path).map_err(input_error)? {
         return Ok(icon_info(header, size));
     }
+    // An FFmpeg that cannot read animated WebP fails on it or sees no picture; Peraz reads its
+    // frames itself, so it is described from its own header.
+    match ffprobe(tools, path, size) {
+        Ok(info)
+            if info.kind != MediaKind::Unknown
+                && info
+                    .video
+                    .as_ref()
+                    .is_some_and(|v| v.width > 0 && v.height > 0) =>
+        {
+            Ok(info)
+        }
+        other => animated_webp_info(path, size).map_or(other, Ok),
+    }
+}
+
+/// An animated WebP, described from its header (the canvas size in its `VP8X` chunk).
+fn animated_webp_info(path: &Path, size_bytes: u64) -> Option<MediaInfo> {
+    use std::io::Read as _;
+    if crate::apng::sniff(path).ok()? != Some(crate::apng::Source::Webp) {
+        return None;
+    }
+    let mut head = [0u8; 30];
+    std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+    // Width and height minus one, 24 bits each, after the flags and three reserved bytes.
+    let side = |at: usize| 1 + u32::from_le_bytes([head[at], head[at + 1], head[at + 2], 0]);
+    Some(MediaInfo {
+        kind: MediaKind::Animation,
+        container: "webp_pipe".to_owned(),
+        size_bytes,
+        duration_seconds: None,
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: "webp".to_owned(),
+            width: side(24),
+            height: side(27),
+            rotation: 0,
+            frame_rate: None,
+            frame_count: None,
+            pixel_format: None,
+            color: ColorInfo::default(),
+            // The `VP8X` flags say whether any frame has transparency.
+            alpha: if head[20] & 0x10 == 0 {
+                Alpha::Absent
+            } else {
+                Alpha::Present
+            },
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    })
+}
+
+/// Probes one file with `ffprobe`.
+fn ffprobe(tools: &Toolchain, path: &Path, size: u64) -> Result<MediaInfo, EngineError> {
+    let input_error = |source| EngineError::Input {
+        path: path.to_owned(),
+        source,
+    };
     let absolute = std::path::absolute(path).map_err(input_error)?;
     // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
     // as protocols: only local files are ever opened.

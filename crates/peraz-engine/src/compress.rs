@@ -178,24 +178,24 @@ fn run(
         return Outcome::Cancelled;
     };
 
+    // Peraz reads the frames of an animated WebP itself, whatever this FFmpeg makes of the file
+    // (a video, a still picture): they become an animated PNG on request.
+    if job.recipe.video.output == VideoOutput::Apng
+        && info.video.is_some()
+        && matches!(
+            crate::apng::sniff(&job.input),
+            Ok(Some(crate::apng::Source::Webp))
+        )
+    {
+        let animation = MediaInfo {
+            kind: MediaKind::Animation,
+            ..info.clone()
+        };
+        return make_apng(
+            batch, tools, job, &animation, &job.input, progress, cancel, report,
+        );
+    }
     match info.kind {
-        // An FFmpeg that cannot read animated WebP shows it as a still picture; its frames can
-        // still become an animated PNG.
-        MediaKind::Image
-            if job.recipe.video.output == VideoOutput::Apng
-                && matches!(
-                    crate::apng::sniff(&job.input),
-                    Ok(Some(crate::apng::Source::Webp))
-                ) =>
-        {
-            let animation = MediaInfo {
-                kind: MediaKind::Animation,
-                ..info.clone()
-            };
-            return make_apng(
-                batch, tools, job, &animation, &job.input, progress, cancel, report,
-            );
-        }
         MediaKind::Image => return make_image(batch, tools, job, info, progress, cancel, report),
         MediaKind::Pdf | MediaKind::Epub => {
             return make_document(batch, job, info, progress, cancel, report);
