@@ -163,8 +163,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
 A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
-several pages, encrypted PDFs, and DRM-protected EPUBs are skipped. An animated WebP becomes an
-animated PNG with any FFmpeg; its other conversions need an FFmpeg that reads animated WebP.
+several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
 
 ## Usage
 
@@ -196,7 +195,7 @@ peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12
 peraz -q small reaction.gif                # smaller GIF, same timing
 peraz --format webp clip.mp4               # animated WebP (or avif: smallest)
 peraz --format mp4 reaction.gif            # GIF → MP4, often 70-95% smaller
-peraz sticker.png                          # an animated PNG stays one: same frames and timing
+peraz sticker.png sticker.webp             # animated PNG and WebP stay what they are
 peraz --format apng reaction.gif           # GIF or animated WebP → animated PNG
 peraz report.pdf book.epub                 # recompress the pictures inside
 peraz --json --out-dir out/ media/*        # machine-readable report
@@ -284,6 +283,11 @@ merged, and below `-q highest` the frames share one palette when that is good en
 quality level (`-q highest` is always lossless). `--format apng` makes one from a GIF or an
 animated WebP, frame for frame, or from a video at `--fps`. No FFmpeg is needed for an animated
 PNG that stays one.
+
+An animated WebP stays an animated WebP by default too, re-encoded in process with libwebp at
+the quality level: every frame with its timing, the loop count, and transparency, kept only
+when smaller, and without FFmpeg. `--format gif`, `apng`, `avif`, and `mp4` convert it; Peraz
+decodes its frames itself, so that works with FFmpeg builds that cannot read animated WebP.
 
 An animated JPEG XL stays animated JPEG XL by default: `djxl` decodes its frames and `cjxl`
 encodes them again at the quality level, kept only when smaller (no FFmpeg needed). The same
@@ -434,8 +438,8 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
 - The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, libwebp, and libvmaf,
   plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
   [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
-- Without FFmpeg, Peraz still compresses JPEG, PNG, animated PNG, WebP, BMP, TIFF, JPEG XL, and
-  SVG images, icon files, PDFs, and EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
+- Without FFmpeg, Peraz still compresses JPEG, PNG, WebP (animated ones too), BMP, TIFF, JPEG
+  XL, and SVG images, icon files, PDFs, and EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 
 ## Building from source
 

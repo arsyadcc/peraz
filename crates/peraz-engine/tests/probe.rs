@@ -304,11 +304,21 @@ fn without_ffmpeg_leaves_other_files_to_ffmpeg() {
     let info = probe_without_ffmpeg(&still).unwrap().unwrap();
     assert_eq!(info.kind, MediaKind::Image);
     assert_eq!(info.video.unwrap().codec, "png");
-    // An animated WebP: a `VP8X` chunk with the animation flag.
-    let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02".to_vec();
+    // An animated WebP (a `VP8X` chunk with the animation flag and the canvas size, here
+    // 320x240) is read by Peraz itself too.
+    let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02\x00\x00\x00".to_vec();
+    webp.extend([0x3F, 0x01, 0x00, 0xEF, 0x00, 0x00]);
     webp.resize(64, 0);
-    let files: [(&str, &[u8]); 3] = [
-        ("animated.webp", &webp),
+    let animated = dir.join("animated.webp");
+    std::fs::write(&animated, &webp).unwrap();
+    let info = probe_without_ffmpeg(&animated).unwrap().unwrap();
+    assert_eq!(info.kind, MediaKind::Animation);
+    let video = info.video.unwrap();
+    assert_eq!(
+        (video.codec.as_str(), video.width, video.height),
+        ("webp", 320, 240)
+    );
+    let files: [(&str, &[u8]); 2] = [
         ("still.gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;"),
         ("notes.txt", b"plain text, not media"),
     ];

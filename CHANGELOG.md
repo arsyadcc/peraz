@@ -104,6 +104,12 @@ between alpha versions.
 
 ### Fixed
 
+- An animated WebP did not stay an animated WebP: by default it became an MP4, or a GIF with an
+  FFmpeg that cannot read animated WebP. It now stays an animated WebP, re-encoded in process
+  at the quality level, with every frame, its timing, the loop count, and transparency, kept
+  only when smaller, and without FFmpeg. `--format gif`, `apng`, `avif`, and `mp4` still
+  convert it, with any FFmpeg. **Interface:** an animated WebP has `kind` `animation` in `peraz
+  probe` and reports, and its default output is WebP.
 - A JPEG with an HDR gain map (Ultra HDR photos from phones) left the gain map's bytes behind
   when its metadata was removed: unreachable data after the picture's end, which made a
   lossless JPEG XL recompression up to 45% larger than needed. The picture now ends at its end

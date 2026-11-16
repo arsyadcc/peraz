@@ -493,6 +493,14 @@ impl Encoder {
         })
     }
 
+    /// Writes the frames as they are, quickly and without loss: for FFmpeg to read.
+    pub fn finish_plain(self, plays: u32) -> Result<Vec<u8>, String> {
+        if self.deltas.is_empty() {
+            return Err("the source has no frames in the selected range".to_owned());
+        }
+        write(self.width, self.height, &self.deltas, None, plays, None)
+    }
+
     /// The average frame rate of what was pushed, rounded, at least 1.
     pub fn average_fps(&self) -> u32 {
         let ms: f64 = self.deltas.iter().map(|d| d.delay.milliseconds()).sum();

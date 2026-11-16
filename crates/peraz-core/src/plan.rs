@@ -1066,10 +1066,12 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
 pub struct AnimatedPlan {
     /// `webp`, `avif`, or `apng`.
     pub format: VideoOutput,
-    /// FFmpeg encoder name, or `apng` for Peraz's own animated PNG encoder.
+    /// FFmpeg encoder name, `apng` for Peraz's own animated PNG encoder, or `libwebp` for an
+    /// animated WebP encoded in process.
     pub encoder: &'static str,
-    /// Frames per second. An animated PNG made from an animation keeps every frame with its own
-    /// timing instead; this is then the source's average, rounded.
+    /// Frames per second. An animated PNG made from an animation, and an animated WebP that
+    /// stays one, keep every frame with its own timing instead; this is then the source's
+    /// average, rounded.
     pub fps: u32,
     pub width: u32,
     pub height: u32,
@@ -1080,6 +1082,46 @@ pub struct AnimatedPlan {
     pub extension: &'static str,
     /// FFmpeg arguments between the input and the output (none for an animated PNG).
     pub args: Vec<String>,
+}
+
+/// Whether a file is an animated WebP that stays one: by default, and when WebP is asked for.
+pub fn wants_animated_webp(info: &MediaInfo, recipe: &Recipe) -> bool {
+    info.kind == MediaKind::Animation
+        && info.video.as_ref().is_some_and(|v| v.codec == "webp")
+        && matches!(recipe.video.output, VideoOutput::Keep | VideoOutput::Webp)
+}
+
+/// The libwebp quality (0–100) for an animated WebP that stays one: the scale of still WebP
+/// pictures.
+pub fn animated_webp_quality(quality: Quality) -> u8 {
+    [90, 84, 76, 68, 58][quality as usize]
+}
+
+/// Plans re-encoding an animated WebP as an animated WebP, in process: every frame with its
+/// own timing, at the size asked for.
+pub fn plan_animated_webp(info: &MediaInfo, recipe: &Recipe) -> Result<AnimatedPlan, PlanError> {
+    let (Some(picture), true) = (&info.video, wants_animated_webp(info, recipe)) else {
+        return Err(PlanError::NotAnimation { kind: info.kind });
+    };
+    let (width, height) = fit_within(
+        picture.display_size(),
+        recipe.video.max_width,
+        recipe.video.max_height,
+    )
+    .unwrap_or_else(|| picture.display_size());
+    Ok(AnimatedPlan {
+        format: VideoOutput::Webp,
+        encoder: "libwebp",
+        // Every frame is kept with its own timing; the engine fills in the average rate.
+        fps: 1,
+        width,
+        height,
+        start_ms: recipe.clip.start_ms,
+        duration_ms: recipe.clip.duration_ms,
+        flatten_alpha: false,
+        extension: "webp",
+        args: Vec::new(),
+    })
 }
 
 /// Whether a file becomes an animated PNG: when the recipe asks for one, and by default when it
@@ -2319,6 +2361,39 @@ mod tests {
 
         assert_eq!(apng_palette_quality(Quality::Highest), None);
         assert_eq!(apng_palette_quality(Quality::Balanced), Some((65, 85)));
+    }
+
+    #[test]
+    fn an_animated_webp_stays_an_animated_webp() {
+        let mut webp = video_info(480, 270, vec![]);
+        webp.kind = MediaKind::Animation;
+        webp.video.as_mut().unwrap().codec = "webp".into();
+        let mut recipe = Recipe::default();
+        assert!(wants_animated_webp(&webp, &recipe));
+        let plan = plan_animated_webp(&webp, &recipe).unwrap();
+        assert_eq!(
+            (plan.format, plan.encoder, plan.extension),
+            (VideoOutput::Webp, "libwebp", "webp")
+        );
+        assert_eq!((plan.width, plan.height), (480, 270));
+        recipe.video.max_width = Some(240);
+        recipe.video.output = VideoOutput::Webp;
+        let plan = plan_animated_webp(&webp, &recipe).unwrap();
+        assert_eq!((plan.width, plan.height), (240, 134));
+        // Other formats are other plans, and other animations are not this one.
+        for output in [
+            VideoOutput::Gif,
+            VideoOutput::Mp4,
+            VideoOutput::Apng,
+            VideoOutput::Avif,
+        ] {
+            recipe.video.output = output;
+            assert!(!wants_animated_webp(&webp, &recipe), "{output}");
+        }
+        let mut gif = webp.clone();
+        gif.video.as_mut().unwrap().codec = "gif".into();
+        assert!(!wants_animated_webp(&gif, &Recipe::default()));
+        assert_eq!(animated_webp_quality(Quality::Balanced), 76);
     }
 
     #[test]

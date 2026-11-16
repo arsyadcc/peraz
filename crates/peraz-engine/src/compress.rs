@@ -14,8 +14,8 @@ use peraz_core::units::format_bytes;
 use peraz_core::{
     Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
     Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, SkipReason, TrimMethod,
-    VideoOutput, plan_animated, plan_animated_jxl, plan_apng, plan_document, plan_gif, plan_image,
-    plan_trim, plan_video, wants_apng,
+    VideoOutput, plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng, plan_document,
+    plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
 };
 
 use crate::batch::{Batch, Lane};
@@ -195,24 +195,11 @@ fn run(
         return Outcome::Cancelled;
     };
 
-    // Peraz reads the frames of an animated WebP itself, whatever this FFmpeg makes of the file
-    // (a video, a still picture): they become an animated PNG on request.
-    if job.recipe.video.output == VideoOutput::Apng
-        && info.video.is_some()
-        && matches!(
-            crate::apng::sniff(&job.input),
-            Ok(Some(crate::apng::Source::Webp))
-        )
-    {
-        let animation = MediaInfo {
-            kind: MediaKind::Animation,
-            ..info.clone()
-        };
-        return make_apng(
-            batch, tools, job, &animation, &job.input, progress, cancel, report,
-        );
-    }
     match info.kind {
+        // Peraz reads and writes the frames of an animated WebP itself.
+        MediaKind::Animation if info.video.as_ref().is_some_and(|v| v.codec == "webp") => {
+            return make_webp_animation(batch, tools, caps, job, info, progress, cancel, report);
+        }
         MediaKind::Image => {
             return make_image(batch, tools, caps, job, info, progress, cancel, report);
         }
@@ -1009,19 +996,19 @@ fn make_apng(
 /// Share of the progress for reading the frames of an animated PNG; writing takes the rest.
 const APNG_READ_SHARE: f64 = 0.5;
 
-/// Every frame of an animation, at the plan's size, within the selected part.
-fn encode_apng_from_animation(
+/// Hands every frame of an animation Peraz decodes itself to `on_frame`, at the plan's size
+/// and within the part the plan selects, with the time it is shown. Returns the play count
+/// (0: forever) and the color profile.
+fn selected_frames(
     media: &Path,
     source: crate::apng::Source,
-    plan: &mut peraz_core::AnimatedPlan,
-    job: &Job,
-    progress: Progress,
+    plan: &peraz_core::AnimatedPlan,
     cancel: &AtomicBool,
-) -> Result<crate::apng::Encoded, crate::apng::ApngError> {
+    on_frame: &mut dyn FnMut(image::RgbaImage, crate::apng::Delay) -> Result<(), String>,
+) -> Result<(u32, Option<Vec<u8>>), crate::apng::ApngError> {
     let frames = crate::apng::decode(media, source)?;
     let (plays, icc) = (frames.plays, frames.icc.clone());
     let resize = (frames.width, frames.height) != (plan.width, plan.height);
-    let mut encoder = crate::apng::Encoder::new(plan.width, plan.height);
     #[allow(clippy::cast_precision_loss)]
     let (start, end) = (
         plan.start_ms.map_or(0.0, |ms| ms as f64),
@@ -1053,12 +1040,158 @@ fn encode_apng_from_animation(
         } else {
             pixels
         };
+        on_frame(pixels, delay)?;
+    }
+    Ok((plays, icc))
+}
+
+/// The frames of an animated WebP as an animated PNG file in `workdir`, written quickly and
+/// without loss: FFmpeg reads that whether or not it can read animated WebP.
+fn webp_frames_for_ffmpeg(
+    input: &Path,
+    info: &MediaInfo,
+    workdir: &Path,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, crate::apng::ApngError> {
+    let picture = info
+        .video
+        .as_ref()
+        .ok_or_else(|| "the file contains no picture".to_owned())?;
+    // Every frame at its own size: the conversion that follows clips and scales.
+    let whole = peraz_core::AnimatedPlan {
+        format: VideoOutput::Apng,
+        encoder: "apng",
+        fps: 1,
+        width: picture.width,
+        height: picture.height,
+        start_ms: None,
+        duration_ms: None,
+        flatten_alpha: false,
+        extension: "apng",
+        args: Vec::new(),
+    };
+    let mut frames = crate::apng::Encoder::new(whole.width, whole.height);
+    let source = crate::apng::Source::Webp;
+    let (plays, _) = selected_frames(input, source, &whole, cancel, &mut |pixels, delay| {
+        frames.push(pixels.as_raw(), delay)
+    })?;
+    let file = workdir.join("frames.apng");
+    let png = frames.finish_plain(plays)?;
+    std::fs::write(&file, png).map_err(|e| format!("cannot write the decoded frames: {e}"))?;
+    Ok(file)
+}
+
+/// An animated WebP: re-encoded as an animated WebP in process (the default), made into an
+/// animated PNG in process, or decoded into frames that FFmpeg turns into another format.
+#[allow(clippy::too_many_arguments)]
+fn make_webp_animation(
+    batch: &Batch,
+    tools: Option<&Toolchain>,
+    caps: &Capabilities,
+    job: &Job,
+    info: &MediaInfo,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    use crate::apng::ApngError;
+    let failed = |message: String| Outcome::Failed { message };
+    let as_outcome = |error: ApngError| match error {
+        ApngError::Cancelled => Outcome::Cancelled,
+        ApngError::Failed(message) => Outcome::Failed { message },
+    };
+    if wants_apng(info, &job.recipe) {
+        return make_apng(
+            batch, tools, job, info, &job.input, progress, cancel, report,
+        );
+    }
+    if !wants_animated_webp(info, &job.recipe) {
+        let Some(tools) = tools else {
+            return failed(NEEDS_FFMPEG.to_owned());
+        };
+        let workdir = match make_workdir() {
+            Ok(dir) => dir,
+            Err(outcome) => return outcome,
+        };
+        let outcome = match webp_frames_for_ffmpeg(&job.input, info, &workdir, cancel) {
+            Err(error) => as_outcome(error),
+            Ok(frames) => match probe(tools, &frames) {
+                Err(e) => failed(format!("cannot read the decoded frames: {e}")),
+                Ok(mut decoded) => {
+                    // The frames stand in for the input: an animation, compared with the
+                    // input's size.
+                    decoded.kind = MediaKind::Animation;
+                    decoded.size_bytes = info.size_bytes;
+                    make_moving(
+                        batch, tools, caps, job, &decoded, &frames, progress, cancel, report,
+                    )
+                }
+            },
+        };
+        let _ = std::fs::remove_dir_all(&workdir);
+        return outcome;
+    }
+    let mut plan = match plan_animated_webp(info, &job.recipe) {
+        Ok(plan) => plan,
+        Err(e) => return failed(e.to_string()),
+    };
+    report.plan = Some(Plan::Animated(plan.clone()));
+    let output = match choose_output(batch, job, plan.extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    let mut animation = crate::webp_animation::Animation::default();
+    let source = crate::apng::Source::Webp;
+    let read = selected_frames(&job.input, source, &plan, cancel, &mut |pixels, delay| {
+        animation.push(pixels, delay)?;
+        #[allow(clippy::cast_precision_loss)]
+        let seen = animation.len() as f64;
+        progress(APNG_READ_SHARE * seen / (seen + 10.0));
+        Ok(())
+    });
+    let plays = match read {
+        Ok((plays, _)) => plays,
+        Err(error) => return as_outcome(error),
+    };
+    plan.fps = animation.average_fps();
+    let quality = peraz_core::plan::animated_webp_quality(job.recipe.quality);
+    report.plan = Some(Plan::Animated(plan));
+    report.encoder = Some(format!("libwebp q{quality} · {} frames", animation.len()));
+    let bytes = match animation.encode(quality, plays) {
+        Ok(bytes) => bytes,
+        Err(message) => return failed(message),
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Outcome::Cancelled;
+    }
+    let partial = partial_path(&output);
+    if let Err(e) = std::fs::write(&partial, &bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return failed(format!("cannot write {}: {e}", output.display()));
+    }
+    progress(1.0);
+    // An animated WebP stays one only when smaller.
+    finish(&partial, &output, info.size_bytes, false)
+}
+
+/// Every frame of an animation, at the plan's size, within the selected part.
+fn encode_apng_from_animation(
+    media: &Path,
+    source: crate::apng::Source,
+    plan: &mut peraz_core::AnimatedPlan,
+    job: &Job,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<crate::apng::Encoded, crate::apng::ApngError> {
+    let mut encoder = crate::apng::Encoder::new(plan.width, plan.height);
+    let (plays, icc) = selected_frames(media, source, plan, cancel, &mut |pixels, delay| {
         encoder.push(pixels.as_raw(), delay)?;
         // The frame count is not known ahead: approach the share without reaching it.
         #[allow(clippy::cast_precision_loss)]
         let seen = encoder.frames_seen as f64;
         progress(APNG_READ_SHARE * seen / (seen + 10.0));
-    }
+        Ok(())
+    })?;
     plan.fps = encoder.average_fps();
     progress(APNG_READ_SHARE);
     encoder.finish(

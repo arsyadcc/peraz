@@ -469,7 +469,7 @@ fn check_jpeg_xl_inputs(files: &[PathBuf]) -> Result<(), u8> {
 }
 
 /// What Peraz compresses without FFmpeg (everything it decodes and encodes in process).
-pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, animated PNG, WebP, BMP, TIFF, JPEG XL, and SVG images, icon files, PDFs, and EPUBs";
+pub const WITHOUT_FFMPEG: &str = "JPEG, PNG, WebP (animated ones too), BMP, TIFF, JPEG XL, and SVG images, icon files, PDFs, and EPUBs";
 
 /// Finds FFmpeg. Without one, the run goes on only when FFmpeg was not chosen explicitly (with
 /// `--ffmpeg` or `PERAZ_FFMPEG`) and every input is a file Peraz compresses itself; otherwise it
@@ -489,8 +489,8 @@ fn find_ffmpeg(
         return Err(exit::ENVIRONMENT);
     }
     // An unreadable input is reported per file, like with FFmpeg.
-    // An animated PNG or JPEG XL stays what it is, or becomes an animated PNG, without FFmpeg;
-    // other animation formats need it.
+    // An animated PNG, WebP, or JPEG XL stays what it is, or becomes an animated PNG, without
+    // FFmpeg; other animation formats need it.
     let needs_ffmpeg =
         files.iter().find(
             |file| match peraz_engine::probe::probe_without_ffmpeg(file) {
@@ -498,6 +498,7 @@ fn find_ffmpeg(
                 Ok(Some(info)) => {
                     info.kind == MediaKind::Animation
                         && !matches!(recipe.video.output, VideoOutput::Keep | VideoOutput::Apng)
+                        && !peraz_core::wants_animated_webp(&info, recipe)
                 }
                 Err(_) => false,
             },

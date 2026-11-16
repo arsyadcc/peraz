@@ -26,6 +26,7 @@ pub mod probe;
 mod score;
 pub mod svg;
 pub mod tiff;
+pub mod webp_animation;
 
 pub use error::EngineError;
 pub use peraz_core::VERSION;

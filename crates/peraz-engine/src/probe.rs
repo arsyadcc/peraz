@@ -28,20 +28,12 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if let Some(header) = crate::icon::sniff(path).map_err(input_error)? {
         return Ok(icon_info(header, size));
     }
-    // An FFmpeg that cannot read animated WebP fails on it or sees no picture; Peraz reads its
-    // frames itself, so it is described from its own header.
-    match ffprobe(tools, path, size) {
-        Ok(info)
-            if info.kind != MediaKind::Unknown
-                && info
-                    .video
-                    .as_ref()
-                    .is_some_and(|v| v.width > 0 && v.height > 0) =>
-        {
-            Ok(info)
-        }
-        other => animated_webp_info(path, size).map_or(other, Ok),
+    // Peraz reads the frames of an animated WebP itself: described from its own header, the
+    // same with every FFmpeg (older ones cannot read it at all).
+    if let Some(info) = animated_webp_info(path, size) {
+        return Ok(info);
     }
+    ffprobe(tools, path, size)
 }
 
 /// An animated WebP, described from its header (the canvas size in its `VP8X` chunk).
@@ -457,6 +449,9 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
         && animation.frames > 1
     {
         return Ok(Some(apng_info(animation, size)));
+    }
+    if let Some(info) = animated_webp_info(path, size) {
+        return Ok(Some(info));
     }
     let Some((codec, container)) = sniff_still_image(path).map_err(input_error)? else {
         return Ok(None);
