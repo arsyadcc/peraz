@@ -155,11 +155,12 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Kind | Input | Output |
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
-| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL | JPEG, PNG, WebP, AVIF, JPEG XL |
+| Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL, TIFF, BMP | JPEG, PNG, WebP, AVIF, JPEG XL, TIFF |
 | Animation | GIF, animated JPEG XL, video | GIF, animated WebP, animated AVIF, animated JPEG XL, MP4 |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
-Encrypted PDFs and DRM-protected EPUBs are skipped.
+A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
+several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
 
 ## Usage
 
@@ -181,6 +182,7 @@ peraz --format jpeg --max-width 2000 *.png
 peraz --format webp *.png *.jpg            # or --format avif (smallest, slower)
 peraz --format jxl -q highest *.jpg        # JPEG XL: JPEGs about 20% smaller, pixels unchanged
 peraz IMG_0042.HEIC                        # → IMG_0042-1.jpg, upright, colors kept
+peraz scan.tiff screenshot.bmp             # lossless TIFF (16-bit stays 16-bit); BMP → PNG
 peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12 fps)
 peraz -q small reaction.gif                # smaller GIF, same timing
 peraz --format webp clip.mp4               # animated WebP (or avif: smallest)
@@ -257,7 +259,8 @@ encodes them again at the quality level, kept only when smaller (no FFmpeg neede
 
 PDF and EPUB files keep their text, layout, and links: only the pictures inside are
 recompressed (photos with mozjpeg, graphics as palette images), and a picture is replaced only
-when the new version is smaller. Encrypted PDFs and DRM-protected EPUBs are skipped.
+when the new version is smaller. A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
+several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
 
 ### Target quality
 
@@ -300,7 +303,7 @@ A recipe is a named set of settings, written in TOML with the same keys as the f
 version = 1                      # recipe format version
 description = "Pictures for our website"
 quality = "balanced"             # highest, high, balanced, small, smallest
-format = "webp"                  # keep, jpeg, png, webp, avif, jxl, gif, mp4
+format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, mp4
 max_width = 2000                 # pixels; never scales up
 max_height = 2000
 codec = "h264"                   # h264, hevc

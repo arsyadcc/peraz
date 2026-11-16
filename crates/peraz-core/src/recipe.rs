@@ -135,6 +135,8 @@ pub enum ImageFormat {
     /// JPEG XL: smaller than JPEG at the same quality, supports transparency, and recompresses
     /// JPEGs losslessly. Needs libjxl's `cjxl`; not every browser shows it.
     Jxl,
+    /// TIFF with lossless compression, for scans and exports from photo and design tools.
+    Tiff,
 }
 
 /// Settings for still images.
@@ -201,7 +203,7 @@ text_enum!(Quality { Highest => "highest", High => "high", Balanced => "balanced
 text_enum!(VideoCodec { H264 => "h264", Hevc => "hevc" });
 text_enum!(EncoderPreference { Auto => "auto", Software => "software", Hardware => "hardware" });
 text_enum!(VideoOutput { Keep => "keep", Mp4 => "mp4", Gif => "gif", Webp => "webp", Avif => "avif" });
-text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif", Jxl => "jxl" });
+text_enum!(ImageFormat { Keep => "keep", Jpeg => "jpeg", Png => "png", Webp => "webp", Avif => "avif", Jxl => "jxl", Tiff => "tiff" });
 
 /// A string that is not one of an enum's accepted spellings.
 #[derive(Debug, Clone, PartialEq, Eq)]

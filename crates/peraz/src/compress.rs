@@ -55,7 +55,7 @@ pub struct SettingsArgs {
     #[arg(long, value_name = "PIXELS")]
     pub max_height: Option<u32>,
 
-    /// Output format: keep (default), jpeg, png, webp, avif, jxl, gif, mp4. For videos and GIFs,
+    /// Output format: keep (default), jpeg, png, webp, avif, jxl, tiff, gif, mp4. For videos and GIFs,
     /// webp/avif make animated images, gif makes a GIF, and mp4 turns a GIF into a video.
     #[arg(long, value_parser = parse_format)]
     pub format: Option<String>,
@@ -113,7 +113,7 @@ pub struct SettingsArgs {
 #[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)] // command-line switches
 pub struct Args {
-    /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF; BMP/TIFF with --format), GIFs, PDFs, and EPUBs.
+    /// Files to compress: videos (MP4/MOV/MKV/…), images (JPEG, PNG, WebP, HEIC, AVIF, JPEG XL, TIFF, BMP), GIFs, PDFs, and EPUBs.
     #[arg(required = true)]
     files: Vec<PathBuf>,
 

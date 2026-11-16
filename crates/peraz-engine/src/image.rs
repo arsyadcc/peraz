@@ -1,5 +1,5 @@
 //! Still-image encoding: decode, make upright, resize, then mozjpeg, imagequant + oxipng,
-//! libwebp, rav1e (AVIF), or cjxl (JPEG XL, run as a process).
+//! libwebp, rav1e (AVIF), cjxl (JPEG XL, run as a process), or Deflate (TIFF).
 //!
 //! Metadata policy: the EXIF orientation is applied to the pixels, the ICC color profile is kept
 //! (in every output format, so wide-gamut pictures stay wide-gamut), and everything else (EXIF,
@@ -81,6 +81,10 @@ fn encode_image_inner(prepared: &Decoded, plan: &ImagePlan) -> Result<EncodedIma
         ImageEncoding::Jxl { quality, .. } => (
             crate::jxl::encode(prepared, quality)?,
             format!("cjxl q{quality}"),
+        ),
+        ImageEncoding::Tiff => (
+            crate::tiff::encode(image, icc.as_deref())?,
+            crate::tiff::ENCODER.to_owned(),
         ),
         ImageEncoding::Avif { quality } => {
             let mut rgba = image.to_rgba8();

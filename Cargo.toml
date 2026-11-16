@@ -30,6 +30,8 @@ oxipng = { version = "10", default-features = false, features = ["parallel"] }
 # Only named to turn on its `dynamic` feature for `system-libs`; oxipng uses it for zlib output.
 libdeflater = { version = "1", default-features = false }
 png = "0.18"
+# TIFF output; the same crate `image` reads TIFF with.
+tiff = "0.11"
 webp = { version = "0.3", default-features = false }
 moxcms = "0.8"
 gif = "0.14"

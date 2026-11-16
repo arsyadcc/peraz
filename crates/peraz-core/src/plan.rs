@@ -618,6 +618,9 @@ pub enum ImageEncoding {
     /// `from_jpeg`: the input is a JPEG, so it is also recompressed losslessly (its pixels kept
     /// exactly) when it is not resized, and the smaller of the two files is kept.
     Jxl { quality: u8, from_jpeg: bool },
+    /// TIFF with lossless Deflate compression: the pixels and their bit depth are kept at every
+    /// quality level.
+    Tiff,
 }
 
 /// A complete plan for compressing one still image.
@@ -668,6 +671,7 @@ fn source_format(codec: &str) -> Option<ImageFormat> {
         "webp" => Some(ImageFormat::Webp),
         "av1" => Some(ImageFormat::Avif),
         "jpegxl" => Some(ImageFormat::Jxl),
+        "tiff" => Some(ImageFormat::Tiff),
         _ => None,
     }
 }
@@ -698,13 +702,14 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     let format = match (recipe.image.format, codec) {
         // Peraz cannot write HEIC; JPEG opens everywhere, which is why people convert HEIC.
         (ImageFormat::Keep, "hevc") => ImageFormat::Jpeg,
-        // A still GIF is a graphic: PNG keeps it lossless, with its transparency.
-        (ImageFormat::Keep, "gif") => ImageFormat::Png,
+        // A still GIF is a graphic: PNG keeps it lossless, with its transparency. A BMP is
+        // uncompressed: PNG holds the same picture in far fewer bytes.
+        (ImageFormat::Keep, "gif" | "bmp") => ImageFormat::Png,
         (ImageFormat::Keep, _) if source.is_some() => source.unwrap_or_default(),
         (ImageFormat::Keep, other) => {
             return Err(PlanError::UnsupportedImage {
                 codec: other.to_owned(),
-                hint: " as an output format; choose --format jpeg, png, webp, avif, or jxl",
+                hint: " as an output format; choose --format jpeg, png, webp, avif, jxl, or tiff",
             });
         }
         (chosen, _) => chosen,
@@ -751,8 +756,11 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
             },
             "jxl",
         ),
+        ImageFormat::Tiff => (ImageEncoding::Tiff, "tiff"),
         ImageFormat::Keep => unreachable!("resolved above"),
     };
+    // Formats that become PNG without being asked to: kept only when that is smaller.
+    let default_png = recipe.image.format == ImageFormat::Keep && matches!(codec, "gif" | "bmp");
     Ok(ImagePlan {
         encoding,
         max_width: recipe.image.max_width,
@@ -760,9 +768,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         flatten_alpha: format == ImageFormat::Jpeg && picture.alpha != Alpha::Absent,
         extension,
         decoder,
-        // A still GIF becomes PNG only when that is smaller (it is not a format asked for).
-        converts_format: source != Some(format)
-            && !(codec == "gif" && recipe.image.format == ImageFormat::Keep),
+        converts_format: source != Some(format) && !default_png,
         target_ssimulacra2: recipe.image.target_ssimulacra2,
     })
 }
@@ -1140,8 +1146,8 @@ impl DocumentPlan {
                 },
                 "avif",
             ),
-            // Documents never hold JPEG XL pictures Peraz would keep in that format.
-            ImageFormat::Jpeg | ImageFormat::Jxl | ImageFormat::Keep => (
+            // Documents never hold JPEG XL or TIFF pictures Peraz would keep in that format.
+            ImageFormat::Jpeg | ImageFormat::Jxl | ImageFormat::Tiff | ImageFormat::Keep => (
                 ImageEncoding::Jpeg {
                     quality: self.jpeg_quality,
                 },
@@ -1648,6 +1654,37 @@ mod tests {
     }
 
     #[test]
+    fn tiff_stays_tiff_and_is_lossless_at_every_level() {
+        let tiff = image_info("tiff", "tiff_pipe", Alpha::Present);
+        for quality in [Quality::Highest, Quality::Smallest] {
+            let recipe = Recipe {
+                quality,
+                ..Recipe::default()
+            };
+            let plan = plan_image(&tiff, &recipe).unwrap();
+            assert_eq!(plan.encoding, ImageEncoding::Tiff);
+            assert_eq!(
+                (plan.extension, plan.converts_format, plan.flatten_alpha),
+                ("tiff", false, false)
+            );
+        }
+        // Asked for from another format, a TIFF is kept even when larger.
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Tiff;
+        let plan = plan_image(&image_info("png", "png_pipe", Alpha::Absent), &recipe).unwrap();
+        assert_eq!(plan.encoding, ImageEncoding::Tiff);
+        assert!(plan.converts_format);
+        assert_eq!(
+            serde_json::to_string(&plan.encoding).unwrap(),
+            r#"{"format":"tiff"}"#
+        );
+        // And a TIFF converts like any other picture.
+        recipe.image.format = ImageFormat::Jpeg;
+        let plan = plan_image(&tiff, &recipe).unwrap();
+        assert!(plan.converts_format && plan.flatten_alpha);
+    }
+
+    #[test]
     fn converting_transparent_png_to_jpeg_flattens_alpha() {
         let mut recipe = Recipe::default();
         recipe.image.format = ImageFormat::Jpeg;
@@ -1674,12 +1711,16 @@ mod tests {
             &Recipe::default(),
         );
         assert!(matches!(other, Err(PlanError::UnsupportedImage { .. })));
+        // A BMP becomes PNG too, also kept only when smaller.
         let bmp = plan_image(
             &image_info("bmp", "bmp_pipe", Alpha::Absent),
             &Recipe::default(),
         )
-        .unwrap_err();
-        assert!(bmp.to_string().contains("--format jpeg"));
+        .unwrap();
+        assert_eq!(
+            (bmp.decoder, bmp.extension, bmp.converts_format),
+            (ImageDecoder::Native, "png", false)
+        );
         let mut recipe = Recipe::default();
         recipe.image.format = ImageFormat::Png;
         assert!(plan_image(&image_info("webp", "webp_pipe", Alpha::Absent), &recipe).is_ok());

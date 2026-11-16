@@ -7,7 +7,7 @@
 //! version = 1                      # recipe format version (required to be 1 for now)
 //! description = "Small pictures for websites"
 //! quality = "balanced"             # highest, high, balanced, small, smallest
-//! format = "webp"                  # keep, jpeg, png, webp, avif, jxl, gif, mp4
+//! format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, mp4
 //! max_width = 2000                 # pixels; never scales up
 //! max_height = 2000
 //! codec = "h264"                   # video codec: h264, hevc (default: h264, hevc for HDR)
@@ -111,6 +111,13 @@ pub struct OutputFormat {
     pub video: VideoOutput,
 }
 
+impl OutputFormat {
+    /// Every value `format` accepts, in the order help lists them.
+    pub const NAMES: &'static [&'static str] = &[
+        "keep", "jpeg", "png", "webp", "avif", "jxl", "tiff", "gif", "mp4",
+    ];
+}
+
 impl std::str::FromStr for OutputFormat {
     type Err = SettingsError;
 
@@ -122,6 +129,7 @@ impl std::str::FromStr for OutputFormat {
     /// | webp  | WebP         | animated WebP | animated WebP |
     /// | avif  | AVIF         | animated AVIF | animated AVIF |
     /// | jxl   | JPEG XL      | MP4           | GIF           |
+    /// | tiff  | TIFF         | MP4           | GIF           |
     /// | gif   | same format  | GIF           | GIF           |
     /// | mp4   | same format  | MP4           | MP4           |
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -132,11 +140,13 @@ impl std::str::FromStr for OutputFormat {
             "webp" => (ImageFormat::Webp, VideoOutput::Webp),
             "avif" => (ImageFormat::Avif, VideoOutput::Avif),
             "jxl" => (ImageFormat::Jxl, VideoOutput::Keep),
+            "tiff" | "tif" => (ImageFormat::Tiff, VideoOutput::Keep),
             "gif" => (ImageFormat::Keep, VideoOutput::Gif),
             "mp4" => (ImageFormat::Keep, VideoOutput::Mp4),
             other => {
                 return Err(SettingsError(format!(
-                    "unknown format `{other}`; expected one of: keep, jpeg, png, webp, avif, jxl, gif, mp4"
+                    "unknown format `{other}`; expected one of: {}",
+                    Self::NAMES.join(", ")
                 )));
             }
         };
@@ -416,6 +426,13 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("unknown format")
+        );
+        for name in OutputFormat::NAMES {
+            assert!(name.parse::<OutputFormat>().is_ok(), "{name}");
+        }
+        assert_eq!(
+            "tif".parse::<OutputFormat>().unwrap().image,
+            ImageFormat::Tiff
         );
         assert!(
             Settings::from_toml("target_size = \"25MiB\"\n")

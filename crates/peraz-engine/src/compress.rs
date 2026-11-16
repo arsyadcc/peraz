@@ -351,6 +351,9 @@ fn make_image(
         Err(e) => return failed(e.to_string()),
     };
     report.plan = Some(Plan::Image(plan.clone()));
+    if let Some(skipped) = multi_page_tiff(info, &job.input) {
+        return skipped;
+    }
     let output = match choose_output(batch, job, plan.extension) {
         Ok(output) => output,
         Err(outcome) => return outcome,
@@ -438,6 +441,20 @@ fn make_image(
     }
     progress(1.0);
     outcome
+}
+
+/// Only the first page of a TIFF would be read, so a document with more is skipped.
+fn multi_page_tiff(info: &MediaInfo, input: &Path) -> Option<Outcome> {
+    if info.video.as_ref().is_none_or(|v| v.codec != "tiff") {
+        return None;
+    }
+    let pages = crate::tiff::page_count(input).filter(|pages| *pages > 1)?;
+    Some(Outcome::Skipped {
+        message: format!(
+            "this TIFF holds {pages} pages, and Peraz compresses single pictures only; split \
+             it into one file per page first"
+        ),
+    })
 }
 
 /// The SSIMULACRA2 score of an encoded picture against `reference`; 100 when it holds the very

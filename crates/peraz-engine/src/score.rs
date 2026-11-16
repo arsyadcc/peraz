@@ -540,6 +540,8 @@ fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
             min_quality: 0,
             max_quality: quality,
         },
+        // Lossless: there is no setting to search.
+        ImageEncoding::Tiff => ImageEncoding::Tiff,
     }
 }
 
@@ -551,6 +553,7 @@ fn quality_of(encoding: ImageEncoding) -> u8 {
         | ImageEncoding::Avif { quality }
         | ImageEncoding::Jxl { quality, .. } => quality,
         ImageEncoding::Png { max_quality, .. } => max_quality,
+        ImageEncoding::Tiff => 100,
     }
 }
 
@@ -569,6 +572,14 @@ pub(crate) fn encode_image_to_ssimulacra2(
         return Ok((encode_prepared(&prepared, plan)?, None));
     }
     let reference = linear_input(&prepared.image)?;
+    // A lossless format has one result, whatever the target.
+    if plan.encoding == ImageEncoding::Tiff {
+        let encoded = encode_prepared(&prepared, plan)?;
+        let image = decode_encoded(tools, &encoded.bytes, plan.extension)?;
+        let score = ssimulacra2::compute_frame_ssimulacra2(reference, linear_input(&image)?)
+            .map_err(|e| format!("SSIMULACRA2: {e}"))?;
+        return Ok((encoded, Some(score)));
+    }
     let mut results: BTreeMap<u8, EncodedImage> = BTreeMap::new();
     // Search the loss (100 - quality), so a higher setting means a smaller file, as for CRF.
     let start = 100 - quality_of(plan.encoding);

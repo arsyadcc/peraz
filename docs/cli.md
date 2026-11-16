@@ -72,7 +72,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--encoder` | `auto`, `software`, `hardware` | Default `auto`: software if available, else hardware. |
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
 | `--max-height` | pixels | Scale down to at most this height; never scales up. |
-| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | Output format. Default `keep`. `jxl` (JPEG XL) applies to still images and animated JPEG XL. For videos, GIFs, and animated JPEG XL, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
+| `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `tiff`, `gif`, `mp4` | Output format. Default `keep`: every file stays in its format, except that a HEIC becomes a JPEG, and a BMP or a still GIF becomes a PNG when that is smaller. `jxl` (JPEG XL) applies to still images and animated JPEG XL. `tiff` applies to still images and is always lossless: Deflate compression at the picture's own bit depth, so `--quality` and `--target-ssimulacra2` do not change it. For videos, GIFs, and animated JPEG XL, `webp` and `avif` make animated images, `gif` makes a GIF, and `mp4` turns a GIF into a video. |
 | `--fps` | 1–50 | Frame rate of GIFs and animated WebP/AVIF; never above the source. |
 | `--start` | time | Start this far into a video: seconds (`12.5`) or `[h:]m:ss`. |
 | `--duration` | time | Use at most this much of a video. |
@@ -131,6 +131,9 @@ Without `--output`, a result is written as `<name>-1.<ext>` next to the input (o
 and as `<name>-2.<ext>`, `<name>-3.<ext>`, … when that name is taken: existing files are never
 replaced. `--output` writes exactly the file given and replaces it only with `--force`. A result
 that is not smaller than the input is not kept, unless the format was changed on purpose.
+
+A TIFF with more than one page is skipped, whatever the format asked for: Peraz compresses
+single pictures, and would drop the other pages.
 
 ## Environment variables
 

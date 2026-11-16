@@ -73,6 +73,50 @@ fn images_compress_without_ffmpeg() {
 }
 
 #[test]
+fn tiff_and_bmp_compress_without_ffmpeg_or_a_format() {
+    let dir = setup("tiff-bmp");
+    let photo = image::open(dir.0.join("photo.png")).unwrap();
+    photo.save(dir.0.join("scan.tiff")).unwrap();
+    photo.save(dir.0.join("shot.bmp")).unwrap();
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--json",
+            "--out-dir",
+            "out",
+            "scan.tiff",
+            "shot.bmp",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for (index, format, file) in [(0, "tiff", "scan-1.tiff"), (1, "png", "shot-1.png")] {
+        let result = &json["results"][index];
+        assert_eq!(result["outcome"]["status"], "compressed", "{json}");
+        assert_eq!(result["plan"]["encoding"]["format"], format, "{json}");
+        assert!(dir.0.join("out").join(file).is_file(), "{file}");
+    }
+    // `--format tiff` is accepted, under both spellings.
+    for spelling in ["tiff", "tif"] {
+        let output = peraz(
+            &dir.0,
+            &[
+                "compress",
+                "--format",
+                spelling,
+                "-o",
+                "photo.tiff",
+                "-f",
+                "photo.png",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(dir.0.join("photo.tiff").is_file());
+    }
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(

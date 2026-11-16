@@ -40,7 +40,7 @@ pub fn run(args: &Args) -> u8 {
 }
 
 /// Values of `--format`, in the order help lists them.
-const FORMATS: &[&str] = &["keep", "jpeg", "png", "webp", "avif", "jxl", "gif", "mp4"];
+const FORMATS: &[&str] = peraz_core::settings::OutputFormat::NAMES;
 
 /// The command line as completion sees it.
 fn completion_command() -> clap::Command {

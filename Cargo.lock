@@ -1344,6 +1344,7 @@ dependencies = [
  "serde_json",
  "ssimulacra2",
  "thiserror",
+ "tiff",
  "webp",
  "zip",
 ]

@@ -13,6 +13,13 @@ between alpha versions.
 
 ### Added
 
+- TIFF output: `--format tiff` (recipe value `tiff`) writes a TIFF with lossless Deflate
+  compression that keeps the bit depth (8-bit, 16-bit, floating point), transparency, and color
+  profile, and a TIFF input stays a TIFF by default, kept only when smaller. Every quality level
+  gives the same pixels. A TIFF with more than one page is skipped with a message.
+  **Interface:** new `--format` and recipe `format` value `tiff` (also spelled `tif`).
+- A BMP is compressed without `--format`: it becomes a PNG, kept only when smaller. Before, a BMP
+  or TIFF needed an explicit `--format` and was skipped without one.
 - `peraz compress --cancel-on-stdin` cancels the run like the first Ctrl-C when standard input
   sends a line `cancel` or is closed: the current file stops and its partial output is removed,
   the rest is skipped, and the exit code is 130. For programs that cannot send Ctrl-C or SIGTERM,
