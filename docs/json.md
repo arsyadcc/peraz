@@ -16,8 +16,8 @@ Two parts are informational and may change in any release, without a new schema 
 
 - everything inside `plan` except `plan.type`: how the file was encoded (encoder settings,
   FFmpeg arguments);
-- free text: `encoder`, `outcome.message`, `error`, and `errors[]`. Show it to people; do not
-  parse it.
+- free text: `encoder`, `outcome.message`, `warnings[]`, `error`, and `errors[]`. Show it to
+  people; do not parse it.
 
 Sizes are in bytes, durations in seconds, and paths are written as Peraz received or made them.
 A field shown as *or null* is always present, with `null` when there is no value.
@@ -143,6 +143,7 @@ What happened to one input, in `compress` results and `watch` lines.
 | `score.target` | integer or null | The score asked for; null when the result was only measured (`--measure-quality`). |
 | `score.score` | number | The score measured on the result, against the input at the output's size; below `score.target` when no setting could reach it. |
 | `score.sampled` | boolean | `true` when measured on samples of a longer video rather than the whole of it. |
+| `warnings[]` | array of strings | What a compressed result does not carry over from the input, as text: an HDR gain map that was removed, metadata that `--keep-metadata` could not keep. Empty when there is nothing to say. |
 | `elapsed_seconds` | number | Time spent on this file. |
 
 `outcome.status` decides the exit code: any `cancelled` makes it 130, otherwise any `failed`

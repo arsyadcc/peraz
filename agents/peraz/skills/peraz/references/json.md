@@ -31,6 +31,7 @@ A report (also one JSON line per file from `peraz watch --json`):
 | `outcome.reason` | `kept_original` only: `not_smaller` (with `outcome.compressed_bytes`) or `already_within_target` (with `outcome.target_bytes`). |
 | `outcome.message` | `skipped` and `failed` only: why. `skipped` also has `outcome.reason`: `unsupported`, `already_compressed`, `output_exists`, or `protected`. |
 | `encoder` | What encoded it, as text, e.g. `libx265, HDR kept`. |
+| `warnings` | Text for people: what the result lost (an HDR gain map, metadata that did not fit). Usually empty. |
 | `document` | PDF and EPUB only: `images`, `recompressed`, `kept`, `skipped` (pictures inside). |
 | `score` | With `--target-vmaf` or `--target-ssimulacra2`: `metric` (`vmaf`, `ssimulacra2`), `target`, the measured `score` (below `target` when out of reach), and `sampled` (scored on samples of a long video); otherwise null. |
 | `elapsed_seconds` | Time spent on this file. |

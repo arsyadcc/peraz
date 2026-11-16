@@ -875,6 +875,13 @@ fn score_note(score: &Score) -> String {
 }
 
 pub(crate) fn print_human(report: &Report) {
+    print_outcome(report);
+    for warning in &report.warnings {
+        println!("  note: {warning}");
+    }
+}
+
+fn print_outcome(report: &Report) {
     let input = report.input.display();
     match &report.outcome {
         Outcome::Compressed {

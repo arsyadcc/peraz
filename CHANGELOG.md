@@ -104,6 +104,16 @@ between alpha versions.
 
 ### Fixed
 
+- A JPEG with an HDR gain map (Ultra HDR photos from phones) left the gain map's bytes behind
+  when its metadata was removed: unreachable data after the picture's end, which made a
+  lossless JPEG XL recompression up to 45% larger than needed. The picture now ends at its end
+  marker, and the report's new `warnings` say that the HDR gain map was removed (keeping it is
+  planned). **Interface:** reports have `warnings`, an array of strings, in `--json` and
+  `--events`; the text output prints them as notes.
+- A grayscale JPEG stays grayscale instead of being stored as three-channel color.
+- With `--keep-metadata`, an orientation stated in the XMP packet (`tiff:Orientation`) is reset
+  like the one in EXIF, so no viewer turns the picture a second time; and EXIF or XMP too large
+  for a JPEG segment (64 kB) is reported in `warnings` instead of being dropped silently.
 - A HEIC or AVIF stored as a tile grid with an odd width or height lost its last column or row
   of pixels when read.
 

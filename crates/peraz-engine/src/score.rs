@@ -747,6 +747,7 @@ mod tests {
                 image: photo_like(96, 64),
                 icc: None,
                 metadata: crate::metadata::Metadata::default(),
+                gain_map: false,
             };
             let (encoded, score) =
                 encode_image_to_ssimulacra2(None, decoded, &mut plan, target, &cancel).unwrap();
@@ -770,6 +771,7 @@ mod tests {
             image: photo_like(6, 6),
             icc: None,
             metadata: crate::metadata::Metadata::default(),
+            gain_map: false,
         };
         let (_, score) =
             encode_image_to_ssimulacra2(None, decoded, &mut plan, 80, &AtomicBool::new(false))

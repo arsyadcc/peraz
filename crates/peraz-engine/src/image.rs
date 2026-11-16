@@ -1,9 +1,10 @@
 //! Still-image encoding: decode, make upright, resize, then mozjpeg, imagequant + oxipng,
 //! libwebp, rav1e (AVIF), cjxl (JPEG XL, run as a process), or Deflate (TIFF).
 //!
-//! Metadata policy: the EXIF orientation is applied to the pixels, the ICC color profile is kept
-//! (in every output format, so wide-gamut pictures stay wide-gamut), and everything else (EXIF,
-//! XMP, text chunks) is dropped because it can hold location and device details.
+//! Metadata policy: the EXIF orientation is applied to the pixels and the ICC color profile is
+//! kept (in every output format, so wide-gamut pictures stay wide-gamut). Everything else (EXIF,
+//! XMP, IPTC) is dropped by default, because it can hold location and device details, and
+//! written to the output on request, with the orientation in it reset.
 
 use std::path::Path;
 
@@ -22,6 +23,8 @@ pub struct EncodedImage {
     pub height: u32,
     /// What did the work, for the report.
     pub encoder: String,
+    /// What could not be written although it was asked for (metadata that did not fit).
+    pub warnings: Vec<String>,
 }
 
 /// A decoded picture, already upright, with its color profile and its metadata (which is
@@ -31,6 +34,8 @@ pub struct Decoded {
     pub image: DynamicImage,
     pub icc: Option<Vec<u8>>,
     pub metadata: Metadata,
+    /// The file holds an HDR gain map next to this picture, which no output carries yet.
+    pub gain_map: bool,
 }
 
 /// Encodes a decoded picture according to `plan`. `tools` is the FFmpeg to use for the formats
@@ -49,6 +54,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         mut image,
         icc,
         metadata,
+        gain_map,
     } = decoded;
     if let Some((w, h)) = fit_within(
         (image.width(), image.height()),
@@ -61,6 +67,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         image,
         icc,
         metadata,
+        gain_map,
     }
 }
 
@@ -86,18 +93,26 @@ fn encode_image_inner(
         image,
         icc,
         metadata,
+        ..
     } = prepared;
     // The metadata to write: only on request, and only when there is any.
     let kept = Some(metadata).filter(|m| plan.keep_metadata && !m.is_empty());
     let (width, height) = (image.width(), image.height());
+    let mut warnings = Vec::new();
     let (bytes, encoder) = match plan.encoding {
         ImageEncoding::Jpeg { quality } => {
-            let rgb = if plan.flatten_alpha {
-                flatten_on_white(&image.to_rgba8())
+            let jpeg = if image.color().channel_count() == 1 {
+                // A gray picture stays one channel: smaller, and nothing to get wrong.
+                let gray = image.to_luma8();
+                let space = mozjpeg::ColorSpace::JCS_GRAYSCALE;
+                jpeg_from_pixels(gray.as_raw(), width, height, space, quality, icc.as_deref())?
+            } else if plan.flatten_alpha {
+                let rgb = flatten_on_white(&image.to_rgba8());
+                encode_jpeg(&rgb, quality, icc.as_deref())?
             } else {
-                image.to_rgb8()
+                encode_jpeg(&image.to_rgb8(), quality, icc.as_deref())?
             };
-            let jpeg = encode_jpeg(&rgb, quality, icc.as_deref())?;
+            warnings.extend(kept.map(Metadata::too_large_for_jpeg).unwrap_or_default());
             (
                 kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg)),
                 format!("mozjpeg q{quality}"),
@@ -168,6 +183,7 @@ fn encode_image_inner(
         width,
         height,
         encoder,
+        warnings,
     })
 }
 
@@ -194,6 +210,7 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
     if bytes.starts_with(&[0xFF, 0xD8]) {
         // A JPEG's segments are read here, to get the Photoshop resources (IPTC) too.
         decoded.metadata = Metadata::from_jpeg(bytes);
+        decoded.gain_map = crate::metadata::has_gain_map(bytes);
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         decoded.metadata.photoshop = crate::tiff::photoshop_resources(bytes);
     }
@@ -215,6 +232,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
         image,
         icc,
         metadata,
+        gain_map: false,
     })
 }
 
@@ -225,7 +243,9 @@ pub(crate) fn decoder_metadata(decoder: &mut impl ImageDecoder) -> Metadata {
     if let Ok(Some(exif)) = decoder.exif_metadata() {
         metadata.set_exif(&exif);
     }
-    metadata.xmp = decoder.xmp_metadata().ok().flatten();
+    if let Ok(Some(xmp)) = decoder.xmp_metadata() {
+        metadata.set_xmp(xmp);
+    }
     metadata
 }
 

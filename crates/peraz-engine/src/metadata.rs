@@ -34,6 +34,32 @@ impl Metadata {
         self.exif = upright(block);
     }
 
+    /// Takes an XMP packet, with the orientation it may state reset.
+    pub fn set_xmp(&mut self, packet: Vec<u8>) {
+        self.xmp = Some(upright_xmp(packet));
+    }
+
+    /// The blocks that a JPEG cannot hold because they are larger than one of its segments,
+    /// as sentences for the report.
+    pub fn too_large_for_jpeg(&self) -> Vec<String> {
+        [
+            ("EXIF", EXIF_HEADER, &self.exif),
+            ("XMP", XMP_HEADER, &self.xmp),
+        ]
+        .into_iter()
+        .filter_map(|(name, header, block)| {
+            let size = block.as_ref()?.len();
+            (header.len() + size > JPEG_SEGMENT_MAX).then(|| {
+                format!(
+                    "the {name} metadata ({}) is larger than a JPEG segment holds (64 kB) \
+                         and was not kept",
+                    peraz_core::units::format_bytes(size as u64)
+                )
+            })
+        })
+        .collect()
+    }
+
     /// Reads the metadata segments of a JPEG, which come before its picture data.
     pub fn from_jpeg(jpeg: &[u8]) -> Self {
         let mut metadata = Self::default();
@@ -62,7 +88,7 @@ impl Metadata {
                     metadata.set_exif(body);
                 }
                 0xE1 if body.starts_with(XMP_HEADER) && metadata.xmp.is_none() => {
-                    metadata.xmp = Some(body[XMP_HEADER.len()..].to_vec());
+                    metadata.set_xmp(body[XMP_HEADER.len()..].to_vec());
                 }
                 // Large resources continue in the next segment.
                 0xED if body.starts_with(PHOTOSHOP_HEADER) => {
@@ -153,7 +179,7 @@ impl Metadata {
                 .collect();
             match kind {
                 b"exif" | b"APP1" if self.exif.is_none() => self.set_exif(&bytes),
-                b"xmp" if self.xmp.is_none() && !bytes.is_empty() => self.xmp = Some(bytes),
+                b"xmp" if self.xmp.is_none() && !bytes.is_empty() => self.set_xmp(bytes),
                 _ => {}
             }
         }
@@ -206,6 +232,89 @@ impl Metadata {
         };
         [&png[..insert_at], &chunks, &png[insert_at..]].concat()
     }
+}
+
+/// Where the main picture of a JPEG ends: just after its end marker. Anything after that is
+/// not part of the picture (phones append an HDR gain map or other pictures there). `None` when
+/// the file is not a JPEG or ends before its picture does.
+pub fn jpeg_end(jpeg: &[u8]) -> Option<usize> {
+    if jpeg.get(..2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        if *jpeg.get(at)? != 0xFF {
+            return None;
+        }
+        match *jpeg.get(at + 1)? {
+            // A fill byte before the marker.
+            0xFF => at += 1,
+            0xD9 => return Some(at + 2),
+            // Markers without a body.
+            0x01 | 0xD0..=0xD7 => at += 2,
+            marker => {
+                let length = jpeg.get(at + 2..at + 4)?;
+                at += 2 + usize::from(u16::from_be_bytes([length[0], length[1]]));
+                if marker != 0xDA {
+                    continue;
+                }
+                // A scan: compressed data follows its header, up to the next marker. In that
+                // data a 0xFF byte is followed by a zero or by a restart marker.
+                loop {
+                    if *jpeg.get(at)? != 0xFF {
+                        at += 1;
+                        continue;
+                    }
+                    match *jpeg.get(at + 1)? {
+                        0x00 | 0xD0..=0xD7 => at += 2,
+                        0xFF => at += 1,
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What marks a picture as an HDR gain map, or as having one: the Ultra HDR and Apple names
+/// in its XMP, and the name of the standard for gain maps (ISO 21496-1).
+const GAIN_MAP_MARKS: [&[u8]; 3] = [b"hdrgm:", b"HDRGainMap", b"urn:iso:std:iso:ts:21496"];
+
+/// Whether a JPEG carries an HDR gain map: a second picture stored after the main one, which
+/// tells HDR screens how to brighten it.
+pub fn has_gain_map(jpeg: &[u8]) -> bool {
+    let Some(end) = jpeg_end(jpeg) else {
+        return false;
+    };
+    // The marks are in the metadata at the start of the gain map picture.
+    let after = &jpeg[end..jpeg.len().min(end + 256 * 1024)];
+    after.windows(2).any(|w| w == [0xFF, 0xD8])
+        && GAIN_MAP_MARKS
+            .iter()
+            .any(|mark| after.windows(mark.len()).any(|w| w == *mark))
+}
+
+/// An XMP packet with its `tiff:Orientation` set to "upright" (1), in either way of writing it.
+fn upright_xmp(xmp: Vec<u8>) -> Vec<u8> {
+    let Ok(mut text) = String::from_utf8(xmp.clone()) else {
+        return xmp;
+    };
+    for (before, after) in [
+        ("tiff:Orientation=\"", "\""),
+        ("tiff:Orientation='", "'"),
+        ("<tiff:Orientation>", "<"),
+    ] {
+        let mut from = 0;
+        while let Some(found) = text[from..].find(before) {
+            let start = from + found + before.len();
+            let Some(length) = text[start..].find(after) else {
+                break;
+            };
+            text.replace_range(start..start + length, "1");
+            from = start + 1;
+        }
+    }
+    text.into_bytes()
 }
 
 fn png_chunk(kind: [u8; 4], body: &[u8]) -> Vec<u8> {

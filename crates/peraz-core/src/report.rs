@@ -188,6 +188,9 @@ pub struct Report {
     pub document: Option<DocumentStats>,
     /// With a score target: the score asked for and the score measured.
     pub score: Option<Score>,
+    /// What the result does not carry over from the input although one might expect it, as
+    /// text: an HDR gain map that was removed, metadata that did not fit.
+    pub warnings: Vec<String>,
     pub elapsed_seconds: f64,
 }
 

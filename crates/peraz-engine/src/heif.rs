@@ -75,6 +75,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         image,
         icc: properties.icc,
         metadata: read_metadata(&bytes),
+        gain_map: false,
     })
 }
 
@@ -471,7 +472,9 @@ pub fn read_metadata(file: &[u8]) -> Metadata {
             continue;
         };
         if is_xmp {
-            metadata.xmp.get_or_insert(data);
+            if metadata.xmp.is_none() {
+                metadata.set_xmp(data);
+            }
         } else if metadata.exif.is_none() {
             // The item starts with the offset of the TIFF structure after these four bytes.
             let skip = be32(&data, 0).and_then(|n| usize::try_from(n).ok());

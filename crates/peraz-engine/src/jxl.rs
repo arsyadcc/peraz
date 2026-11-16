@@ -306,6 +306,7 @@ fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String
         image,
         icc,
         metadata,
+        gain_map: false,
     })
 }
 
@@ -360,7 +361,7 @@ fn write_png(image: &DynamicImage, icc: Option<&[u8]>, path: &Path) -> Result<()
 
 /// A JPEG with its metadata removed: APP0 (JFIF), the ICC profile (APP2), and APP14 (Adobe,
 /// which tells how colors are stored) are kept, every other `APPn` segment and comments are
-/// dropped. When `orientation` is not 1, an EXIF block holding only it is added. `None` when the
+/// dropped, and so is anything stored after the picture's end. When `orientation` is not 1, an EXIF block holding only it is added. `None` when the
 /// segments before the image data cannot be followed.
 fn strip_jpeg_metadata(jpeg: &[u8], orientation: u8) -> Option<Vec<u8>> {
     if jpeg.get(..2)? != [0xFF, 0xD8] {
@@ -385,9 +386,12 @@ fn strip_jpeg_metadata(jpeg: &[u8], orientation: u8) -> Option<Vec<u8>> {
         {
             out.extend_from_slice(&exif);
         }
-        // Start of scan: the rest is image data.
+        // Start of scan: the rest is image data, up to the end of this picture. What phones
+        // store after it (an HDR gain map, other views) is found through the MPF segment, which
+        // is dropped, so those bytes go too.
         if marker == 0xDA {
-            out.extend_from_slice(jpeg.get(at..)?);
+            let end = crate::metadata::jpeg_end(jpeg).unwrap_or(jpeg.len());
+            out.extend_from_slice(jpeg.get(at..end)?);
             return Some(out);
         }
         let length = usize::from(u16::from_be_bytes([*jpeg.get(at + 2)?, *jpeg.get(at + 3)?]));

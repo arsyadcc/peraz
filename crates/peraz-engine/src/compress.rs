@@ -109,6 +109,7 @@ pub fn compress_observed(
         encoder: None,
         document: None,
         score: None,
+        warnings: Vec::new(),
         elapsed_seconds: 0.0,
     };
     report.outcome = if cancel.load(Ordering::SeqCst) {
@@ -435,23 +436,9 @@ fn make_image(
         Ok(d) if job.recipe.measure_quality && plan.target_ssimulacra2.is_none() => Some(d.clone()),
         _ => None,
     };
-    let encoded = match (decoded, plan.target_ssimulacra2) {
-        (Err(message), _) => Err(message),
-        (Ok(d), None) => encode_to_plan(tools, d, &mut plan, cancel, report, &mut reference),
-        (Ok(d), Some(target)) => crate::score::encode_image_to_ssimulacra2(
-            tools, d, &mut plan, target, cancel,
-        )
-        .map(|(encoded, score)| {
-            report.score = score.map(|score| peraz_core::Score {
-                metric: peraz_core::Metric::Ssimulacra2,
-                target: Some(target),
-                score: (score * 100.0).round() / 100.0,
-                sampled: false,
-            });
-            report.plan = Some(Plan::Image(plan.clone()));
-            encoded
-        }),
-    };
+    let gain_map = decoded.as_ref().is_ok_and(|d| d.gain_map);
+    let encoded =
+        decoded.and_then(|d| encode_to_plan(tools, d, &mut plan, cancel, report, &mut reference));
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
@@ -483,6 +470,13 @@ fn make_image(
         return failed(format!("cannot write {}: {e}", output.display()));
     }
     let outcome = finish(&partial, &output, info.size_bytes, plan.converts_format);
+    if matches!(outcome, Outcome::Compressed { .. }) {
+        report.warnings = encoded.warnings;
+        // A JPEG kept whole with its metadata keeps its gain map; no other result has one.
+        if gain_map && !(identical && plan.keep_metadata) {
+            report.warnings.push(GAIN_MAP_REMOVED.to_owned());
+        }
+    }
     // Only results that are kept are measured.
     if let (Outcome::Compressed { .. }, Some(reference)) = (&outcome, reference) {
         report.score = measured_image(tools, reference, &plan, &encoded.bytes, identical);
@@ -491,8 +485,12 @@ fn make_image(
     outcome
 }
 
-/// Encodes a picture at the plan's setting, or, with a size target, at the best setting that
-/// fits; the plan in the report then says what the search found.
+/// What the report says about a photo whose HDR gain map is not in the result.
+const GAIN_MAP_REMOVED: &str = "this photo's HDR gain map was removed: the result is its \
+                                standard picture, without the extra brightness on HDR screens";
+
+/// Encodes a picture at the plan's setting, or to its score target, or, with a size target, at
+/// the best setting that fits; the plan in the report then says what a search found.
 fn encode_to_plan(
     tools: Option<&Toolchain>,
     decoded: crate::image::Decoded,
@@ -501,6 +499,18 @@ fn encode_to_plan(
     report: &mut Report,
     reference: &mut Option<crate::image::Decoded>,
 ) -> Result<crate::image::EncodedImage, String> {
+    if let Some(target) = plan.target_ssimulacra2 {
+        let (encoded, score) =
+            crate::score::encode_image_to_ssimulacra2(tools, decoded, plan, target, cancel)?;
+        report.score = score.map(|score| peraz_core::Score {
+            metric: peraz_core::Metric::Ssimulacra2,
+            target: Some(target),
+            score: (score * 100.0).round() / 100.0,
+            sampled: false,
+        });
+        report.plan = Some(Plan::Image(plan.clone()));
+        return Ok(encoded);
+    }
     let Some(wanted) = plan.target else {
         return encode_image(tools, decoded, plan);
     };
