@@ -33,6 +33,10 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if let Some(info) = animated_webp_info(path, size) {
         return Ok(info);
     }
+    // A GIF too: every frame's own delay counts, with or without FFmpeg.
+    if let Some(info) = gif_info(path, size) {
+        return Ok(info);
+    }
     ffprobe(tools, path, size)
 }
 
@@ -425,7 +429,7 @@ impl RawStream {
 
 /// Parses ffprobe's stringly-typed numbers; `N/A` and garbage become `None`.
 /// Probes one file without FFmpeg. Works for PDFs, EPUBs, the still images Peraz decodes
-/// itself (JPEG, PNG, WebP, BMP, TIFF), SVGs, icon files, and animated PNGs; `Ok(None)` means the file needs
+/// itself (JPEG, PNG, WebP, BMP, TIFF, GIF), SVGs, icon files, and animated PNG and WebP; `Ok(None)` means the file needs
 /// FFmpeg (videos, other animations, GIFs, HEIC, AVIF, and anything unrecognized).
 pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineError> {
     let input_error = |source| EngineError::Input {
@@ -451,6 +455,9 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
         return Ok(Some(apng_info(animation, size)));
     }
     if let Some(info) = animated_webp_info(path, size) {
+        return Ok(Some(info));
+    }
+    if let Some(info) = gif_info(path, size) {
         return Ok(Some(info));
     }
     let Some((codec, container)) = sniff_still_image(path).map_err(input_error)? else {
@@ -492,6 +499,61 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
         }),
         audio: Vec::new(),
     }))
+}
+
+/// A GIF, read from its frame headers: Peraz decodes and encodes GIFs itself. One frame is a
+/// still picture, more are an animation.
+fn gif_info(path: &Path, size_bytes: u64) -> Option<MediaInfo> {
+    let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut options = gif::DecodeOptions::new();
+    // Only the headers are needed: the pictures are not decompressed.
+    options.skip_frame_decoding(true);
+    let mut decoder = options.read_info(file).ok()?;
+    let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
+    let (mut frames, mut centiseconds, mut transparent) = (0u32, 0u64, false);
+    while let Ok(Some(frame)) = decoder.next_frame_info() {
+        frames += 1;
+        // The playing time as it is shown: a delay of 0 or 1 plays as 10.
+        centiseconds += u64::from(crate::gif::shown_centiseconds(frame.delay));
+        transparent |= frame.transparent.is_some();
+    }
+    if frames == 0 {
+        return None;
+    }
+    let moving = frames > 1;
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = centiseconds as f64 / 100.0;
+    Some(MediaInfo {
+        kind: if moving {
+            MediaKind::Animation
+        } else {
+            MediaKind::Image
+        },
+        container: "gif".to_owned(),
+        size_bytes,
+        duration_seconds: (moving && centiseconds > 0).then_some(seconds),
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: "gif".to_owned(),
+            width,
+            height,
+            rotation: 0,
+            // Frames per second, as the exact ratio of frames to hundredths of a second.
+            frame_rate: (moving && centiseconds > 0)
+                .then(|| Rational::parse(&format!("{}/{centiseconds}", frames * 100)))
+                .flatten(),
+            frame_count: Some(u64::from(frames)),
+            pixel_format: None,
+            color: ColorInfo::default(),
+            alpha: if transparent {
+                Alpha::Present
+            } else {
+                Alpha::Unknown
+            },
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    })
 }
 
 /// An SVG, read from its root element: Peraz minifies it as text.

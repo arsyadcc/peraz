@@ -496,9 +496,12 @@ fn find_ffmpeg(
             |file| match peraz_engine::probe::probe_without_ffmpeg(file) {
                 Ok(None) => true,
                 Ok(Some(info)) => {
+                    let gif_to_gif = recipe.video.output == VideoOutput::Gif
+                        && info.video.as_ref().is_some_and(|v| v.codec == "gif");
                     info.kind == MediaKind::Animation
                         && !matches!(recipe.video.output, VideoOutput::Keep | VideoOutput::Apng)
                         && !peraz_core::wants_animated_webp(&info, recipe)
+                        && !gif_to_gif
                 }
                 Err(_) => false,
             },

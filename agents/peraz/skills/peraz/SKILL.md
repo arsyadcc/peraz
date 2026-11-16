@@ -23,8 +23,8 @@ Run `peraz doctor --json`.
 
 - **Exit `0`**: ready. `toolchain.source` says where FFmpeg came from and `encoders` lists what it
   can encode.
-- **Exit `3`**: FFmpeg was not found. JPEG, PNG, WebP (animated ones too), BMP, TIFF, JPEG XL, and
-  SVG images, icon files, PDFs, and EPUBs still work without it. For video, GIFs, HEIC, and AVIF, offer `peraz ffmpeg install`, which downloads
+- **Exit `3`**: FFmpeg was not found. JPEG, PNG, WebP (animated ones too), GIF, BMP, TIFF, JPEG XL, and
+  SVG images, icon files, PDFs, and EPUBs still work without it. For video, HEIC, and AVIF, offer `peraz ffmpeg install`, which downloads
   the FFmpeg build Peraz is tested with (25-35 MB) next to `peraz`. On a Peraz without that
   command, install FFmpeg with the system's package manager.
 - **`peraz` not found**: offer to install it, then check again:

@@ -225,6 +225,19 @@ fn run(
             batch, tools, job, info, &job.input, progress, cancel, report,
         );
     }
+    // A GIF that stays a GIF is read and written in process.
+    let is_gif = info.video.as_ref().is_some_and(|v| v.codec == "gif");
+    if info.kind == MediaKind::Animation
+        && is_gif
+        && matches!(
+            job.recipe.video.output,
+            VideoOutput::Keep | VideoOutput::Gif
+        )
+    {
+        return make_gif(
+            batch, tools, job, info, &job.input, progress, cancel, report,
+        );
+    }
     // Everything below runs FFmpeg.
     let Some(tools) = tools else {
         return failed(NEEDS_FFMPEG.to_owned());
@@ -253,7 +266,16 @@ fn make_moving(
         && matches!(output_kind, VideoOutput::Keep | VideoOutput::Gif))
         || (info.kind == MediaKind::Video && output_kind == VideoOutput::Gif);
     if wants_gif {
-        return make_gif(batch, tools, job, info, media, progress, cancel, report);
+        return make_gif(
+            batch,
+            Some(tools),
+            job,
+            info,
+            media,
+            progress,
+            cancel,
+            report,
+        );
     }
     if moving && matches!(output_kind, VideoOutput::Webp | VideoOutput::Avif) {
         return make_animated(
@@ -832,7 +854,7 @@ fn make_document(
 #[allow(clippy::too_many_arguments)]
 fn make_gif(
     batch: &Batch,
-    tools: &Toolchain,
+    tools: Option<&Toolchain>,
     job: &Job,
     info: &MediaInfo,
     media: &Path,
@@ -862,7 +884,26 @@ fn make_gif(
         .duration_ms
         .map_or((total - start).max(0.0), |ms| ms as f64 / 1000.0);
     let partial = partial_path(&output);
-    match encode_gif(tools, media, &partial, &plan, expected, progress, cancel) {
+    // A GIF is read in process, frame by frame with its own timing; anything else by FFmpeg.
+    let from_gif = matches!(
+        crate::apng::sniff(media),
+        Ok(Some(crate::apng::Source::Gif))
+    );
+    let made = match (from_gif, tools) {
+        (true, _) => crate::gif::encode_gif_from_gif(
+            media,
+            &partial,
+            &plan,
+            job.recipe.gif.fps,
+            progress,
+            cancel,
+        ),
+        (false, Some(tools)) => {
+            encode_gif(tools, media, &partial, &plan, expected, progress, cancel)
+        }
+        (false, None) => Err(GifError::Failed(NEEDS_FFMPEG.to_owned())),
+    };
+    match made {
         Ok(encoder) => report.encoder = Some(encoder),
         Err(error) => {
             let _ = std::fs::remove_file(&partial);

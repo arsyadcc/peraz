@@ -267,7 +267,12 @@ pub fn decode(path: &Path, source: Source) -> Result<Frames, String> {
             Ok(Frames {
                 width,
                 height,
-                plays: plays(decoder.loop_count()),
+                // A GIF without a loop count plays once.
+                plays: match crate::gif::repeat_of(path) {
+                    gif::Repeat::Finite(0) => 1,
+                    gif::Repeat::Finite(count) => u32::from(count),
+                    gif::Repeat::Infinite => 0,
+                },
                 icc: None,
                 inner: decoder.into_frames(),
             })

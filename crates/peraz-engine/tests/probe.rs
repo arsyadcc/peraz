@@ -350,12 +350,21 @@ fn live_without_ffmpeg_agrees_with_ffprobe() {
             assert_eq!(ours.alpha, theirs.alpha, "{name}");
         }
     }
+    // A GIF is described the same way with and without FFmpeg: from its own frames.
+    let gif = fixtures.join("animation.gif");
+    let ours = probe_without_ffmpeg(&gif).unwrap().unwrap();
+    assert_eq!(ours, probe(&tools, &gif).unwrap());
+    assert_eq!(ours.kind, MediaKind::Animation);
+    assert_eq!(ours.duration_seconds, Some(3.0));
+    let picture = ours.video.unwrap();
+    assert_eq!(
+        (picture.codec.as_str(), picture.width, picture.height),
+        ("gif", 480, 270)
+    );
+    assert_eq!(picture.frame_count, Some(45));
+    assert_eq!(picture.frame_rate.map(Rational::as_f64), Some(15.0));
     // The HEIC sample is made only on macOS.
-    for name in [
-        "video-720p-noaudio.mp4",
-        "animation.gif",
-        "image-photo.heic",
-    ] {
+    for name in ["video-720p-noaudio.mp4", "image-photo.heic"] {
         if !fixtures.join(name).is_file() {
             continue;
         }

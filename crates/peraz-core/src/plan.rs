@@ -720,11 +720,11 @@ pub enum ImageDecoder {
 }
 
 /// Image codecs (FFmpeg names) decoded in process. `apng` here is an animated PNG with a single
-/// frame, which is a PNG.
-const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "apng", "webp", "bmp", "tiff"];
-/// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills, and GIFs with
-/// a single frame (animated GIFs take the GIF pipeline).
-const FFMPEG_IMAGES: &[&str] = &["hevc", "av1", "gif"];
+/// frame, which is a PNG, and `gif` a GIF with a single frame (animated GIFs take the GIF
+/// pipeline).
+const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "apng", "webp", "bmp", "tiff", "gif"];
+/// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills.
+const FFMPEG_IMAGES: &[&str] = &["hevc", "av1"];
 
 /// The format an input image is stored in, when Peraz can also write it.
 fn source_format(codec: &str) -> Option<ImageFormat> {
@@ -981,11 +981,14 @@ pub fn plan_gif(info: &MediaInfo, recipe: &Recipe) -> Result<GifPlan, PlanError>
     let source_fps = picture
         .frame_rate
         .map_or(f64::from(u32::MAX), Rational::as_f64);
-    let wanted = recipe
-        .gif
-        .fps
-        .unwrap_or([20, 15, 12, 10, 8][level])
-        .clamp(1, 50);
+    // A GIF made from a GIF keeps every frame unless a rate is asked for.
+    let from_gif = info.kind == MediaKind::Animation && picture.codec == "gif";
+    let default_fps = if from_gif {
+        50
+    } else {
+        [20, 15, 12, 10, 8][level]
+    };
+    let wanted = recipe.gif.fps.unwrap_or(default_fps).clamp(1, 50);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped to 1..=50
     let fps = if f64::from(wanted) > source_fps {
         source_fps.round().clamp(1.0, 50.0) as u32
@@ -2110,7 +2113,7 @@ mod tests {
 
     #[test]
     fn unsupported_images_explain_themselves() {
-        // A still GIF is decoded by FFmpeg and becomes PNG, kept only when smaller.
+        // A still GIF becomes PNG, kept only when smaller.
         let gif = plan_image(
             &image_info("gif", "gif", Alpha::Unknown),
             &Recipe::default(),
@@ -2118,7 +2121,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (gif.decoder, gif.extension, gif.converts_format),
-            (ImageDecoder::Ffmpeg, "png", false)
+            (ImageDecoder::Native, "png", false)
         );
         let other = plan_image(
             &image_info("cdxl", "cdxl", Alpha::Absent),

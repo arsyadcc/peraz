@@ -96,6 +96,10 @@ between alpha versions.
   jpeg` still makes the JPEG. With an FFmpeg that has no libx265, a HEIC without `--format`
   fails with a message that says so. **Interface:** the default output of HEIC inputs changed
   from JPEG to HEIC.
+- A GIF that stays a GIF keeps every frame at every quality level; the level sets its width and
+  palette. Before, the level also lowered the frame rate (12 frames per second at `balanced`).
+  `--fps` still lowers it on request. A GIF is now described from its own frames, with or
+  without FFmpeg: in `peraz probe`, `pixel_format` is `null` for a GIF.
 - An animated PNG is an animation, not a video: `kind` is `animation` in `peraz probe` and in
   reports (it was `video`), and by default it stays an animated PNG instead of becoming an MP4;
   `--format mp4` still makes a video from it. An animated PNG with a single frame is a still
@@ -104,6 +108,10 @@ between alpha versions.
 
 ### Fixed
 
+- A GIF compressed to a GIF lost its timing: every frame got the same delay, and a GIF meant to
+  play once (or a set number of times) looped forever. Peraz now reads GIFs itself: each frame
+  keeps its own delay and the loop count is kept. This also means a GIF is compressed without
+  FFmpeg, and a still GIF becomes a PNG without it.
 - An animated WebP did not stay an animated WebP: by default it became an MP4, or a GIF with an
   FFmpeg that cannot read animated WebP. It now stays an animated WebP, re-encoded in process
   at the quality level, with every frame, its timing, the loop count, and transparency, kept

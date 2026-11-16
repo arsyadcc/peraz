@@ -855,7 +855,7 @@ fn recompresses_a_gif_and_keeps_its_timing() {
         &job(
             env.fixtures.join("animation.gif"),
             output.clone(),
-            Quality::Small,
+            Quality::Smallest,
         ),
         &mut no_progress,
         &NOT_CANCELLED,
@@ -865,16 +865,16 @@ fn recompresses_a_gif_and_keeps_its_timing() {
         "{:?}",
         report.outcome
     );
-    let (w, h, _, centiseconds) = gif_frames(&output);
+    let (_, _, source_frames, source_centiseconds) =
+        gif_frames(&env.fixtures.join("animation.gif"));
+    let (w, h, frames, centiseconds) = gif_frames(&output);
     assert_eq!(
         (w, h),
-        (400, 224),
-        "small GIFs default to 400 px wide (even height)"
+        (320, 180),
+        "the smallest GIFs default to 320 px wide"
     );
-    assert!(
-        (295..=305).contains(&centiseconds),
-        "still 3 s long, got {centiseconds} cs"
-    );
+    // Every frame is kept, with its own delay.
+    assert_eq!((frames, centiseconds), (source_frames, source_centiseconds));
 }
 
 #[test]
@@ -1008,8 +1008,25 @@ fn measures_results_without_changing_them() {
     );
     assert!((80.0..=100.0).contains(&score.score), "{score:?}");
     // GIFs are not measured.
-    let (_, score) = run("animation.gif", "measured.gif", true);
-    assert_eq!(score, None);
+    let mut gif = job(
+        env.fixtures.join("animation.gif"),
+        env.out.join("measured.gif"),
+        Quality::Smallest,
+    );
+    gif.recipe.measure_quality = true;
+    let report = compress(
+        Some(&env.tools),
+        &env.caps,
+        &gif,
+        &mut no_progress,
+        &NOT_CANCELLED,
+    );
+    assert!(
+        matches!(report.outcome, Outcome::Compressed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(report.score, None);
 }
 
 #[test]

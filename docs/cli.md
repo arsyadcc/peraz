@@ -9,8 +9,9 @@ people and scripts. From 0.1.0 on, renaming or removing any of them is a breakin
 
 ## Without FFmpeg
 
-Peraz runs FFmpeg for videos, GIFs, HEIC, and AVIF, and to convert animations. JPEG, PNG, WebP
-(animated PNG and WebP too), BMP, TIFF, JPEG XL, and SVG images, icon files (ICO, CUR, ICNS),
+Peraz runs FFmpeg for videos (also to make a GIF from one), HEIC, and AVIF, and to convert
+animations. JPEG, PNG, WebP (animated PNG and WebP too), GIF, BMP, TIFF, JPEG XL, and SVG
+images, icon files (ICO, CUR, ICNS),
 PDFs, and EPUBs are handled without it, so `peraz compress` works on them when FFmpeg is
 not installed: the results are the same as with FFmpeg, and `--json` prints `"ffmpeg": null`. If
 any input needs FFmpeg, the run stops before any work with exit code `3` and names that file.
@@ -23,9 +24,9 @@ it, the run stops before any work with exit code `3`.
 `--format jxl` needs libjxl's `cjxl` instead (and `djxl` with `--target-ssimulacra2`), found
 through `PERAZ_CJXL`, the bundled build, or `PATH`; without it the run stops before any work with
 exit code `3`. JPEG XL inputs are read with `djxl`, likewise exit code `3` when it is missing.
-An animated JPEG XL stays JPEG XL without FFmpeg, an animated PNG stays an animated PNG, an
-animated WebP stays an animated WebP, and `--format apng` makes an animated PNG from any of
-them. Turning them into a GIF, WebP, AVIF, or MP4
+An animated JPEG XL stays JPEG XL without FFmpeg, a GIF stays a GIF, an animated PNG stays an
+animated PNG, an animated WebP stays an animated WebP, and `--format apng` makes an animated
+PNG from any of them. Turning one into another of GIF, WebP, AVIF, or MP4
 needs FFmpeg, and the run stops with exit code `3` when it is missing.
 
 ## Bundled FFmpeg
@@ -79,7 +80,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
 | `--max-height` | pixels | Scale down to at most this height; never scales up. |
 | `--format` | `keep`, `jpeg`, `png`, `webp`, `avif`, `jxl`, `heic`, `tiff`, `gif`, `apng`, `mp4` | Output format. Default `keep`: every file stays in its format, except that a BMP or a still GIF becomes a PNG when that is smaller. `heic` applies to still images. `jxl` (JPEG XL) applies to still images and animated JPEG XL. `tiff` applies to still images and is always lossless: Deflate compression at the picture's own bit depth, so `--quality` and `--target-ssimulacra2` do not change it. For videos and animations (GIF, animated PNG, animated JPEG XL), `webp` and `avif` make animated images, `gif` makes a GIF, `apng` makes an animated PNG, and `mp4` turns an animation into a video. `apng` keeps every frame of a GIF, an animated WebP, or an animated JPEG XL with its timing, takes frames from a video at `--fps`, and makes a PNG from a still image. An animated PNG stays an animated PNG with `keep`, and an animated WebP an animated WebP (also with `webp`): every frame, with its timing and loop count. |
-| `--fps` | 1–50 | Frame rate of GIFs, animated WebP/AVIF, and animated PNGs made from videos; never above the source. An animated PNG made from an animation keeps every frame instead. |
+| `--fps` | 1–50 | Frame rate of GIFs, animated WebP/AVIF, and animated PNGs made from videos; never above the source. A GIF that stays a GIF keeps every frame with its own delay unless `--fps` is given: then frames are dropped down to that rate, and each kept frame takes the time of the frames dropped after it. An animated PNG made from an animation always keeps every frame. |
 | `--start` | time | Start this far into a video: seconds (`12.5`) or `[h:]m:ss`. |
 | `--duration` | time | Use at most this much of a video. |
 | `--trim-only` | | Only cut the clip, without compressing: the streams are copied when the start is on a keyframe. |

@@ -50,7 +50,14 @@ pub fn encode_gif(
         .map_err(|_| "GIF frames are at most 65535 pixels high".to_owned())?;
     let file =
         File::create(output).map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    let mut writer = Writer::new(BufWriter::new(file), width, height, plan)?;
+    // Made from a video or another format: it loops, as such GIFs are expected to.
+    let mut writer = Writer::new(
+        BufWriter::new(file),
+        width,
+        height,
+        plan,
+        gif::Repeat::Infinite,
+    )?;
     #[allow(clippy::cast_precision_loss)]
     let expected_frames = (expected_seconds * f64::from(plan.fps)).max(1.0);
     let stream = FrameStream {
@@ -61,7 +68,7 @@ pub fn encode_gif(
         height: plan.height,
     };
     stream_frames(tools, input, &stream, cancel, &mut |frame| {
-        writer.push(frame)?;
+        writer.push_at_rate(frame)?;
         #[allow(clippy::cast_precision_loss)]
         progress((writer.frames_seen as f64 / expected_frames).min(0.99));
         Ok(())
@@ -73,6 +80,164 @@ pub fn encode_gif(
         "imagequant + gif · {} fps · {} frames",
         plan.fps, written
     ))
+}
+
+/// The loop count stored in a GIF file: `Finite(0)` when it stores none, which means "play
+/// once"; `Infinite` when it cannot be read.
+pub fn repeat_of(path: &Path) -> gif::Repeat {
+    let Ok(file) = File::open(path) else {
+        return gif::Repeat::Infinite;
+    };
+    let Ok(mut decoder) = gif::DecodeOptions::new().read_info(BufReader::new(file)) else {
+        return gif::Repeat::Infinite;
+    };
+    // The loop count comes before the first frame.
+    let _ = decoder.next_frame_info();
+    decoder.repeat()
+}
+
+/// How long a frame with this stored delay (in hundredths of a second) is shown: browsers and
+/// most players show a delay of 0 or 1 as 10.
+#[must_use]
+pub fn shown_centiseconds(delay: u16) -> u16 {
+    if delay <= 1 { 10 } else { delay }
+}
+
+/// A frame waiting to be written, until it is known how long it is shown.
+struct Held {
+    pixels: image::RgbaImage,
+    /// Its delay as stored in the source.
+    stored: u16,
+    /// The time it is shown with the dropped frames after it, in hundredths of a second.
+    shown: u32,
+    /// Frames after it were dropped: it takes their time.
+    extended: bool,
+}
+
+impl Held {
+    /// The delay to write: the stored one, exactly, unless the frame stands in for others.
+    fn delay(&self) -> u16 {
+        if self.extended {
+            u16::try_from(self.shown).unwrap_or(u16::MAX)
+        } else {
+            self.stored
+        }
+    }
+}
+
+/// Encodes the GIF `input` into the GIF file `output` in process: every frame with its own
+/// delay, the same loop count, at the plan's size. With `fps`, frames are dropped down to that
+/// rate: a frame is kept when it is on screen at one of the rate's moments, and takes the time
+/// of the dropped frames after it.
+pub fn encode_gif_from_gif(
+    input: &Path,
+    output: &Path,
+    plan: &GifPlan,
+    fps: Option<u32>,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<String, GifError> {
+    use crate::apng::{Source, decode};
+    let width = u16::try_from(plan.width)
+        .map_err(|_| "GIF frames are at most 65535 pixels wide".to_owned())?;
+    let height = u16::try_from(plan.height)
+        .map_err(|_| "GIF frames are at most 65535 pixels high".to_owned())?;
+    // A first pass over the frames: how many there are, and whether any has transparency
+    // (then every frame is drawn whole, because what is cleared cannot be diffed).
+    let mut total = 0usize;
+    let mut transparent = false;
+    for frame in decode(input, Source::Gif)? {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(GifError::Cancelled);
+        }
+        let (pixels, _) = frame?;
+        total += 1;
+        transparent |= pixels.pixels().any(|p| p[3] < 128);
+    }
+    let file =
+        File::create(output).map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    let mut writer = Writer::new(BufWriter::new(file), width, height, plan, repeat_of(input))?;
+    writer.transparent_source = transparent;
+    let frames = decode(input, Source::Gif)?;
+    let resize = (frames.width, frames.height) != (plan.width, plan.height);
+    #[allow(clippy::cast_precision_loss)]
+    let (start, end) = (
+        plan.start_ms.map_or(0.0, |ms| ms as f64),
+        plan.duration_ms
+            .map_or(f64::INFINITY, |ms| (plan.start_ms.unwrap_or(0) + ms) as f64),
+    );
+    // With a frame rate: the time between the moments at which a frame is taken.
+    let interval = fps.map(|fps| 1000.0 / f64::from(fps.max(1)));
+    let mut next_moment: Option<f64> = None;
+    let mut held: Option<Held> = None;
+    let mut at = 0.0;
+    for (index, frame) in frames.enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(GifError::Cancelled);
+        }
+        let (pixels, delay) = frame?;
+        // GIF delays are whole hundredths of a second.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let stored = (delay.milliseconds() / 10.0).round() as u16;
+        let shown = shown_centiseconds(stored);
+        let (begins, ends) = (at, at + f64::from(shown) * 10.0);
+        at = ends;
+        // The selected part holds the frames that start inside it.
+        if begins < start {
+            continue;
+        }
+        if begins >= end {
+            break;
+        }
+        let taken = match (interval, next_moment) {
+            (Some(_), Some(moment)) => moment < ends - 1e-6,
+            _ => true,
+        };
+        if taken {
+            if let Some(frame) = held.take() {
+                writer.push(frame.pixels.as_raw(), frame.delay())?;
+            }
+            if let Some(interval) = interval {
+                // The first moment at or after this frame's end.
+                let moment = next_moment.unwrap_or(begins);
+                let steps = ((ends - moment) / interval - 1e-9).ceil().max(1.0);
+                next_moment = Some(moment + steps * interval);
+            }
+            let pixels = if resize {
+                image::imageops::resize(
+                    &pixels,
+                    plan.width,
+                    plan.height,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                pixels
+            };
+            held = Some(Held {
+                pixels,
+                stored,
+                shown: u32::from(shown),
+                extended: false,
+            });
+        } else if let Some(frame) = held.as_mut() {
+            frame.shown += u32::from(shown);
+            frame.extended = true;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        progress(((index + 1) as f64 / total.max(1) as f64).min(0.99));
+    }
+    if let Some(frame) = held {
+        writer.push(frame.pixels.as_raw(), frame.delay())?;
+    }
+    if writer.frames_seen == 0 {
+        return Err("the source has no frames in the selected range"
+            .to_owned()
+            .into());
+    }
+    let written = writer.frames_written + usize::from(writer.pending.is_some());
+    writer.finish()?;
+    progress(1.0);
+    Ok(format!("imagequant + gif · {written} frames"))
 }
 
 /// The frames FFmpeg is asked for: the selected part of the source, at a fixed rate and size.
@@ -203,12 +368,19 @@ struct Writer<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> Writer<W> {
-    fn new(out: W, width: u16, height: u16, plan: &GifPlan) -> Result<Self, String> {
+    /// `repeat` is the loop count to store; `Finite(0)` stores none ("play once").
+    fn new(
+        out: W,
+        width: u16,
+        height: u16,
+        plan: &GifPlan,
+        repeat: gif::Repeat,
+    ) -> Result<Self, String> {
         let gif_error = |e: gif::EncodingError| format!("gif: {e}");
         let mut encoder = gif::Encoder::new(out, width, height, &[]).map_err(gif_error)?;
-        encoder
-            .set_repeat(gif::Repeat::Infinite)
-            .map_err(gif_error)?;
+        if repeat != gif::Repeat::Finite(0) {
+            encoder.set_repeat(repeat).map_err(gif_error)?;
+        }
         let mut attributes = imagequant::new();
         attributes
             .set_quality(plan.min_quality, plan.max_quality)
@@ -238,13 +410,19 @@ impl<W: std::io::Write> Writer<W> {
         u16::try_from(at(index + 1) - at(index)).unwrap_or(u16::MAX)
     }
 
-    fn push(&mut self, rgba: &[u8]) -> Result<(), String> {
+    /// Adds the next frame of a source read at the plan's frame rate.
+    fn push_at_rate(&mut self, rgba: &[u8]) -> Result<(), String> {
+        let delay = self.delay(self.frames_seen);
+        self.push(rgba, delay)
+    }
+
+    /// Adds a frame (the whole picture), shown for `delay` hundredths of a second.
+    fn push(&mut self, rgba: &[u8], delay: u16) -> Result<(), String> {
         let index = self.frames_seen;
         self.frames_seen += 1;
-        let delay = self.delay(index);
         let first = index == 0;
         if first {
-            self.transparent_source = rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 128);
+            self.transparent_source |= rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 128);
         }
         let diffing = !first && !self.transparent_source;
         let threshold = self.plan.change_threshold;
@@ -460,7 +638,7 @@ mod tests {
 
     #[test]
     fn delays_add_up_to_the_exact_duration() {
-        let writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4)).unwrap();
+        let writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite).unwrap();
         let total: u32 = (0..12).map(|i| u32::from(writer.delay(i))).sum();
         assert_eq!(total, 100, "12 frames at 12 fps last one second");
     }
@@ -468,22 +646,23 @@ mod tests {
     #[test]
     fn identical_frames_merge_and_changes_are_cropped() {
         let (w, h) = (16, 8);
-        let mut writer = Writer::new(Vec::new(), 16, 8, &plan(16, 8)).unwrap();
+        let mut writer =
+            Writer::new(Vec::new(), 16, 8, &plan(16, 8), gif::Repeat::Infinite).unwrap();
         let red = solid(w, h, [200, 0, 0, 255]);
-        writer.push(&red).unwrap();
-        writer.push(&red).unwrap(); // identical: merged
+        writer.push_at_rate(&red).unwrap();
+        writer.push_at_rate(&red).unwrap(); // identical: merged
         let mut changed = red.clone();
         for y in 2..4 {
             for x in 5..9 {
                 changed[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[0, 0, 200, 255]);
             }
         }
-        writer.push(&changed).unwrap();
+        writer.push_at_rate(&changed).unwrap();
         writer.flush_pending().unwrap();
         let bytes = writer.encoder.into_inner().unwrap();
         let frames = decode(&bytes);
         assert_eq!(frames.len(), 2);
-        let timing = Writer::new(Vec::new(), 1, 1, &plan(1, 1)).unwrap();
+        let timing = Writer::new(Vec::new(), 1, 1, &plan(1, 1), gif::Repeat::Infinite).unwrap();
         assert_eq!(
             frames[0].delay,
             timing.delay(0) + timing.delay(1),
@@ -506,7 +685,7 @@ mod tests {
         let mut denoising = plan(8, 8);
         denoising.denoise = 8;
         denoising.change_threshold = 2;
-        let mut writer = Writer::new(Vec::new(), 8, 8, &denoising).unwrap();
+        let mut writer = Writer::new(Vec::new(), 8, 8, &denoising, gif::Repeat::Infinite).unwrap();
         // A grey scene whose pixels flicker by up to 6 levels from frame to frame (sensor noise).
         for i in 0..6u8 {
             let frame: Vec<u8> = (0..w * h)
@@ -516,7 +695,7 @@ mod tests {
                     [v, v, v, 255]
                 })
                 .collect();
-            writer.push(&frame).unwrap();
+            writer.push_at_rate(&frame).unwrap();
         }
         // A real change: a white square.
         let mut moved = solid(w, h, [123, 123, 123, 255]);
@@ -525,7 +704,7 @@ mod tests {
                 moved[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
             }
         }
-        writer.push(&moved).unwrap();
+        writer.push_at_rate(&moved).unwrap();
         let screen_corner = writer.screen[0];
         writer.flush_pending().unwrap();
         let frames = decode(&writer.encoder.into_inner().unwrap());
@@ -541,7 +720,7 @@ mod tests {
 
         let mut plain = plan(8, 8);
         plain.change_threshold = 2;
-        let mut writer = Writer::new(Vec::new(), 8, 8, &plain).unwrap();
+        let mut writer = Writer::new(Vec::new(), 8, 8, &plain, gif::Repeat::Infinite).unwrap();
         for i in 0..6u8 {
             let frame: Vec<u8> = (0..w * h)
                 .flat_map(|p| {
@@ -550,7 +729,7 @@ mod tests {
                     [v, v, v, 255]
                 })
                 .collect();
-            writer.push(&frame).unwrap();
+            writer.push_at_rate(&frame).unwrap();
         }
         writer.flush_pending().unwrap();
         assert_eq!(
@@ -562,11 +741,11 @@ mod tests {
 
     #[test]
     fn transparent_sources_are_drawn_whole() {
-        let mut writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4)).unwrap();
+        let mut writer = Writer::new(Vec::new(), 4, 4, &plan(4, 4), gif::Repeat::Infinite).unwrap();
         let mut frame = solid(4, 4, [10, 200, 10, 255]);
         frame[3] = 0; // one transparent pixel
-        writer.push(&frame).unwrap();
-        writer.push(&frame).unwrap();
+        writer.push_at_rate(&frame).unwrap();
+        writer.push_at_rate(&frame).unwrap();
         writer.flush_pending().unwrap();
         let frames = decode(&writer.encoder.into_inner().unwrap());
         assert_eq!(frames.len(), 2, "no diffing for transparent sources");
