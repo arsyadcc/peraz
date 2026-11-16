@@ -426,8 +426,6 @@ pub struct ToneMap {
     /// The properties of the `tmap` item that describe the HDR rendition (its color coding,
     /// bit depth, and light levels), as whole boxes.
     pub rendition: Vec<Vec<u8>>,
-    /// The gain map picture's own color coding (`colr`), as a whole box.
-    pub map_color: Option<Vec<u8>>,
 }
 
 /// A gain map taken from a HEIF file: its picture, upright like the main one, and what the
@@ -438,6 +436,34 @@ pub struct GainMap {
     /// The main picture's size, upright.
     pub picture_size: (u32, u32),
     pub description: ToneMap,
+}
+
+impl GainMap {
+    /// The gain map's pixels for a picture that is now `size` (upright): scaled by the same
+    /// factor as the picture, so it keeps its proportion to it; to even sides when `even`.
+    #[must_use]
+    pub fn pixels_for(&self, size: (u32, u32), even: bool) -> DynamicImage {
+        let scaled = |length: u32, now: u32, was: u32| {
+            let pixels = u64::from(length) * u64::from(now) / u64::from(was.max(1));
+            let pixels = u32::try_from(pixels).unwrap_or(u32::MAX);
+            if even {
+                let pixels = pixels.max(2);
+                pixels + pixels % 2
+            } else {
+                pixels.max(1)
+            }
+        };
+        let wanted = (
+            scaled(self.pixels.width(), size.0, self.picture_size.0),
+            scaled(self.pixels.height(), size.1, self.picture_size.1),
+        );
+        if wanted == (self.pixels.width(), self.pixels.height()) {
+            self.pixels.clone()
+        } else {
+            self.pixels
+                .resize_exact(wanted.0, wanted.1, image::imageops::FilterType::Lanczos3)
+        }
+    }
 }
 
 /// The `auxC` type of an HDR gain map as Apple's cameras store it.
@@ -456,71 +482,17 @@ pub fn read_properties(file: &[u8]) -> Properties {
 }
 
 fn parse_properties(file: &[u8]) -> Option<Properties> {
-    let meta = boxes(file).find(|b| &b.kind == b"meta")?;
-    let meta_children = meta.payload.get(4..)?; // full box: version + flags
-    let mut primary = None;
-    let mut properties: Vec<Bx> = Vec::new();
-    let mut associations: Vec<(u32, Vec<u16>)> = Vec::new();
-    let mut auxiliary: Vec<(u32, u32)> = Vec::new();
-    // ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied
-    // and is derived from the picture and the gain map picture.
-    let mut tone_map_item = None;
-    let mut derived: Vec<(u32, u32)> = Vec::new();
-    let (mut locations, mut inline_data) = (None, None);
-    for child in boxes(meta_children) {
-        match &child.kind {
-            b"iref" => {
-                auxiliary = references(child.payload, *b"auxl")?;
-                derived = references(child.payload, *b"dimg")?;
-            }
-            b"iinf" => tone_map_item = item_of_type(child.payload, *b"tmap"),
-            b"iloc" => locations = Some(child.payload),
-            b"idat" => inline_data = Some(child.payload),
-            b"pitm" => primary = Some(primary_item(child.payload)?),
-            b"iprp" => {
-                for part in boxes(child.payload) {
-                    match &part.kind {
-                        b"ipco" => properties = boxes(part.payload).collect(),
-                        b"ipma" => associations.extend(parse_ipma(part.payload)?),
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let primary = primary?;
-    let properties_of = |id: u32| -> Vec<&Bx> {
-        associations
-            .iter()
-            .filter(|(item, _)| *item == id)
-            .flat_map(|(_, indexes)| indexes.iter())
-            .filter_map(|&i| properties.get(usize::from(i).checked_sub(1)?))
-            .collect()
-    };
-    let own = properties_of(primary);
-    // The auxiliary images of the primary item whose `auxC` type is one of `types`.
-    let auxiliary_of = |types: &[&[u8]]| {
-        auxiliary
-            .iter()
-            .filter(|(_, to)| *to == primary)
-            .map(|(from, _)| *from)
-            .find(|&item| {
-                properties_of(item).iter().any(|b| {
-                    &b.kind == b"auxC"
-                        && b.payload.get(4..).is_some_and(|urn| {
-                            let urn = urn.split(|c| *c == 0).next().unwrap_or_default();
-                            types.contains(&urn)
-                        })
-                })
-            })
-    };
+    let layout = Layout::of(file)?;
+    let primary = layout.primary;
+    let own = layout.properties_of(primary);
     // Alpha planes, not depth maps or gain maps.
-    let alpha = auxiliary_of(ALPHA_TYPES);
-    let gain_map = tone_map_item.is_some() || auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
-    let tone_map = tone_map_item.and_then(|item| {
+    let alpha = layout.auxiliary_of(ALPHA_TYPES);
+    let gain_map =
+        layout.tone_map_item.is_some() || layout.auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
+    let tone_map = layout.tone_map_item.and_then(|item| {
         // The `tmap` item is derived from the primary picture, then the gain map picture.
-        let sources: Vec<u32> = derived
+        let sources: Vec<u32> = layout
+            .derived
             .iter()
             .filter(|(from, _)| *from == item)
             .map(|(_, to)| *to)
@@ -528,15 +500,8 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         let [base, map_item] = sources[..] else {
             return None;
         };
-        let metadata = item_data(file, locations?, inline_data, item)?;
-        (base == primary).then(|| {
-            tone_map(
-                map_item,
-                metadata,
-                &properties_of(item),
-                &properties_of(map_item),
-            )
-        })
+        let metadata = layout.data_of(item)?;
+        (base == primary).then(|| tone_map(map_item, metadata, &layout.properties_of(item)))
     });
 
     let icc_of = |b: &Bx| {
@@ -547,8 +512,8 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     // Grid images sometimes attach the profile only to their tiles: fall back to any profile.
     let icc = own
         .iter()
-        .find_map(|b| icc_of(b))
-        .or_else(|| properties.iter().find_map(icc_of));
+        .find_map(icc_of)
+        .or_else(|| layout.properties.iter().find_map(icc_of));
     let transforms = transforms_of(&own);
     Some(Properties {
         primary: Some(primary),
@@ -560,6 +525,129 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     })
 }
 
+/// The parts of a HEIF file's `meta` box that say what its items are and how they belong
+/// together.
+struct Layout<'a> {
+    file: &'a [u8],
+    primary: u32,
+    /// The property list (`ipco`).
+    properties: Vec<Bx<'a>>,
+    /// For each item, the places of its properties in the list, from 1 (`ipma`).
+    associations: Vec<(u32, Vec<u16>)>,
+    /// `auxl` references: an auxiliary picture and its main one.
+    auxiliary: Vec<(u32, u32)>,
+    /// `dimg` references: a derived item and one of its sources, in file order.
+    derived: Vec<(u32, u32)>,
+    /// ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied
+    /// and is derived from the picture and the gain map picture.
+    tone_map_item: Option<u32>,
+    locations: Option<&'a [u8]>,
+    inline_data: Option<&'a [u8]>,
+}
+
+impl<'a> Layout<'a> {
+    fn of(file: &'a [u8]) -> Option<Self> {
+        let meta = boxes(file).find(|b| &b.kind == b"meta")?;
+        let meta_children = meta.payload.get(4..)?; // full box: version + flags
+        let mut layout = Layout {
+            file,
+            primary: 0,
+            properties: Vec::new(),
+            associations: Vec::new(),
+            auxiliary: Vec::new(),
+            derived: Vec::new(),
+            tone_map_item: None,
+            locations: None,
+            inline_data: None,
+        };
+        let mut primary = None;
+        for child in boxes(meta_children) {
+            match &child.kind {
+                b"iref" => {
+                    layout.auxiliary = references(child.payload, *b"auxl")?;
+                    layout.derived = references(child.payload, *b"dimg")?;
+                }
+                b"iinf" => layout.tone_map_item = item_of_type(child.payload, *b"tmap"),
+                b"iloc" => layout.locations = Some(child.payload),
+                b"idat" => layout.inline_data = Some(child.payload),
+                b"pitm" => primary = Some(primary_item(child.payload)?),
+                b"iprp" => {
+                    for part in boxes(child.payload) {
+                        match &part.kind {
+                            b"ipco" => layout.properties = boxes(part.payload).collect(),
+                            b"ipma" => layout.associations.extend(parse_ipma(part.payload)?),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        layout.primary = primary?;
+        Some(layout)
+    }
+
+    /// The properties of one item, in the order the file associates them.
+    fn properties_of(&self, id: u32) -> Vec<Bx<'a>> {
+        self.associations
+            .iter()
+            .filter(|(item, _)| *item == id)
+            .flat_map(|(_, indexes)| indexes.iter())
+            .filter_map(|&i| self.properties.get(usize::from(i).checked_sub(1)?).copied())
+            .collect()
+    }
+
+    /// The auxiliary picture of the primary item whose `auxC` type is one of `types`.
+    fn auxiliary_of(&self, types: &[&[u8]]) -> Option<u32> {
+        self.auxiliary
+            .iter()
+            .filter(|(_, to)| *to == self.primary)
+            .map(|(from, _)| *from)
+            .find(|&item| {
+                self.properties_of(item).iter().any(|b| {
+                    &b.kind == b"auxC"
+                        && b.payload.get(4..).is_some_and(|urn| {
+                            let urn = urn.split(|c| *c == 0).next().unwrap_or_default();
+                            types.contains(&urn)
+                        })
+                })
+            })
+    }
+
+    /// The data of one item.
+    fn data_of(&self, item: u32) -> Option<Vec<u8>> {
+        item_data(self.file, self.locations?, self.inline_data, item)
+    }
+}
+
+/// One coded picture of a HEIF file: its data, and its properties as whole boxes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodedItem {
+    pub data: Vec<u8>,
+    pub properties: Vec<Vec<u8>>,
+}
+
+/// The primary picture of a HEIF file and its alpha picture, as they are coded: for a file
+/// whose pictures are each one item (not a grid of tiles).
+pub(crate) fn coded_pictures(file: &[u8]) -> Option<(CodedItem, Option<CodedItem>)> {
+    let layout = Layout::of(file)?;
+    let coded = |item: u32| -> Option<CodedItem> {
+        Some(CodedItem {
+            data: layout.data_of(item)?,
+            properties: layout
+                .properties_of(item)
+                .iter()
+                .filter_map(|b| make_box(b.kind, b.payload))
+                .collect(),
+        })
+    };
+    let alpha = match layout.auxiliary_of(ALPHA_TYPES) {
+        Some(item) => Some(coded(item)?),
+        None => None,
+    };
+    Some((coded(layout.primary)?, alpha))
+}
+
 /// `pitm`: the primary item's ID (16 bits in version 0, 32 bits after).
 fn primary_item(payload: &[u8]) -> Option<u32> {
     match *payload.first()? {
@@ -569,7 +657,7 @@ fn primary_item(payload: &[u8]) -> Option<u32> {
 }
 
 /// The turns and flips among an item's properties, in file order.
-fn transforms_of(properties: &[&Bx]) -> Vec<Transform> {
+fn transforms_of(properties: &[Bx]) -> Vec<Transform> {
     properties
         .iter()
         .filter_map(|b| match &b.kind {
@@ -586,19 +674,17 @@ fn transforms_of(properties: &[&Bx]) -> Vec<Transform> {
         .collect()
 }
 
-/// What a file says about its gain map: the data of its `tmap` item, the properties of that
-/// item that describe the HDR rendition, and the gain map picture's color coding.
-fn tone_map(map_item: u32, metadata: Vec<u8>, rendition: &[&Bx], map: &[&Bx]) -> ToneMap {
-    let whole = |b: &&Bx| make_box(b.kind, b.payload);
+/// What a file says about its gain map: the data of its `tmap` item, and the properties of
+/// that item that describe the HDR rendition.
+fn tone_map(map_item: u32, metadata: Vec<u8>, rendition: &[Bx]) -> ToneMap {
     ToneMap {
         map_item,
         metadata,
         rendition: rendition
             .iter()
             .filter(|b| matches!(&b.kind, b"colr" | b"pixi" | b"clli" | b"mdcv" | b"amve"))
-            .filter_map(whole)
+            .filter_map(|b| make_box(b.kind, b.payload))
             .collect(),
-        map_color: map.iter().find(|b| &b.kind == b"colr").and_then(whole),
     }
 }
 

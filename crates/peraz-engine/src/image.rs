@@ -40,7 +40,7 @@ pub struct Decoded {
     pub gain_map: bool,
     /// The gain map of a JPEG, which a JPEG made from it can carry.
     pub jpeg_gain_map: Option<crate::gainmap::JpegGainMap>,
-    /// The gain map of a HEIC or AVIF, which a HEIC made from it can carry.
+    /// The gain map of a HEIC or AVIF, which a HEIC or AVIF made from it can carry.
     pub heif_gain_map: Option<crate::heif::GainMap>,
     /// What a PNG says about its colors without a profile (gamma, primaries, "this is sRGB").
     pub png_color: PngColor,
@@ -191,26 +191,18 @@ fn encode_image_inner(
                 format!("x265 crf {}{note}", crate::heic::crf(quality)),
             )
         }
-        ImageEncoding::Tiff => {
-            let mut tiff = crate::tiff::encode(image, icc.as_deref(), kept)?;
-            // EXIF in a TIFF is not one block: its tags join the file's own directories.
-            if let Some(exif) = kept.and_then(|m| m.exif.as_deref()) {
-                match crate::exif::into_tiff(tiff.clone(), exif) {
-                    Some(tagged) => tiff = tagged,
-                    None => warnings.push(
-                        "the EXIF data could not be written into the TIFF and was left out"
-                            .to_owned(),
-                    ),
-                }
-            }
-            (tiff, crate::tiff::ENCODER.to_owned())
-        }
+        ImageEncoding::Tiff => (
+            tiff_of(image, icc.as_deref(), kept, &mut warnings)?,
+            crate::tiff::ENCODER.to_owned(),
+        ),
         // SVGs and icon files are rewritten whole and never reach the pixel encoders.
         ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => {
             return Err("internal error: this file is not encoded from pixels".to_owned());
         }
         ImageEncoding::Avif { quality } => {
-            avif_of(image, quality, icc.as_deref(), kept, &mut warnings)?
+            let (avif, encoder, with_gain_map) = avif_of(prepared, quality, kept, &mut warnings)?;
+            kept_gain_map = with_gain_map;
+            (avif, encoder)
         }
     };
     Ok(EncodedImage {
@@ -480,20 +472,50 @@ fn jpeg_is_complete(bytes: &[u8]) -> bool {
     bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
-/// The warning for metadata that the AVIF container could not take.
-const AVIF_ITEM_LEFT_OUT: &str = "the {} could not be written into the AVIF and was left out";
-
-/// The picture as an AVIF, with the encoder's name: with its color profile, and with the EXIF
-/// block and the XMP packet of `kept`.
-fn avif_of(
+/// The picture as a TIFF, with its color profile and the metadata of `kept`.
+fn tiff_of(
     image: &DynamicImage,
-    quality: u8,
     icc: Option<&[u8]>,
     kept: Option<&Metadata>,
     warnings: &mut Vec<String>,
-) -> Result<(Vec<u8>, String), String> {
-    let mut rgba = image.to_rgba8();
+) -> Result<Vec<u8>, String> {
+    let mut tiff = crate::tiff::encode(image, icc, kept)?;
+    // EXIF in a TIFF is not one block: its tags join the file's own directories.
+    if let Some(exif) = kept.and_then(|m| m.exif.as_deref()) {
+        match crate::exif::into_tiff(tiff.clone(), exif) {
+            Some(tagged) => tiff = tagged,
+            None => warnings.push(
+                "the EXIF data could not be written into the TIFF and was left out".to_owned(),
+            ),
+        }
+    }
+    Ok(tiff)
+}
+
+/// The warning for metadata that the AVIF container could not take.
+const AVIF_ITEM_LEFT_OUT: &str = "the {} could not be written into the AVIF and was left out";
+
+/// The picture as an AVIF, with the encoder's name, and whether the input's HDR gain map is
+/// in it: with its color profile, and with the EXIF block and the XMP packet of `kept`.
+fn avif_of(
+    prepared: &Decoded,
+    quality: u8,
+    kept: Option<&Metadata>,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<u8>, String, bool), String> {
+    let icc = prepared.icc.as_deref();
+    let mut rgba = prepared.image.to_rgba8();
     let avif = encode_avif(&rgba, quality)?;
+    // An HDR photo stays one: its gain map follows the picture, scaled like it, in a file
+    // written here. When that fails, the standard picture is still written.
+    if let Some(map) = &prepared.heif_gain_map {
+        let size = rgba.dimensions();
+        let map_quality = quality.max(GAIN_MAP_QUALITY);
+        if let Ok(file) = crate::avif::with_gain_map(&avif, map, size, map_quality, icc, kept) {
+            let encoder = format!("rav1e q{quality}, HDR gain map kept");
+            return Ok((file, encoder, true));
+        }
+    }
     let tagged = match icc {
         Some(profile) => crate::heif::embed_icc(&avif, profile).ok_or(profile),
         None => Ok(avif),
@@ -528,7 +550,7 @@ fn avif_of(
             None => warnings.push(AVIF_ITEM_LEFT_OUT.replace("{}", "XMP packet")),
         }
     }
-    Ok((avif, encoder))
+    Ok((avif, encoder, false))
 }
 
 /// The picture as a JPEG, with the settings it was written with: gray stays one channel,
@@ -1122,7 +1144,7 @@ fn encode_webp(
     webp_extended(&encoded, &extras, rgba.width(), rgba.height(), has_alpha)
 }
 
-fn encode_avif(rgba: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_avif(rgba: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
     let av1 = ravif::Encoder::new()
         .with_quality(f32::from(quality))
         .with_alpha_quality(f32::from(quality.saturating_add(10).min(100)))

@@ -11,6 +11,21 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- HDR photos in AVIF stay HDR. An AVIF's gain map (an ISO 21496-1 `tmap` item) is kept when
+  the photo is compressed as an AVIF: the gain map is scaled with the picture and encoded
+  again as an AV1 picture of its own, and the file says the same about how it is applied and
+  what the HDR rendition is. A HEIC with such a gain map keeps it when it becomes an AVIF. The
+  gain map's bytes count toward `--target-size`. The report's `encoder` says `HDR gain map
+  kept`. Before, the result was the standard picture alone, with a warning.
+
+### Fixed
+
+- A gain map written into a HEIC is described as it is coded (full range, BT.709), whatever
+  the input said about its own gain map picture. Before, the input's description was copied,
+  which could differ from how the new picture is coded.
+
 ## [0.7.0] - 2026-11-16
 
 ### Added

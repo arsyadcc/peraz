@@ -249,16 +249,16 @@ IPTC where the output format can hold them (with the orientation reset, since th
 stored upright). Transparent images converted to JPEG are placed on white, or on the color
 given with `--background` (a page's background, for example).
 
-An HDR photo stays HDR as a JPEG and as a HEIC: its gain map is compressed with the picture,
-turned and scaled like it, and written back with its description, so HDR screens still show
-the photo brighter and every other program shows the standard picture. For a JPEG that is
-Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC, the gain map as the
-standard (ISO 21496-1) stores it, which is also how an AVIF's gain map becomes a HEIC's.
-Elsewhere a gain map is not kept yet: in AVIF and JPEG XL output, between JPEG and the other
-formats, and for a HEIC from an older iPhone, which stores it another way. Such a photo is
-compressed as its standard picture, and the report warns that the gain map was removed. A picture that is HDR by
-its transfer function alone (PQ or HLG, such as a 10-bit AVIF) is skipped, because read as a
-standard picture it would come out dark and flat.
+An HDR photo stays HDR as a JPEG, a HEIC, and an AVIF: its gain map is compressed with the
+picture, turned and scaled like it, and written back with its description, so HDR screens
+still show the photo brighter and every other program shows the standard picture. For a JPEG
+that is Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC and an AVIF, the
+gain map as the standard (ISO 21496-1) stores it, which also goes from one of the two formats
+to the other. Elsewhere a gain map is not kept yet: in JPEG XL output, between JPEG and the
+other formats, and for a HEIC from an older iPhone, which stores it another way. Such a photo
+is compressed as its standard picture, and the report warns that the gain map was removed. A
+picture that is HDR by its transfer function alone (PQ or HLG, such as a 10-bit AVIF) is
+skipped, because read as a standard picture it would come out dark and flat.
 
 JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
 and upload forms that read nothing else. A picture with sharp colored edges (colored text and

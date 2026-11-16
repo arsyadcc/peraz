@@ -6,6 +6,7 @@
 //! cancelled by stopping the process.
 
 pub mod apng;
+pub mod avif;
 pub mod batch;
 pub mod compress;
 pub mod epub;
