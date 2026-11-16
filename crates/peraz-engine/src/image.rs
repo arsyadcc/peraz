@@ -207,12 +207,29 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
         .with_guessed_format()
         .map_err(|e| format!("cannot read {name}: {e}"))?;
     let mut decoded = decode_reader(reader, name)?;
+    let mut converted_from_cmyk = false;
+    // A CMYK JPEG's inks mean what its profile says: converted through it, the pixels are
+    // sRGB. Without one, the decoder's plain conversion stands.
+    if let Some(profile) = crate::metadata::jpeg_profile(bytes)
+        .filter(|profile| profile_color_space(profile) == Some(*b"CMYK"))
+        && let Some(mut pixels) = cmyk_jpeg_to_srgb(bytes, &profile)
+    {
+        // The picture was already turned upright once: do the same to the new pixels.
+        let orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes))
+            .and_then(|mut decoder| decoder.orientation())
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        pixels.apply_orientation(orientation);
+        decoded.image = pixels;
+        decoded.icc = None;
+        converted_from_cmyk = true;
+    }
     if bytes.starts_with(&[0xFF, 0xD8]) {
         // A JPEG's segments are read here, to get the Photoshop resources (IPTC) too.
         decoded.metadata = Metadata::from_jpeg(bytes);
         // The decoder finds no profile when its parts are numbered from 0.
-        if decoded.icc.is_none() {
-            decoded.icc = crate::metadata::jpeg_profile(bytes);
+        if decoded.icc.is_none() && !converted_from_cmyk {
+            decoded.icc = crate::metadata::jpeg_profile(bytes)
+                .filter(|profile| profile_fits(profile, decoded.image.color()));
         }
         decoded.gain_map = crate::metadata::has_gain_map(bytes);
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
@@ -233,11 +250,77 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
     Ok(Decoded {
+        // A profile for other kinds of pixels (CMYK on RGB) would give wrong colors.
+        icc: icc.filter(|profile| profile_fits(profile, image.color())),
         image,
-        icc,
         metadata,
         gain_map: false,
     })
+}
+
+/// The color space an ICC profile is for (`RGB `, `GRAY`, `CMYK`, …), from its header.
+fn profile_color_space(icc: &[u8]) -> Option<[u8; 4]> {
+    icc.get(16..20)?.try_into().ok()
+}
+
+/// Whether a color profile can describe pixels of this kind: an RGB profile for color
+/// pictures, a gray one for gray pictures. A profile of a kind this cannot tell is kept.
+fn profile_fits(icc: &[u8], pixels: image::ColorType) -> bool {
+    let gray = pixels.channel_count() <= 2;
+    match profile_color_space(icc).as_ref() {
+        Some(b"RGB ") => !gray,
+        Some(b"GRAY") => gray,
+        Some(b"CMYK") => false,
+        _ => true,
+    }
+}
+
+/// Decodes a CMYK (or YCCK) JPEG to its ink values and converts them to sRGB through the
+/// JPEG's CMYK profile. `None` when the file is not CMYK or cannot be converted.
+fn cmyk_jpeg_to_srgb(jpeg: &[u8], profile: &[u8]) -> Option<DynamicImage> {
+    // Files with an Adobe segment store the inks inverted (255 is no ink).
+    let inverted = jpeg
+        .windows(9)
+        .take(64 * 1024)
+        .any(|w| w == b"\xFF\xEE\x00\x0EAdobe");
+    // mozjpeg reports some failures by panicking.
+    let decoded = std::panic::catch_unwind(|| {
+        let decoder = mozjpeg::Decompress::new_mem(jpeg).ok()?;
+        if !matches!(
+            decoder.color_space(),
+            mozjpeg::ColorSpace::JCS_CMYK | mozjpeg::ColorSpace::JCS_YCCK
+        ) {
+            return None;
+        }
+        let mut started = decoder.to_colorspace(mozjpeg::ColorSpace::JCS_CMYK).ok()?;
+        let size = (
+            u32::try_from(started.width()).ok()?,
+            u32::try_from(started.height()).ok()?,
+        );
+        let inks: Vec<u8> = started.read_scanlines::<u8>().ok()?;
+        started.finish().ok()?;
+        Some((size, inks))
+    })
+    .ok()??;
+    let ((width, height), mut inks) = decoded;
+    if inverted {
+        for ink in &mut inks {
+            *ink = 255 - *ink;
+        }
+    }
+    let source = moxcms::ColorProfile::new_from_slice(profile).ok()?;
+    let transform = source
+        .create_transform_8bit(
+            // Four channels: cyan, magenta, yellow, black.
+            moxcms::Layout::Rgba,
+            &moxcms::ColorProfile::new_srgb(),
+            moxcms::Layout::Rgb,
+            moxcms::TransformOptions::default(),
+        )
+        .ok()?;
+    let mut rgb = vec![0u8; inks.len() / 4 * 3];
+    transform.transform(&inks, &mut rgb).ok()?;
+    RgbImage::from_raw(width, height, rgb).map(DynamicImage::ImageRgb8)
 }
 
 /// The EXIF and XMP a decoder found in its file. Metadata that cannot be read is left out:

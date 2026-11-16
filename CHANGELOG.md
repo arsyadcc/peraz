@@ -114,6 +114,11 @@ between alpha versions.
   check the numbering (libjpeg, among others) found no profile and showed wide-gamut photos
   with wrong colors. The parts are numbered from 1 now, and JPEGs written by earlier versions
   are still read with their profile, so compressing them again repairs them.
+- CMYK JPEGs (from print workflows) came out with wrong colors: the pixels were converted to
+  RGB while the CMYK profile was written to the output unchanged. A CMYK or YCCK JPEG is now
+  converted to sRGB through its profile, or by the plain formula when it has none, and a color
+  profile that does not describe the pixels written (CMYK on RGB, gray on color) is never
+  embedded.
 - A grayscale JPEG stays grayscale instead of being stored as three-channel color.
 - With `--keep-metadata`, an orientation stated in the XMP packet (`tiff:Orientation`) is reset
   like the one in EXIF, so no viewer turns the picture a second time; and EXIF or XMP too large
