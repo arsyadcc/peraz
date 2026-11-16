@@ -72,7 +72,7 @@ background and report when it finishes.
 
 - `compressed`: `outcome.output` is the new file, `outcome.output_bytes` its size;
 - `kept_original`: no file written; `outcome.reason` is `not_smaller` or `already_within_target`;
-- `skipped` / `failed`: `outcome.message` says why (encrypted PDFs and DRM EPUBs are skipped, and
+- `skipped` / `failed`: `outcome.message` says why (PDFs that need a password, signed PDFs, and DRM EPUBs are skipped, and
   so are files Peraz made itself: `outcome.reason` `already_compressed`, `--recompress` to redo);
 - `cancelled`: stopped by Ctrl-C.
 

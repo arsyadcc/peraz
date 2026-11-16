@@ -165,6 +165,27 @@ An icon file (ICO, CUR, ICNS) keeps its format and every picture inside at its s
 flags do not apply to it, and with a `--format` that names a picture format it is skipped.
 `--quality highest` keeps every pixel of its pictures.
 
+## PDF files
+
+Peraz changes only the pictures inside a PDF; text, fonts, layout, links, and forms stay as they
+are. Some files and pictures are left alone on purpose:
+
+| What | What Peraz does | Why |
+| --- | --- | --- |
+| A PDF that needs a password to open | Skips it (`reason` `protected`). | It cannot be read, and Peraz never removes protection. |
+| A signed PDF: its form says so (`SigFlags`), or it holds a signature with a `ByteRange` | Skips it (`reason` `protected`). | A signature covers exact bytes of the file, so any rewrite breaks it. |
+| A PDF that opens without a password but restricts printing, copying, or changing | Compresses it, and encrypts the result the same way: the same restrictions, the same owner password, still no password to open. | The restrictions are the author's; they are never removed. |
+| A PDF/A (its metadata has `pdfaid:part`) | Compresses it, and writes it without object streams, with the kind of cross-reference data and the version it had, and with uncompressed metadata. | PDF/A-1 is PDF 1.4 and allows none of those. |
+| A linearized PDF (fast web view) | Compresses it; a warning says that the result is not linearized. | Peraz does not write linearized files yet. |
+| A picture with a color key (`Mask` with color values) | Keeps it exact. | Exactly those values are see-through; a palette or a JPEG would move them. |
+| A soft mask or stencil mask | Keeps it exact. | Its edges are the picture's outline. |
+| A picture blended with a matte color (its soft mask has `Matte`) | Recompresses it at its size, never scaled down. | The picture and its mask belong together pixel by pixel. |
+| A picture that takes more than 512 MB once decoded, or whose data expands beyond what its size holds | Leaves it as it is, with a warning. | A small file must not be able to ask for gigabytes of memory. |
+| CMYK, Lab, indexed, and spot-color pictures; JPEG 2000, JBIG2, and fax pictures; depths other than 8 bits | Leaves them as they are (counted as `skipped` in `document`). | Peraz does not rewrite these yet. |
+
+Before a new PDF is written, Peraz reads it back and compares the number of pages with the
+original. If it does not read back the same, the file fails and nothing is written.
+
 ## Environment variables
 
 | Variable | Description |

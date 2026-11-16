@@ -163,7 +163,7 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
 A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
-several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
+several pages, PDFs that need a password, signed PDFs, and DRM-protected EPUBs are skipped.
 
 ## Usage
 
@@ -327,8 +327,15 @@ to another format: with a `--format` for pictures it is skipped.
 
 PDF and EPUB files keep their text, layout, and links: only the pictures inside are
 recompressed (photos with mozjpeg, graphics as palette images), and a picture is replaced only
-when the new version is smaller. A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
-several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
+when the new version is smaller. DRM-protected EPUBs are skipped.
+
+Some PDFs must not be rewritten, and Peraz leaves them alone: one that needs a password to
+open, and one with a digital signature, which any change would break. A PDF that opens without
+a password but restricts printing, copying, or changing is compressed and keeps its encryption
+and every restriction. A PDF/A keeps the plain structure that standard asks for. Inside a PDF,
+pictures whose transparency depends on exact values or sizes stay exact, and before a new PDF
+is written, Peraz reads it back and checks that it has the same pages
+([details](docs/cli.md#pdf-files)).
 
 ### Target quality
 

@@ -89,6 +89,9 @@ between alpha versions.
 
 ### Changed
 
+- A PDF that opens without a password but restricts printing, copying, or changing is now
+  compressed: the result has the same encryption, the same owner password, and every
+  restriction. Before, it was skipped like a PDF that needs a password, which is still skipped.
 - With `--target-size` (and the `discord`, `email`, `github`, and `whatsapp` recipes), a picture
   that would be larger than the size after the usual compression is now fitted to it. Before,
   the size applied to videos only.
@@ -108,6 +111,18 @@ between alpha versions.
 
 ### Fixed
 
+- PDF: a signed PDF was rewritten, which broke its signature; it is now skipped (`reason`
+  `protected`). A PDF/A lost its conformance (object streams, a raised version, compressed
+  metadata); it now keeps the structure PDF/A-1 asks for. A linearized PDF loses fast web view
+  as before, and a warning now says so.
+- PDF: a picture with a color key (`Mask` with color values) could become a palette image or a
+  JPEG, which broke its transparency; it now stays exact. A picture blended with a matte color
+  could be scaled down while its soft mask was not; it now keeps its size.
+- PDF: a picture whose data expands far beyond its size could use gigabytes of memory. A
+  picture over 512 MB decoded, or with more data than its size holds, is left as it is, with a
+  warning.
+- PDF: before a new PDF is written, it is read back and its page count compared with the
+  original's.
 - A GIF compressed to a GIF lost its timing: every frame got the same delay, and a GIF meant to
   play once (or a set number of times) looped forever. Peraz now reads GIFs itself: each frame
   keeps its own delay and the loop count is kept. This also means a GIF is compressed without

@@ -4,6 +4,10 @@
 //! indexed (palette) images when a palette holds their quality, and JPEG otherwise. A picture is
 //! replaced only when the new version is smaller. Afterwards unused objects are removed and the
 //! file is written with compressed object streams.
+//!
+//! Some documents are not rewritten at all (signed ones, and ones that need a password), and
+//! some keep what they need: a PDF/A its plain structure, a PDF with permission restrictions
+//! its encryption and restrictions.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -19,20 +23,47 @@ use crate::image::{encode_jpeg_plain, quantize};
 /// Why a PDF was not rewritten.
 #[derive(Debug)]
 pub enum DocumentError {
-    /// Encrypted or DRM-protected: Peraz never touches those.
+    /// Encrypted, DRM-protected, or signed: Peraz never touches those.
     Protected(String),
     Failed(String),
 }
 
-/// Recompresses the pictures of the PDF at `input`. Returns the new file and what happened.
+/// The most a picture may take once decoded: 512 MB, which is far more than a page scanned for
+/// print needs. A larger one is left as it is, so that a small file cannot ask for gigabytes.
+const MAX_PICTURE_BYTES: u64 = 512_000_000;
+
+/// Recompresses the pictures of the PDF at `input`. Returns the new file, what happened to the
+/// pictures, and what the report should warn about.
 pub fn compress_pdf(
     input: &Path,
     plan: &DocumentPlan,
-) -> Result<(Vec<u8>, DocumentStats), DocumentError> {
+) -> Result<(Vec<u8>, DocumentStats, Vec<String>), DocumentError> {
     let mut doc = Document::load(input)
         .map_err(|e| DocumentError::Failed(format!("cannot read the PDF: {e}")))?;
-    if doc.is_encrypted() || doc.was_encrypted() {
-        return Err(DocumentError::Protected("the PDF is encrypted".to_owned()));
+    // A PDF that opens without a password is decrypted on loading; one that is still encrypted
+    // here needs a password.
+    if doc.is_encrypted() {
+        return Err(DocumentError::Protected(
+            "the PDF needs a password to open".to_owned(),
+        ));
+    }
+    if is_signed(&doc) {
+        return Err(DocumentError::Protected(
+            "the PDF is digitally signed, and changing it would break the signature".to_owned(),
+        ));
+    }
+    // Restrictions (on printing, copying, changing) come with encryption under an empty
+    // password: the result gets the same encryption, with the same restrictions.
+    let protection = doc.encryption_state.clone();
+    let archival = is_pdf_a(&doc);
+    let pages = doc.get_pages().len();
+    let mut warnings = Vec::new();
+    if doc.linearization.is_some() {
+        warnings.push(
+            "the PDF was made for fast web view (linearized); the result is not, so a browser \
+             shows it only once the whole file has loaded"
+                .to_owned(),
+        );
     }
     let masks = mask_targets(&doc);
     let images: Vec<ObjectId> = doc
@@ -55,22 +86,136 @@ pub fn compress_pdf(
             continue;
         };
         let color = resolve_color(&doc, &stream.dict);
-        match recompress(stream, color, plan) {
+        let keep_size = has_matte(&doc, &stream.dict);
+        match recompress(stream, color, keep_size, plan) {
             Picture::Replace(new) => {
                 stats.recompressed += 1;
                 doc.objects.insert(id, Object::Stream(new));
             }
             Picture::Kept => stats.kept += 1,
             Picture::Skipped => stats.skipped += 1,
+            Picture::Refused(why) => {
+                stats.skipped += 1;
+                warnings.push(why);
+            }
         }
     }
 
     doc.prune_objects();
+    if archival {
+        // PDF/A wants its metadata readable without decompressing anything.
+        for object in doc.objects.values_mut() {
+            if let Object::Stream(stream) = object
+                && stream.dict.has_type(b"Metadata")
+            {
+                stream.allows_compression = false;
+            }
+        }
+    }
     doc.compress();
+    if let Some(state) = &protection {
+        doc.encrypt(state)
+            .map_err(|e| DocumentError::Failed(format!("cannot encrypt the PDF again: {e}")))?;
+    }
     let mut out = Vec::new();
-    doc.save_modern(&mut out)
-        .map_err(|e| DocumentError::Failed(format!("cannot write the PDF: {e}")))?;
-    Ok((out, stats))
+    // PDF/A-1 is PDF 1.4: it has neither object streams nor cross-reference streams, so a
+    // PDF/A is written in the plain structure every part of the standard allows.
+    let saved = if archival {
+        doc.save_to(&mut out)
+    } else {
+        doc.save_modern(&mut out)
+    };
+    saved.map_err(|e| DocumentError::Failed(format!("cannot write the PDF: {e}")))?;
+    read_back(&out, pages)?;
+    Ok((out, stats, warnings))
+}
+
+/// Checks the new file before it takes anyone's place: it must load, with as many pages as
+/// the original.
+fn read_back(bytes: &[u8], pages: usize) -> Result<(), DocumentError> {
+    let failed = |what: String| {
+        DocumentError::Failed(format!(
+            "the new PDF {what}; nothing was written, and the original is as it was"
+        ))
+    };
+    let doc = Document::load_mem(bytes).map_err(|e| failed(format!("does not read back: {e}")))?;
+    let found = doc.get_pages().len();
+    if found == pages {
+        Ok(())
+    } else {
+        Err(failed(format!(
+            "has {found} pages where the original has {pages}"
+        )))
+    }
+}
+
+/// The document carries a digital signature: its form says so (`SigFlags`), or a signature
+/// with the byte range it covers is somewhere in it. Any rewrite moves those bytes.
+fn is_signed(doc: &Document) -> bool {
+    let flags = doc
+        .catalog()
+        .ok()
+        .and_then(|catalog| catalog.get(b"AcroForm").ok())
+        .and_then(|form| match form {
+            Object::Reference(id) => doc.get_dictionary(*id).ok(),
+            other => other.as_dict().ok(),
+        })
+        .and_then(|form| form.get(b"SigFlags").and_then(Object::as_i64).ok())
+        .unwrap_or(0);
+    // Bit 1: signatures exist. Bit 2: the file may only be appended to, because of them.
+    flags & 3 != 0 || doc.objects.values().any(holds_signature)
+}
+
+/// A signature dictionary (one with a `ByteRange`) is in this object, at any depth.
+fn holds_signature(object: &Object) -> bool {
+    let in_dict = |dict: &Dictionary| {
+        dict.has(b"ByteRange") || dict.iter().any(|(_, value)| holds_signature(value))
+    };
+    match object {
+        Object::Dictionary(dict) => in_dict(dict),
+        Object::Stream(stream) => in_dict(&stream.dict),
+        Object::Array(items) => items.iter().any(holds_signature),
+        _ => false,
+    }
+}
+
+/// The document says it is a PDF/A (an archival PDF): its metadata has a `pdfaid:part`.
+fn is_pdf_a(doc: &Document) -> bool {
+    let Some(metadata) = doc
+        .catalog()
+        .ok()
+        .and_then(|catalog| catalog.get(b"Metadata").ok())
+        .and_then(|metadata| match metadata {
+            Object::Reference(id) => doc.get_object(*id).ok(),
+            other => Some(other),
+        })
+        .and_then(|metadata| metadata.as_stream().ok())
+    else {
+        return false;
+    };
+    let text = if metadata.dict.has(b"Filter") {
+        // Metadata is small; a limit keeps a crafted one from growing without end.
+        match metadata.decompressed_content_with_limit(16_000_000) {
+            Ok(text) => text,
+            Err(_) => return false,
+        }
+    } else {
+        metadata.content.clone()
+    };
+    let mark = b"pdfaid:part";
+    text.windows(mark.len()).any(|window| window == mark)
+}
+
+/// The picture was blended with a matte color, which its soft mask names (`Matte`): then the
+/// picture and the mask belong together pixel by pixel, and must keep the same size.
+fn has_matte(doc: &Document, dict: &Dictionary) -> bool {
+    let mask = match dict.get(b"SMask") {
+        Ok(Object::Reference(id)) => doc.get_object(*id).ok(),
+        Ok(other) => Some(other),
+        Err(_) => None,
+    };
+    mask.and_then(|mask| mask.as_stream().ok())
+        .is_some_and(|mask| mask.dict.has(b"Matte"))
 }
 
 /// Pictures used as another picture's `SMask` or `Mask`.
@@ -137,9 +282,17 @@ enum Picture {
     Kept,
     /// Left alone.
     Skipped,
+    /// Left alone for a reason worth telling: a warning for the report.
+    Refused(String),
 }
 
-fn recompress(stream: &Stream, color: Option<Components>, plan: &DocumentPlan) -> Picture {
+/// `keep_size`: the picture must stay the size it is.
+fn recompress(
+    stream: &Stream,
+    color: Option<Components>,
+    keep_size: bool,
+    plan: &DocumentPlan,
+) -> Picture {
     let dict = &stream.dict;
     let Some(components) = color else {
         return Picture::Skipped;
@@ -150,6 +303,11 @@ fn recompress(stream: &Stream, color: Option<Components>, plan: &DocumentPlan) -
         .and_then(Object::as_i64)
         .unwrap_or(0);
     if flag(b"ImageMask") || bits != 8 || dict.has(b"Decode") {
+        return Picture::Skipped;
+    }
+    // A color key (`Mask` as an array of values) makes exactly those values see-through: a
+    // palette or a JPEG moves them, so the picture is kept exact.
+    if dict.get(b"Mask").is_ok_and(|mask| mask.as_array().is_ok()) {
         return Picture::Skipped;
     }
     let filters: Vec<Vec<u8>> = stream
@@ -163,17 +321,22 @@ fn recompress(stream: &Stream, color: Option<Components>, plan: &DocumentPlan) -
         .as_slice()
     {
         [b"DCTDecode"] => decode_jpeg(&stream.content, components),
-        [] | [b"FlateDecode"] => decode_raw(stream, components),
+        [] | [b"FlateDecode"] => match decode_raw(stream, components) {
+            Ok(picture) => picture,
+            Err(why) => return Picture::Refused(why),
+        },
         _ => None, // JPEG 2000, JBIG2, CCITT, chained filters
     };
     let Some(mut picture) = decoded else {
         return Picture::Skipped;
     };
-    if let Some((w, h)) = fit_within(
-        (picture.width(), picture.height()),
-        plan.max_image_side,
-        plan.max_image_side,
-    ) {
+    if !keep_size
+        && let Some((w, h)) = fit_within(
+            (picture.width(), picture.height()),
+            plan.max_image_side,
+            plan.max_image_side,
+        )
+    {
         picture = picture.resize_exact(w, h, FilterType::Lanczos3);
     }
     let photo = filters.first().is_some_and(|f| f == b"DCTDecode");
@@ -199,20 +362,56 @@ fn decode_jpeg(bytes: &[u8], components: Components) -> Option<DynamicImage> {
     }
 }
 
-fn decode_raw(stream: &Stream, components: Components) -> Option<DynamicImage> {
-    let width = u32::try_from(stream.dict.get(b"Width").and_then(Object::as_i64).ok()?).ok()?;
-    let height = u32::try_from(stream.dict.get(b"Height").and_then(Object::as_i64).ok()?).ok()?;
+/// Decodes an uncompressed or Flate picture. `Ok(None)` when its data does not make a picture;
+/// `Err` with a warning when it asks for more memory than a picture should.
+fn decode_raw(stream: &Stream, components: Components) -> Result<Option<DynamicImage>, String> {
+    let side = |key: &[u8]| {
+        stream
+            .dict
+            .get(key)
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    let (Some(width), Some(height)) = (side(b"Width"), side(b"Height")) else {
+        return Ok(None);
+    };
+    let channels = match components {
+        Components::Gray => 1,
+        Components::Rgb => 3,
+    };
+    let needed = u64::from(width) * u64::from(height) * channels;
+    if needed > MAX_PICTURE_BYTES {
+        return Err(format!(
+            "a {width}x{height} picture was left as it is: decoding it takes more than {} MB",
+            MAX_PICTURE_BYTES / 1_000_000
+        ));
+    }
     let pixels = if stream.filters().map_or(true, |f| f.is_empty()) {
         stream.content.clone()
     } else {
-        stream.decompressed_content().ok()?
+        // No more than the picture holds, with room for the tag byte a predictor puts before
+        // each row and for padding at the end.
+        let limit = usize::try_from(needed + u64::from(height) + 65_536).unwrap_or(usize::MAX);
+        match stream.decompressed_content_with_limit(limit) {
+            Ok(pixels) => pixels,
+            Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
+                ..
+            })) => {
+                return Err(format!(
+                    "a {width}x{height} picture was left as it is: its data expands to more \
+                     data than a picture of that size holds"
+                ));
+            }
+            Err(_) => return Ok(None),
+        }
     };
-    match components {
+    Ok(match components {
         Components::Gray => {
             GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8)
         }
         Components::Rgb => RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8),
-    }
+    })
 }
 
 /// The picture's dictionary with new dimensions, ready for new content.
@@ -382,7 +581,8 @@ mod tests {
         let path = dir.join("sample.pdf");
         let original = sample_pdf();
         std::fs::write(&path, &original).unwrap();
-        let (out, stats) = compress_pdf(&path, &plan()).unwrap();
+        let (out, stats, warnings) = compress_pdf(&path, &plan()).unwrap();
+        assert_eq!(warnings, Vec::<String>::new());
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(stats.images, 3);
@@ -426,11 +626,12 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_pdfs_are_left_alone() {
+    fn a_pdf_with_broken_encryption_is_left_alone() {
         let dir = std::env::temp_dir().join(format!("peraz-pdf-enc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("locked.pdf");
         let mut doc = Document::load_mem(&sample_pdf()).unwrap();
+        // An encryption dictionary without the values a password is checked against.
         let encrypt = doc.add_object(dictionary! { "Filter" => "Standard", "V" => 1, "R" => 2 });
         doc.trailer.set("Encrypt", encrypt);
         let mut bytes = Vec::new();
@@ -445,5 +646,27 @@ mod tests {
             ),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_result_that_does_not_read_back_is_refused() {
+        let good = sample_pdf();
+        assert!(read_back(&good, 1).is_ok());
+        // Another number of pages, or a file that does not load: nothing may be written.
+        let Err(DocumentError::Failed(message)) = read_back(&good, 2) else {
+            panic!("a page went missing unnoticed")
+        };
+        assert!(
+            message.contains("1 pages where the original has 2") && message.contains("original"),
+            "{message}"
+        );
+        assert!(matches!(
+            read_back(&good[..good.len() / 2], 1),
+            Err(DocumentError::Failed(_))
+        ));
+        assert!(matches!(
+            read_back(b"not a PDF", 1),
+            Err(DocumentError::Failed(_))
+        ));
     }
 }

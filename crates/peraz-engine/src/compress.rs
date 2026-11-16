@@ -820,9 +820,9 @@ fn make_document(
     let result = if info.kind == MediaKind::Pdf {
         crate::pdf::compress_pdf(&job.input, &plan)
     } else {
-        crate::epub::compress_epub(&job.input, &plan)
+        crate::epub::compress_epub(&job.input, &plan).map(|(bytes, stats)| (bytes, stats, vec![]))
     };
-    let (bytes, stats) = match result {
+    let (bytes, stats, warnings) = match result {
         Ok(done) => done,
         Err(crate::pdf::DocumentError::Protected(why)) => {
             return Outcome::Skipped {
@@ -837,6 +837,7 @@ fn make_document(
         stats.recompressed, stats.images
     ));
     report.document = Some(stats);
+    report.warnings.extend(warnings);
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
