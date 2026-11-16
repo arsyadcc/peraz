@@ -32,6 +32,8 @@ libdeflater = { version = "1", default-features = false }
 png = "0.18"
 # TIFF output; the same crate `image` reads TIFF with.
 tiff = "0.11"
+# Marks results as made by Peraz, in an extended attribute (macOS, Linux).
+xattr = "1"
 # Tests only: renders an SVG before and after minifying, to check that the picture is the same.
 resvg = { version = "0.50", default-features = false }
 webp = { version = "0.3", default-features = false }

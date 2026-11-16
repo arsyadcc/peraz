@@ -126,7 +126,7 @@ What happened to one input, in `compress` results and `watch` lines.
 | `outcome.status` | string | One of `compressed`, `kept_original`, `skipped`, `failed`, `cancelled`. |
 | `outcome.output` | string | `compressed` only: the file written. |
 | `outcome.output_bytes` | integer | `compressed` only: its size. |
-| `outcome.reason` | string | `kept_original` only. One of `not_smaller`, `already_within_target`. |
+| `outcome.reason` | string | `kept_original` and `skipped` only. One of `not_smaller`, `already_within_target`, `unsupported`, `already_compressed`, `output_exists`, `protected`. The first two belong to `kept_original`. For `skipped`: `unsupported` means Peraz cannot compress this file, or not into the format asked for; `already_compressed`, that Peraz made the file and it has not changed since; `output_exists`, that `peraz watch` found the result already there; `protected`, an encrypted PDF or an EPUB with DRM. |
 | `outcome.compressed_bytes` | integer | `not_smaller` only: the size of the discarded result. |
 | `outcome.target_bytes` | integer | `already_within_target` only: the `--target-size`. |
 | `outcome.message` | string | `skipped` and `failed` only: why, as text. |

@@ -192,6 +192,7 @@ fn run(input: &Path, output: OutputTarget, recipe: Recipe) -> Report {
         output,
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     compress(
         None,
@@ -327,7 +328,7 @@ fn an_ico_keeps_every_size_and_shrinks_its_large_pictures() {
     let mut recipe = Recipe::default();
     recipe.image.format = ImageFormat::Png;
     let report = run(&input, OutputTarget::File(dir.0.join("out.png")), recipe);
-    let Outcome::Skipped { message } = &report.outcome else {
+    let Outcome::Skipped { message, .. } = &report.outcome else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("not converted to png"), "{message}");

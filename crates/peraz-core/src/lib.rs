@@ -23,7 +23,7 @@ pub use recipe::{
 };
 pub use report::{
     DocumentStats, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan, Report,
-    Score,
+    Score, SkipReason,
 };
 
 /// Peraz version, taken from the workspace manifest.

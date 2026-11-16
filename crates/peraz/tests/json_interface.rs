@@ -370,6 +370,7 @@ fn documented_values_are_complete() {
             compressed_bytes: 0,
         }),
         Outcome::Skipped {
+            reason: peraz_core::SkipReason::AlreadyCompressed,
             message: String::new(),
         },
         Outcome::Failed {
@@ -390,10 +391,16 @@ fn documented_values_are_complete() {
         KeepReason::AlreadyWithinTarget { target_bytes: 0 },
     ]
     .map(to_json);
-    assert_eq!(
-        names(&reasons, "reason"),
-        listed("Report", "outcome.reason")
-    );
+    let skips = [
+        peraz_core::SkipReason::Unsupported,
+        peraz_core::SkipReason::AlreadyCompressed,
+        peraz_core::SkipReason::OutputExists,
+        peraz_core::SkipReason::Protected,
+    ]
+    .map(to_json);
+    let mut all_reasons = names(&reasons, "reason");
+    all_reasons.extend(names(&skips, "reason"));
+    assert_eq!(all_reasons, listed("Report", "outcome.reason"));
 
     let kinds = [
         MediaKind::Video,

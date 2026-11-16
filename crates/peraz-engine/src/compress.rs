@@ -13,9 +13,9 @@ use peraz_core::plan::fit_within;
 use peraz_core::units::format_bytes;
 use peraz_core::{
     Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
-    Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput,
-    plan_animated, plan_animated_jxl, plan_apng, plan_document, plan_gif, plan_image, plan_trim,
-    plan_video, wants_apng,
+    Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, SkipReason, TrimMethod,
+    VideoOutput, plan_animated, plan_animated_jxl, plan_apng, plan_document, plan_gif, plan_image,
+    plan_trim, plan_video, wants_apng,
 };
 
 use crate::batch::{Batch, Lane};
@@ -114,6 +114,17 @@ pub fn compress_observed(
     report.outcome = if cancel.load(Ordering::SeqCst) {
         observer.started(None);
         Outcome::Cancelled
+    } else if !job.recompress && crate::mark::is_current(&job.input) {
+        // A result Peraz made, unchanged since: compressing it again would only cost time and
+        // quality.
+        observer.started(None);
+        report.input_bytes = std::fs::metadata(&job.input).ok().map(|m| m.len());
+        Outcome::Skipped {
+            reason: SkipReason::AlreadyCompressed,
+            message: "Peraz made this file and it has not changed since; use --recompress to \
+                      compress it again"
+                .to_owned(),
+        }
     } else {
         match probe_input(tools, &job.input) {
             Ok(info) => {
@@ -136,8 +147,13 @@ pub fn compress_observed(
             }
         }
     };
-    if !matches!(report.outcome, Outcome::Compressed { .. }) {
-        batch.release(&job.input);
+    match &report.outcome {
+        // A clip that was only cut is not a compressed result.
+        Outcome::Compressed { output, .. } if !matches!(report.plan, Some(Plan::Trim(_))) => {
+            crate::mark::mark(output);
+        }
+        Outcome::Compressed { .. } => {}
+        _ => batch.release(&job.input),
     }
     report.elapsed_seconds = started.elapsed().as_secs_f64();
     report
@@ -264,6 +280,7 @@ fn make_moving(
             batch, tools, caps, job, info, media, progress, cancel, report,
         ),
         other => Outcome::Skipped {
+            reason: SkipReason::Unsupported,
             message: format!("{} compression is not available yet", kind_name(other)),
         },
     }
@@ -384,6 +401,7 @@ fn make_image(
             | PlanError::IconConversion { .. }),
         ) => {
             return Outcome::Skipped {
+                reason: SkipReason::Unsupported,
                 message: e.to_string(),
             };
         }
@@ -569,7 +587,12 @@ fn make_svg(
         .and_then(|(text, gzip)| Ok((crate::svg::minify(&text, decimals)?, gzip)));
     let (text, gzip) = match minified {
         Ok(minified) => minified,
-        Err(SvgError::Unsupported(message)) => return Outcome::Skipped { message },
+        Err(SvgError::Unsupported(message)) => {
+            return Outcome::Skipped {
+                reason: SkipReason::Unsupported,
+                message,
+            };
+        }
         Err(SvgError::Invalid(message)) => {
             return failed(format!("{}: {message}", job.input.display()));
         }
@@ -648,6 +671,7 @@ fn multi_page_tiff(info: &MediaInfo, input: &Path) -> Option<Outcome> {
     }
     let pages = crate::tiff::page_count(input).filter(|pages| *pages > 1)?;
     Some(Outcome::Skipped {
+        reason: SkipReason::Unsupported,
         message: format!(
             "this TIFF holds {pages} pages, and Peraz compresses single pictures only; split \
              it into one file per page first"
@@ -740,6 +764,7 @@ fn make_document(
         Ok(done) => done,
         Err(crate::pdf::DocumentError::Protected(why)) => {
             return Outcome::Skipped {
+                reason: SkipReason::Protected,
                 message: format!("{why}; Peraz never changes protected files"),
             };
         }
@@ -1564,6 +1589,7 @@ fn choose_output(batch: &Batch, job: &Job, extension: &str) -> Result<PathBuf, O
     }
     if job.existing == ExistingOutput::Skip && first.exists() {
         return Err(Outcome::Skipped {
+            reason: SkipReason::OutputExists,
             message: format!("already compressed: {} exists", first.display()),
         });
     }
@@ -1620,6 +1646,7 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
             ExistingOutput::Replace => {}
             ExistingOutput::Skip => {
                 return Err(Outcome::Skipped {
+                    reason: SkipReason::OutputExists,
                     message: format!("already compressed: {} exists", output.display()),
                 });
             }

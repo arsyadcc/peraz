@@ -150,6 +150,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
                     output,
                     recipe: recipe.clone(),
                     existing: ExistingOutput::Skip,
+                    recompress: args.settings.recompress,
                 }
             };
             let reports = run_parallel(&files, workers.min(files.len()), true, |_, input| {

@@ -63,6 +63,7 @@ fn job(input: PathBuf, output: PathBuf, quality: Quality) -> Job {
             ..Recipe::default()
         },
         existing: peraz_core::ExistingOutput::Fail,
+        recompress: true,
     }
 }
 

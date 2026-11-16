@@ -397,7 +397,10 @@ already compressed pass). A GitHub Actions step:
 (including `--recipe`). A file is picked up once it has stopped changing for two seconds, so files
 still being copied or recorded are never read half-written. Files that were there before watching
 started are left alone unless you pass `--include-existing`, and a file whose output already exists
-is skipped, so restarting a watch never compresses anything twice. `--recursive` includes
+is skipped, so restarting a watch never compresses anything twice. Results are also marked as
+made by Peraz (in an extended attribute, without touching their contents), and marked files are
+skipped by `watch` and `compress` alike unless they changed or you pass `--recompress`.
+`--recursive` includes
 subfolders (mirrored inside `--out-dir`), and `--json` prints one JSON report per line. Stop with
 Ctrl-C.
 

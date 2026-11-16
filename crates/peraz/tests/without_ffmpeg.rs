@@ -329,6 +329,46 @@ fn metadata_is_kept_only_with_the_flag() {
 }
 
 #[test]
+fn a_result_is_skipped_the_second_time() {
+    let dir = setup("skip");
+    let first = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "jpeg",
+            "--out-dir",
+            "out",
+            "photo.png",
+        ],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let status = |args: &[&str]| {
+        let output = peraz(&dir.0, args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["results"][0]["outcome"].clone()
+    };
+    let again = status(&["compress", "--json", "--out-dir", "out", "out/photo-1.jpg"]);
+    if again["status"] != "skipped" {
+        // A file system that cannot hold the mark: results are compressed again, as before.
+        return;
+    }
+    assert_eq!(again["reason"], "already_compressed", "{again}");
+    assert!(!dir.0.join("out/photo-1-1.jpg").exists());
+    // On request it is compressed again (and kept or not, like any file).
+    let forced = status(&[
+        "compress",
+        "--json",
+        "--recompress",
+        "--out-dir",
+        "out",
+        "out/photo-1.jpg",
+    ]);
+    assert_ne!(forced["status"], "skipped", "{forced}");
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(

@@ -100,6 +100,7 @@ fn run(
         output: OutputTarget::File(output.to_owned()),
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     let caps = tools.map_or_else(Capabilities::default, |t| t.capabilities().unwrap());
     let report = compress(tools, &caps, &job, &mut |_| {}, &NOT_CANCELLED);

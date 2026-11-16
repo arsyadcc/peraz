@@ -35,6 +35,7 @@ fn run(input: &Path, output: &Path, recipe: Recipe) -> Report {
         output: OutputTarget::File(output.to_owned()),
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     compress(
         None,
@@ -235,7 +236,7 @@ fn a_tiff_with_several_pages_is_left_alone() {
         recipe.image.format = format;
         let output = dir.0.join("out.bin");
         let report = run(&input, &output, recipe);
-        let Outcome::Skipped { message } = &report.outcome else {
+        let Outcome::Skipped { message, .. } = &report.outcome else {
             panic!("unexpected outcome: {:?}", report.outcome)
         };
         assert!(message.contains("2 pages"), "{message}");

@@ -38,6 +38,7 @@ fn run(tools: Option<&Toolchain>, input: &Path, output: OutputTarget, recipe: Re
         output,
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     let caps = tools.map_or_else(Capabilities::default, |t| t.capabilities().unwrap());
     compress(tools, &caps, &job, &mut |_| {}, &NOT_CANCELLED)
@@ -462,6 +463,7 @@ fn an_animated_webp_becomes_an_animated_png_whatever_ffprobe_makes_of_it() {
             output: OutputTarget::File(dir.0.join(format!("{name}.apng"))),
             recipe,
             existing: ExistingOutput::Fail,
+            recompress: true,
         };
         let report = compress(
             Some(&tools),

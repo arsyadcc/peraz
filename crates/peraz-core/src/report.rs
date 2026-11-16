@@ -69,6 +69,9 @@ pub struct Job {
     pub recipe: Recipe,
     /// What to do when the output file already exists.
     pub existing: ExistingOutput,
+    /// Compress the input even when it is marked as a result Peraz made (and not changed
+    /// since); otherwise such a file is skipped.
+    pub recompress: bool,
 }
 
 /// What to do when a job's output file already exists.
@@ -101,12 +104,26 @@ pub enum Outcome {
     Compressed { output: PathBuf, output_bytes: u64 },
     /// Nothing was written; the original is the better file.
     KeptOriginal(KeepReason),
-    /// The input is valid but Peraz cannot compress this kind of file yet.
-    Skipped { message: String },
+    /// Nothing was done, on purpose: `reason` says which rule applied, `message` the details.
+    Skipped { reason: SkipReason, message: String },
     /// Something went wrong; nothing was written.
     Failed { message: String },
     /// Stopped by the user (Ctrl-C or a termination signal); nothing was written.
     Cancelled,
+}
+
+/// Why an input was skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Peraz cannot compress this kind of file, or not into the format asked for.
+    Unsupported,
+    /// The file is a result Peraz made and has not changed since.
+    AlreadyCompressed,
+    /// The result for this input already exists (watch folders).
+    OutputExists,
+    /// The file is protected (an encrypted PDF, an EPUB with DRM) and is never changed.
+    Protected,
 }
 
 /// The plan that was executed for one input.

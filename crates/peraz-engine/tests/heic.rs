@@ -67,6 +67,7 @@ fn run(env: &Env, input: &Path, output: &Path, recipe: Recipe) -> Report {
         output: OutputTarget::File(output.to_owned()),
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     compress(
         Some(&env.tools),
@@ -332,6 +333,7 @@ fn an_ffmpeg_without_the_encoder_says_so() {
         output: OutputTarget::File(env.dir.join("photo.heic")),
         recipe: to_heic(Quality::Balanced),
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     // The same FFmpeg, as if it had no encoders.
     let report = compress(

@@ -115,6 +115,11 @@ pub struct SettingsArgs {
     /// default it is removed; the color profile is always kept.
     #[arg(long)]
     pub keep_metadata: bool,
+
+    /// Also compress files that Peraz made itself. By default a result of an earlier run is
+    /// skipped, unless it was changed since.
+    #[arg(long)]
+    pub recompress: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -318,6 +323,7 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
             output,
             recipe: recipe.clone(),
             existing,
+            recompress: args.settings.recompress,
         }
     };
     let compress_one = |input: &PathBuf, observer: &mut dyn Observer| {
@@ -916,7 +922,7 @@ pub(crate) fn print_human(report: &Report) {
                 format_bytes(*target_bytes)
             );
         }
-        Outcome::Skipped { message } => println!("{input}\n  skipped: {message}"),
+        Outcome::Skipped { message, .. } => println!("{input}\n  skipped: {message}"),
         Outcome::Failed { message } => eprintln!("{input}: error: {message}"),
         Outcome::Cancelled => eprintln!("{input}: cancelled"),
     }

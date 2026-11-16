@@ -89,6 +89,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--no-audio` | | Remove all audio tracks. |
 | `--measure-quality` | | Measure every result against its source, also without a score target, and report it in `score`: VMAF for videos (on samples of videos over 30 seconds; needs FFmpeg with libvmaf, otherwise videos are not measured and a warning says so), SSIMULACRA2 for still images. Encoding does not change. Measuring takes extra time: about as long as compressing for videos, a fraction of a second per picture. |
 | `--keep-metadata` | | Keep the metadata of pictures: EXIF, XMP, and IPTC. That includes the GPS location, camera, and dates, so leave it out for pictures you share. Without it, all of this is removed. The color profile is kept either way, and so is the right way up: the pixels are stored upright and the orientation in the kept EXIF is reset. EXIF and XMP are kept in JPEG, PNG, WebP, HEIC, and JPEG XL; AVIF keeps the EXIF only, TIFF the XMP and IPTC but not the EXIF, and JPEG the IPTC too. BMP and GIF pictures hold no metadata. Videos, GIFs, animations, SVGs, icon files, and documents are not affected. |
+| `--recompress` | | Also compress files that Peraz made itself. Without it, a result of an earlier run is skipped (unless it was changed since): see [Output files](#output-files). |
 | `-j`, `--jobs` | number | How many files to work on at once. Default: one per logical core. |
 | `--json` | | Print [JSON](json.md) instead of text. |
 
@@ -137,6 +138,16 @@ Without `--output`, a result is written as `<name>-1.<ext>` next to the input (o
 and as `<name>-2.<ext>`, `<name>-3.<ext>`, … when that name is taken: existing files are never
 replaced. `--output` writes exactly the file given and replaces it only with `--force`. A result
 that is not smaller than the input is not kept, unless the format was changed on purpose.
+
+Every result is marked as made by Peraz, without changing its contents: in an extended attribute
+(`user.peraz.compressed`) on macOS and Linux, in an alternate data stream (`peraz.compressed`)
+on Windows. A marked file is skipped when it is given to `peraz compress` or found by `peraz
+watch` again, with `outcome.reason` `already_compressed` in the JSON output, so dropping the same
+folder twice does not compress results a second time. The mark holds the file's size and
+modification time: a result that was edited afterwards is compressed like any other file.
+`--recompress` compresses marked files too. Clips cut with `--trim-only` are not marked. On a
+file system without extended attributes, and after a copy that does not carry them (some sync
+and archive tools), nothing is marked and nothing is skipped.
 
 A TIFF with more than one page is skipped, whatever the format asked for: Peraz compresses
 single pictures, and would drop the other pages.

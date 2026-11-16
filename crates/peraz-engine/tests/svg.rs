@@ -262,6 +262,7 @@ fn run(input: &Path, output: OutputTarget, recipe: Recipe) -> Report {
         output,
         recipe,
         existing: ExistingOutput::Fail,
+        recompress: true,
     };
     compress(
         None,
@@ -330,7 +331,7 @@ fn an_svg_file_is_minified_and_stays_an_svg() {
     let mut recipe = Recipe::default();
     recipe.image.format = ImageFormat::Webp;
     let report = run(&input, OutputTarget::File(dir.0.join("out.webp")), recipe);
-    let Outcome::Skipped { message } = &report.outcome else {
+    let Outcome::Skipped { message, .. } = &report.outcome else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("not converted to webp"), "{message}");
@@ -392,7 +393,7 @@ fn files_that_are_not_minified_say_why() {
         OutputTarget::File(dir.0.join("latin-1.svg")),
         Recipe::default(),
     );
-    let Outcome::Skipped { message } = &report.outcome else {
+    let Outcome::Skipped { message, .. } = &report.outcome else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("only UTF-8"), "{message}");

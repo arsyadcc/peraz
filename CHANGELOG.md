@@ -20,6 +20,14 @@ between alpha versions.
   PNG, WebP, HEIC, and JPEG XL; AVIF keeps the EXIF, TIFF the XMP and IPTC, and JPEG the IPTC
   too. A JPEG recompressed losslessly into JPEG XL keeps its metadata whole. **Interface:** new
   flag and recipe key; `settings.keep_metadata` in `peraz recipe show --json`.
+- Results are marked as made by Peraz, and a marked file is skipped instead of being compressed
+  a second time: by `peraz compress` when the same folder is given again, and by `peraz watch`.
+  The mark does not change the file's contents: it is an extended attribute on macOS and Linux
+  and an alternate data stream on Windows, and it holds the file's size and modification time,
+  so a result that was edited afterwards is compressed again. `--recompress` compresses marked
+  files too. Without a file system that can hold the mark, nothing changes. **Interface:** new
+  flag `--recompress`; skipped results have `outcome.reason` in `--json` and `--events`:
+  `unsupported`, `already_compressed`, `output_exists`, or `protected`.
 - HEIC output: `--format heic` (recipe value `heic`, also spelled `heif`) writes a HEIC from
   any still picture, with its color profile, its transparency (as an alpha picture, the way
   Apple's software stores it), and any size, odd ones included. FFmpeg encodes the picture with
