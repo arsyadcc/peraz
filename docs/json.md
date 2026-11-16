@@ -244,3 +244,4 @@ makes it 1.
 | `settings.fps` | integer | |
 | `settings.measure_quality` | boolean | |
 | `settings.keep_metadata` | boolean | |
+| `settings.keep_dimensions` | boolean | |

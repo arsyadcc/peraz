@@ -13,7 +13,8 @@
 //! codec = "h264"                   # video codec: h264, hevc (default: h264, hevc for HDR)
 //! encoder = "auto"                 # auto, software, hardware
 //! no_audio = false
-//! target_size = "25MB"             # SI units; videos only
+//! target_size = "25MB"             # SI units; videos, and pictures without a score target
+//! keep_dimensions = false          # with target_size: never make a picture smaller in pixels
 //! target_vmaf = 93                 # videos: smallest file with this VMAF score
 //! target_ssimulacra2 = 80          # still images: smallest file with this SSIMULACRA2 score
 //! measure_quality = false          # score every result (VMAF, SSIMULACRA2), even without a target
@@ -68,6 +69,8 @@ pub struct Settings {
     pub measure_quality: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_metadata: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_dimensions: Option<bool>,
 }
 
 fn current_version() -> u32 {
@@ -92,6 +95,7 @@ impl Default for Settings {
             fps: None,
             measure_quality: None,
             keep_metadata: None,
+            keep_dimensions: None,
         }
     }
 }
@@ -249,6 +253,7 @@ impl Settings {
             fps: self.fps.or(below.fps),
             measure_quality: self.measure_quality.or(below.measure_quality),
             keep_metadata: self.keep_metadata.or(below.keep_metadata),
+            keep_dimensions: self.keep_dimensions.or(below.keep_dimensions),
         }
     }
 
@@ -285,6 +290,8 @@ impl Settings {
                 max_height: self.max_height,
                 target_ssimulacra2: self.target_ssimulacra2,
                 keep_metadata: self.keep_metadata.unwrap_or(false),
+                target_bytes,
+                keep_dimensions: self.keep_dimensions.unwrap_or(false),
             },
             gif: GifRecipe { fps: self.fps },
             clip: Clip {
@@ -472,10 +479,15 @@ mod tests {
             target_size: Some("8MB".into()),
             measure_quality: Some(true),
             keep_metadata: Some(true),
+            keep_dimensions: Some(true),
             ..Settings::default()
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()).unwrap(), settings);
         let recipe = settings.to_recipe(None, None).unwrap();
         assert!(recipe.measure_quality && recipe.image.keep_metadata);
+        // The size applies to videos and to pictures alike.
+        assert_eq!(recipe.video.target_bytes, Some(8_000_000));
+        assert_eq!(recipe.image.target_bytes, Some(8_000_000));
+        assert!(recipe.image.keep_dimensions);
     }
 }

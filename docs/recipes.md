@@ -25,7 +25,8 @@ max_height = 2000
 | `codec` | string | `h264`, `hevc` | `--codec` |
 | `encoder` | string | `auto`, `software`, `hardware` | `--encoder` |
 | `no_audio` | boolean | `true` removes all audio tracks. | `--no-audio` |
-| `target_size` | string | A size such as `"25MB"` (SI units). Videos only. | `--target-size` |
+| `target_size` | string | A size such as `"25MB"` (SI units). Videos, and still pictures unless `target_ssimulacra2` is set. | `--target-size` |
+| `keep_dimensions` | boolean | With `target_size`: `true` never scales a picture down to fit. | `--keep-dimensions` |
 | `target_vmaf` | integer | 1–100. Videos only; not with `target_size`. | `--target-vmaf` |
 | `target_ssimulacra2` | integer | 1–100. Still images only. | `--target-ssimulacra2` |
 | `fps` | integer | 1–50. GIFs and animated WebP/AVIF. | `--fps` |
@@ -58,7 +59,8 @@ line override the recipe's values.
 
 These built-in recipes fit each video under a service's upload limit with `target_size`, so the
 video is shrunk only as far as it has to be. The limit is per file: send several files to one
-email and their total counts. Pictures get the usual compression and are not fitted to the limit.
+email and their total counts. Pictures get the usual compression, and one that would still be
+over the limit is fitted to it.
 Limits change; these were checked on 2026-11-14.
 
 | Recipe | Target | Limit it fits | Source |

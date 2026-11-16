@@ -161,6 +161,15 @@ pub struct ImageRecipe {
     /// output format can hold it.
     #[serde(default)]
     pub keep_metadata: bool,
+    /// Fit the output in this many bytes (SI): the quality is lowered first, and the picture
+    /// is made smaller only when that is not enough. A score target takes its place when both
+    /// are set.
+    #[serde(default)]
+    pub target_bytes: Option<u64>,
+    /// With `target_bytes`: never make the picture smaller in pixels; fail when lower quality
+    /// alone cannot fit.
+    #[serde(default)]
+    pub keep_dimensions: bool,
 }
 
 /// Everything that decides how a file is compressed.

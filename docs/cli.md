@@ -83,7 +83,8 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--duration` | time | Use at most this much of a video. |
 | `--trim-only` | | Only cut the clip, without compressing: the streams are copied when the start is on a keyframe. |
 | `--snap-to-keyframe` | | With `--trim-only`: move the start back to the keyframe so the clip can always be copied. |
-| `--target-size` | size | Fit each video in this size, e.g. `25MB` (SI units: 1 MB = 1,000,000 bytes). Replaces `--quality` for videos. |
+| `--target-size` | size | Fit each video and each still picture in this size, e.g. `25MB` or `500kB` (SI units: 1 MB = 1,000,000 bytes). Replaces `--quality` for videos. A picture gets the usual compression when that fits; otherwise its quality is lowered, down to a floor below which pictures look broken, and only then is it scaled down, step by step, until it fits. The result's real size is checked, and when nothing fits the file fails and the original stays. Applies to JPEG, PNG, WebP, AVIF, HEIC, and JPEG XL output. A TIFF is lossless, so it either fits as it is or fails with a message that says the size needs a lossy format. Animations, SVGs, icon files, PDFs, and EPUBs are not fitted to a size, and neither are pictures when `--target-ssimulacra2` is given. |
+| `--keep-dimensions` | | With `--target-size`: never scale a picture down. When lower quality alone cannot fit the size, the file fails with a message that says how small it got. |
 | `--target-vmaf` | 1–100 | Make each video as small as it can be while it still scores this VMAF. Replaces `--quality` for videos. Needs FFmpeg with libvmaf and a software encoder; cannot be combined with `--target-size`. |
 | `--target-ssimulacra2` | 1–100 | Make each still image as small as it can be while it still scores this SSIMULACRA2. Replaces `--quality` for still images. |
 | `--no-audio` | | Remove all audio tracks. |

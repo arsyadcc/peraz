@@ -84,8 +84,9 @@ pub struct SettingsArgs {
     #[arg(long, requires = "trim_only")]
     pub snap_to_keyframe: bool,
 
-    /// Fit each video in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB = 1,000,000 bytes).
-    /// Replaces --quality for videos; the result is verified and never larger than the target.
+    /// Fit each video and each picture in this size, e.g. 25MB, 8MB, 500kB (SI units: 1 MB =
+    /// 1,000,000 bytes). Replaces --quality for videos; a picture is encoded at lower quality,
+    /// then scaled down, until it fits. The result is verified and never larger than the target.
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub target_size: Option<String>,
 
@@ -110,6 +111,11 @@ pub struct SettingsArgs {
     /// does not change.
     #[arg(long)]
     pub measure_quality: bool,
+
+    /// With --target-size, never make a picture smaller in pixels: fail when lower quality
+    /// alone cannot fit.
+    #[arg(long, requires = "target_size")]
+    pub keep_dimensions: bool,
 
     /// Keep the metadata of pictures (EXIF, XMP, IPTC), which includes the GPS location. By
     /// default it is removed; the color profile is always kept.
@@ -657,6 +663,7 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         fps: args.fps,
         measure_quality: args.measure_quality.then_some(true),
         keep_metadata: args.keep_metadata.then_some(true),
+        keep_dimensions: args.keep_dimensions.then_some(true),
         ..Settings::default()
     };
     let project = if args.recipe.is_none() && !args.ignore_project_recipe {
@@ -885,6 +892,16 @@ pub(crate) fn print_human(report: &Report) {
                     format_bytes(t.target_bytes),
                     t.attempts,
                     if t.attempts == 1 { "try" } else { "tries" }
+                ),
+                Some(Plan::Image(peraz_core::ImagePlan {
+                    target: Some(t), ..
+                })) => format!(
+                    " · target {} met in {} {}{}",
+                    format_bytes(t.target_bytes),
+                    t.attempts,
+                    if t.attempts == 1 { "try" } else { "tries" },
+                    t.scaled_to
+                        .map_or(String::new(), |(w, h)| format!(", scaled to {w}×{h}"))
                 ),
                 _ => String::new(),
             };

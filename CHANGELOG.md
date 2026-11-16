@@ -28,6 +28,16 @@ between alpha versions.
   files too. Without a file system that can hold the mark, nothing changes. **Interface:** new
   flag `--recompress`; skipped results have `outcome.reason` in `--json` and `--events`:
   `unsupported`, `already_compressed`, `output_exists`, or `protected`.
+- `--target-size` fits still pictures too: JPEG, PNG, WebP, AVIF, HEIC, and JPEG XL output. A
+  picture that the usual compression brings under the size gets just that; otherwise the highest
+  quality setting that fits is used, down to a floor, and only when the floor is too large is
+  the picture scaled down, step by step. The result's real size is checked, and when nothing
+  fits the file fails and the original stays. `--keep-dimensions` (recipe key
+  `keep_dimensions`) never scales and fails instead. A lossless TIFF that is over the size fails
+  with a message that says the size needs a lossy format. `--target-ssimulacra2` takes the size's
+  place for pictures when both are given. **Interface:** new flag and recipe key; the plan of a
+  picture has `target` (`target_bytes`, `reached`, `attempts`, `scaled_to`,
+  `keep_dimensions`) when it was fitted to a size.
 - HEIC output: `--format heic` (recipe value `heic`, also spelled `heif`) writes a HEIC from
   any still picture, with its color profile, its transparency (as an alpha picture, the way
   Apple's software stores it), and any size, odd ones included. FFmpeg encodes the picture with
@@ -79,6 +89,9 @@ between alpha versions.
 
 ### Changed
 
+- With `--target-size` (and the `discord`, `email`, `github`, and `whatsapp` recipes), a picture
+  that would be larger than the size after the usual compression is now fitted to it. Before,
+  the size applied to videos only.
 - A HEIC stays a HEIC by default, kept only when smaller; before, it became a JPEG. `--format
   jpeg` still makes the JPEG. With an FFmpeg that has no libx265, a HEIC without `--format`
   fails with a message that says so. **Interface:** the default output of HEIC inputs changed

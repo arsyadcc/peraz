@@ -526,7 +526,7 @@ const IMAGE_PROBES: usize = 8;
 
 /// The plan's encoding with its quality setting replaced by `quality`. PNG searches the palette
 /// quality, and at 100 stays true-color (lossless) when a palette cannot reach that.
-fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
+pub(crate) fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
     match encoding {
         ImageEncoding::Jpeg { .. } => ImageEncoding::Jpeg { quality },
         ImageEncoding::Webp { .. } => ImageEncoding::Webp { quality },
@@ -547,7 +547,7 @@ fn with_quality(encoding: ImageEncoding, quality: u8) -> ImageEncoding {
 }
 
 /// The quality setting an encoding starts from.
-fn quality_of(encoding: ImageEncoding) -> u8 {
+pub(crate) fn quality_of(encoding: ImageEncoding) -> u8 {
     match encoding {
         ImageEncoding::Jpeg { quality }
         | ImageEncoding::Webp { quality }
@@ -733,6 +733,7 @@ mod tests {
             converts_format: false,
             target_ssimulacra2: Some(80),
             keep_metadata: false,
+            target: None,
         }
     }
 

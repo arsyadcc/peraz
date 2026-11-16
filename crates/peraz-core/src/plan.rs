@@ -668,6 +668,41 @@ pub struct ImagePlan {
     /// The input's metadata (EXIF, XMP, IPTC) is written to the output, where its format can
     /// hold it. The orientation in it is reset, because the pixels are stored upright.
     pub keep_metadata: bool,
+    /// Present when the picture must fit a file size; `encoding` then holds the setting the
+    /// search starts from (and, once done, the one used).
+    pub target: Option<ImageSizeTarget>,
+}
+
+/// The size a still image must fit in, and what the search found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ImageSizeTarget {
+    pub target_bytes: u64,
+    /// The picture is never made smaller in pixels: when lower quality alone cannot fit, the
+    /// file fails instead.
+    pub keep_dimensions: bool,
+    /// A result within the target was found (filled in by the engine).
+    pub reached: bool,
+    /// Encodes it took (filled in by the engine).
+    pub attempts: u32,
+    /// The size the picture was scaled down to because lower quality alone did not fit; `None`
+    /// when it kept its size (filled in by the engine).
+    pub scaled_to: Option<(u32, u32)>,
+}
+
+impl ImageEncoding {
+    /// The lowest quality setting a size target may go down to, on this encoder's own scale:
+    /// below these, pictures look broken rather than compressed. `None` for encodings without
+    /// a quality setting: a lossless one (TIFF) either fits a size as it is or cannot reach it,
+    /// and SVGs and icon files have no size target.
+    pub fn quality_floor(self) -> Option<u8> {
+        match self {
+            Self::Jpeg { .. } => Some(35),
+            Self::Webp { .. } | Self::Avif { .. } | Self::Jxl { .. } | Self::Png { .. } => Some(30),
+            // CRF 38.
+            Self::Heic { .. } => Some(24),
+            Self::Tiff | Self::Svg { .. } | Self::Icon { .. } => None,
+        }
+    }
 }
 
 /// How a still image is decoded.
@@ -714,6 +749,21 @@ const JXL_QUALITY: [u8; 5] = [90, 85, 78, 70, 60];
 /// from 11–23 (a very detailed photo) to 24–29, and these sit in between. At equal scores the
 /// HEIC was a third larger than the JPEG on the detailed photo and 40–50% smaller on the others.
 const HEIC_QUALITY: [u8; 5] = [66, 58, 52, 46, 40];
+
+/// The size target of a picture, when the recipe has one that applies: it gives way to a
+/// score target.
+fn size_target(recipe: &Recipe) -> Option<ImageSizeTarget> {
+    if recipe.image.target_ssimulacra2.is_some() {
+        return None;
+    }
+    Some(ImageSizeTarget {
+        target_bytes: recipe.image.target_bytes?,
+        keep_dimensions: recipe.image.keep_dimensions,
+        reached: false,
+        attempts: 0,
+        scaled_to: None,
+    })
+}
 
 /// Plans the compression of a still image.
 pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
@@ -804,6 +854,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         ImageFormat::Tiff => (ImageEncoding::Tiff, "tiff"),
         ImageFormat::Keep => unreachable!("resolved above"),
     };
+    let target = size_target(recipe);
     // Formats that become PNG without being asked to: kept only when that is smaller.
     let default_png = recipe.image.format == ImageFormat::Keep && matches!(codec, "gif" | "bmp");
     Ok(ImagePlan {
@@ -816,6 +867,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         converts_format: source != Some(format) && !default_png,
         target_ssimulacra2: recipe.image.target_ssimulacra2,
         keep_metadata: recipe.image.keep_metadata,
+        target,
     })
 }
 
@@ -848,6 +900,7 @@ fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
         converts_format: false,
         target_ssimulacra2: None,
         keep_metadata: false,
+        target: None,
     })
 }
 
@@ -876,6 +929,7 @@ fn plan_icon(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> 
         converts_format: false,
         target_ssimulacra2: None,
         keep_metadata: false,
+        target: None,
     })
 }
 
@@ -1002,6 +1056,7 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
         converts_format: false,
         target_ssimulacra2: None,
         keep_metadata: false,
+        target: None,
     })
 }
 
@@ -1353,6 +1408,7 @@ impl DocumentPlan {
             converts_format: false,
             target_ssimulacra2: None,
             keep_metadata: false,
+            target: None,
         }
     }
 }
@@ -1945,6 +2001,59 @@ mod tests {
             error.to_string().contains("not converted to png"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_size_target_applies_to_pictures_with_a_quality_setting() {
+        let jpeg = image_info("mjpeg", "image2", Alpha::Absent);
+        let mut recipe = Recipe::default();
+        recipe.image.target_bytes = Some(500_000);
+        let plan = plan_image(&jpeg, &recipe).unwrap();
+        assert_eq!(
+            plan.target,
+            Some(ImageSizeTarget {
+                target_bytes: 500_000,
+                keep_dimensions: false,
+                reached: false,
+                attempts: 0,
+                scaled_to: None,
+            })
+        );
+        // The search starts from the quality level's setting.
+        assert_eq!(plan.encoding, ImageEncoding::Jpeg { quality: 78 });
+        recipe.image.keep_dimensions = true;
+        assert!(
+            plan_image(&jpeg, &recipe)
+                .unwrap()
+                .target
+                .unwrap()
+                .keep_dimensions
+        );
+        // A score target takes the size target's place.
+        recipe.image.target_ssimulacra2 = Some(80);
+        assert_eq!(plan_image(&jpeg, &recipe).unwrap().target, None);
+        recipe.image.target_ssimulacra2 = None;
+        // A lossless format has no setting to lower: it fits as it is, or the file fails.
+        recipe.image.format = ImageFormat::Tiff;
+        let tiff = plan_image(&jpeg, &recipe).unwrap();
+        assert!(tiff.target.is_some());
+        assert_eq!(tiff.encoding.quality_floor(), None);
+        recipe.image.format = ImageFormat::Keep;
+        // SVGs and icon files are not fitted to a size.
+        for (codec, container) in [("svg", "svg"), ("ico", "ico")] {
+            let plan = plan_image(&image_info(codec, container, Alpha::Unknown), &recipe).unwrap();
+            assert_eq!(plan.target, None, "{codec}");
+        }
+        for encoding in [
+            ImageEncoding::Jpeg { quality: 78 },
+            ImageEncoding::Heic { quality: 52 },
+            ImageEncoding::Png {
+                min_quality: 65,
+                max_quality: 85,
+            },
+        ] {
+            assert!(encoding.quality_floor().is_some(), "{encoding:?}");
+        }
     }
 
     #[test]

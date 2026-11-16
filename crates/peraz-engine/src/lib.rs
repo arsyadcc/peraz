@@ -11,6 +11,7 @@ pub mod compress;
 pub mod epub;
 mod error;
 pub mod ffmpeg;
+mod fit;
 pub mod gif;
 pub mod heic;
 pub mod heif;

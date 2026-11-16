@@ -431,13 +431,13 @@ fn make_image(
         .ok()
         .and_then(|d| lossless_route(&plan, d, rebuilt_jpeg.is_some()));
     // A copy of the picture to measure the result against, when only measuring.
-    let reference = match &decoded {
+    let mut reference = match &decoded {
         Ok(d) if job.recipe.measure_quality && plan.target_ssimulacra2.is_none() => Some(d.clone()),
         _ => None,
     };
     let encoded = match (decoded, plan.target_ssimulacra2) {
         (Err(message), _) => Err(message),
-        (Ok(d), None) => encode_image(tools, d, &plan),
+        (Ok(d), None) => encode_to_plan(tools, d, &mut plan, cancel, report, &mut reference),
         (Ok(d), Some(target)) => crate::score::encode_image_to_ssimulacra2(
             tools, d, &mut plan, target, cancel,
         )
@@ -489,6 +489,49 @@ fn make_image(
     }
     progress(1.0);
     outcome
+}
+
+/// Encodes a picture at the plan's setting, or, with a size target, at the best setting that
+/// fits; the plan in the report then says what the search found.
+fn encode_to_plan(
+    tools: Option<&Toolchain>,
+    decoded: crate::image::Decoded,
+    plan: &mut peraz_core::ImagePlan,
+    cancel: &AtomicBool,
+    report: &mut Report,
+    reference: &mut Option<crate::image::Decoded>,
+) -> Result<crate::image::EncodedImage, String> {
+    let Some(wanted) = plan.target else {
+        return encode_image(tools, decoded, plan);
+    };
+    let fitted = crate::fit::encode_image_to_size(tools, decoded, plan, cancel)?;
+    report.plan = Some(Plan::Image(plan.clone()));
+    // A measured result is scored against the picture at the size it ended up with.
+    if reference.is_some() {
+        *reference = Some(fitted.prepared);
+    }
+    fitted.encoded.ok_or_else(|| {
+        let (target, smallest) = (
+            format_bytes(wanted.target_bytes),
+            format_bytes(fitted.smallest),
+        );
+        match plan.target.and_then(|found| found.scaled_to) {
+            _ if fitted.lossless => format!(
+                "cannot fit under {target}: this format is lossless and the file is \
+                 {smallest}, so the size is not reachable without lossy encoding; choose \
+                 another --format"
+            ),
+            _ if wanted.keep_dimensions => format!(
+                "cannot fit under {target} at this size: the smallest was {smallest}; leave \
+                 out --keep-dimensions to let the picture be scaled down, or raise the target"
+            ),
+            Some((width, height)) => format!(
+                "could not fit under {target}: the smallest was {smallest}, scaled down to \
+                 {width}×{height}; raise the target"
+            ),
+            None => format!("could not fit under {target}: the smallest was {smallest}"),
+        }
+    })
 }
 
 /// When the pixels stay as they are, a JPEG's own data can be kept losslessly: recompressed

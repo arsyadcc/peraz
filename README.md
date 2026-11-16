@@ -123,7 +123,8 @@ peraz doctor                             # which FFmpeg is used and what it can 
 - **Video** — H.264 and HEVC with five quality levels calibrated with VMAF, scaling without ever
   upscaling, optional audio removal, and hardware encoding with VideoToolbox on macOS.
 - **Target size** — `--target-size 25MB` computes the bit rates, runs two passes, measures the
-  result, and tries again if it is over. Sizes use SI units (1 MB = 1,000,000 bytes).
+  result, and tries again if it is over. Pictures fit a size too: lower quality first, a
+  smaller picture only when that is not enough. Sizes use SI units (1 MB = 1,000,000 bytes).
 - **Target quality** — `--target-vmaf 93` (videos) and `--target-ssimulacra2 80` (pictures) make
   each file as small as it can be while it still measures that visual quality, and the report
   shows the score.
@@ -175,6 +176,7 @@ peraz clip.mov                             # → clip-1.mp4 (H.264, balanced qua
 peraz -q small --codec hevc *.mp4          # smaller files
 peraz --encoder hardware --max-width 1280 --no-audio clip.mov
 peraz --target-size 25MB long-video.mov    # fits, verified (two-pass with x264/x265)
+peraz --target-size 2MB photos/*.jpg       # each picture under 2 MB: quality first, then size
 peraz --target-vmaf 93 clip.mov            # smallest file that still scores VMAF 93
 peraz --target-ssimulacra2 80 photos/*     # smallest pictures that still score 80
 peraz --measure-quality clip.mov photos/*  # report each result's VMAF or SSIMULACRA2
@@ -220,6 +222,15 @@ With `--target-size`, the video and audio bit rates are computed from the target
 encoders run two passes, and the result is measured: if it is over, the final pass runs again
 at a lower bit rate. A file over the target is never kept. When the bit rate is too low for the
 resolution, the video is scaled down (unless you set `--max-width`/`--max-height`).
+
+Still pictures fit `--target-size` too. A picture that the usual compression already brings
+under the size gets just that. Otherwise the highest quality setting that fits is searched, down
+to a floor below which pictures look broken, and when even the floor is too large the picture
+is scaled down step by step, with the quality searched again at each size. Every candidate is a
+real encode, so the result is known to fit; when nothing fits, the file fails and the original
+stays. `--keep-dimensions` never scales: it fails as soon as lower quality alone cannot fit.
+This applies to JPEG, PNG, WebP, AVIF, HEIC, and JPEG XL output; a TIFF is lossless, so it fits
+as it is or fails with a message that says the size needs a lossy format.
 
 `--start` and `--duration` (seconds or `[h:]m:ss`) pick part of a video. With `--trim-only` the
 clip is cut without compressing: when the start is on a keyframe the streams are copied (instant
@@ -356,7 +367,8 @@ max_height = 2000
 codec = "h264"                   # h264, hevc
 encoder = "auto"                 # auto, software, hardware
 no_audio = false
-target_size = "25MB"             # SI units; videos only
+target_size = "25MB"             # SI units; videos, and pictures without a score target
+keep_dimensions = false          # with target_size: never scale a picture down
 target_vmaf = 93                 # videos: smallest file with this VMAF score
 target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2 score
 fps = 12                         # GIF, animated WebP/AVIF, and animated PNG from a video

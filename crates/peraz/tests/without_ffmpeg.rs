@@ -369,6 +369,63 @@ fn a_result_is_skipped_the_second_time() {
 }
 
 #[test]
+fn a_picture_is_fitted_to_a_size() {
+    let dir = setup("target-size");
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--json",
+            "--format",
+            "jpeg",
+            "--target-size",
+            "3kB",
+            "--out-dir",
+            "out",
+            "photo.png",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &json["results"][0];
+    assert_eq!(result["outcome"]["status"], "compressed", "{json}");
+    assert!(
+        result["outcome"]["output_bytes"].as_u64().unwrap() <= 3000,
+        "{json}"
+    );
+    let target = &result["plan"]["target"];
+    assert_eq!(target["target_bytes"], 3000, "{json}");
+    assert_eq!(target["reached"], true, "{json}");
+    assert!(target["attempts"].as_u64().unwrap() >= 1, "{json}");
+
+    // Without scaling, a size this small cannot be met: the file fails and nothing is kept.
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "jpeg",
+            "--target-size",
+            "300B",
+            "--keep-dimensions",
+            "-o",
+            "tiny.jpg",
+            "photo.png",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("cannot fit under 300 B"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!dir.0.join("tiny.jpg").exists());
+    // The option only means something with a size.
+    let output = peraz(&dir.0, &["compress", "--keep-dimensions", "photo.png"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(
