@@ -407,6 +407,7 @@ fn make_image(
         Ok(plan) => plan,
         Err(
             e @ (PlanError::UnsupportedImage { .. }
+            | PlanError::HdrImage
             | PlanError::SvgConversion { .. }
             | PlanError::IconConversion { .. }),
         ) => {

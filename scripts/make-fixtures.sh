@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates test samples into ./fixtures (not committed).
-# Requires: ffmpeg, zip. On macOS, sips creates the HEIC and PDF samples; elsewhere they are skipped.
+# Requires: ffmpeg, zip, and curl for the HDR photos. On macOS, sips creates the HEIC and PDF
+# samples, and Swift the HEIC with a gain map; elsewhere they are skipped.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,6 +38,37 @@ ff -f lavfi -i "testsrc2=size=1600x1200,format=rgb24" -frames:v 1 image-opaque.p
 ff -f lavfi -i "testsrc2=size=1200x900,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lt(hypot(X-W/2,Y-H/2),H/3),255,X*255/W)'" \
    -frames:v 1 image-alpha.png
 ff -i image-opaque.png -q:v 2 image-photo.jpg
+
+echo "HDR photos (downloaded)"
+# From libavif's test data (https://github.com/AOMediaCodec/libavif/tree/main/tests/data),
+# under libavif's license (BSD 2-Clause); its README names the source of each picture. The
+# commit is pinned and every file is checked against its SHA-256.
+#   hdr-ultrahdr.jpg       a JPEG with a gain map (Ultra HDR), saved from Photoshop
+#   hdr-apple-gainmap.jpg  a JPEG with a gain map as iPhones store it
+#   hdr-gainmap.avif       an AVIF with a gain map (ISO 21496-1)
+#   hdr-pq.avif            a 10-bit AVIF that is HDR by its transfer function (PQ), no gain map
+libavif="https://raw.githubusercontent.com/AOMediaCodec/libavif/37a5461042aa3b1eb105193724ee41bfd2478d0b/tests/data"
+hdr_sample() { # name in ./fixtures, name in libavif, SHA-256
+  if curl -fsSL --max-time 60 -o "$1.part" "$libavif/$2" \
+     && echo "$3  $1.part" | shasum -a 256 -c - >/dev/null 2>&1; then
+    mv "$1.part" "$1"
+  else
+    rm -f "$1.part"
+    echo "  skipped: could not download $2, or its checksum is not the expected one"
+  fi
+}
+hdr_sample hdr-ultrahdr.jpg seine_sdr_gainmap_srgb.jpg 1aaf0a1afa91a485c13e4ad696a3da1fe1ddd2675417e3812a23a9d13f765262
+hdr_sample hdr-apple-gainmap.jpg apple_gainmap_v3.jpg 071203c2a0ba754852e480a1cb70a1d45ea7476a25a79fc38e4433ea1aabb871
+hdr_sample hdr-gainmap.avif seine_sdr_gainmap_srgb.avif e0ebdb2f1f44c7d901e6b5f817eb2520eace344624cab0d57aaa929d05d6d971
+hdr_sample hdr-pq.avif seine_hdr_srgb.avif b4f440392ad8cdfd398aea0c8817c93d98cfd8cde381bbe430aceae0207e93c8
+# A HEIC with a gain map, as current phones store HDR photos: made from the JPEG above with
+# macOS's own frameworks.
+if command -v swift >/dev/null && [ "$(uname)" = Darwin ] && [ -f hdr-ultrahdr.jpg ]; then
+  swift "$root/scripts/gainmap-heic.swift" hdr-ultrahdr.jpg hdr-gainmap.heic \
+    || echo "  skipped: could not make the HEIC with a gain map"
+else
+  echo "  skipped: the HEIC with a gain map needs Swift (macOS) and the JPEG above"
+fi
 
 echo "JPEGs with EXIF orientations 1-8 that all display the same upright picture"
 # Upright, 800x600: red top-left, green top-right, blue bottom-left, yellow bottom-right corners.

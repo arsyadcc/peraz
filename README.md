@@ -245,6 +245,12 @@ IPTC where the output format can hold them (with the orientation reset, since th
 stored upright). Transparent images converted to JPEG are placed on white, or on the color
 given with `--background` (a page's background, for example).
 
+HDR photos are not kept as HDR yet. A photo with a gain map (most photos from current phones:
+HEIC from iPhones, Ultra HDR JPEG from Android, also AVIF and JPEG XL) is compressed as its
+standard picture, and the report warns that the gain map was removed. A picture that is HDR by
+its transfer function alone (PQ or HLG, such as a 10-bit AVIF) is skipped, because read as a
+standard picture it would come out dark and flat.
+
 JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
 and upload forms that read nothing else. A picture with sharp colored edges (colored text and
 thin lines, as in screenshots and charts) keeps its color at every pixel (4:4:4) instead of
@@ -493,7 +499,7 @@ from the copies bundled in their Rust crates. The Homebrew formula that builds f
 cargo test --workspace            # integration tests run when ./fixtures exists
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                  # dependency licenses, advisories, sources (deny.toml)
-./scripts/make-fixtures.sh        # test samples into ./fixtures (needs ffmpeg and zip)
+./scripts/make-fixtures.sh        # test samples into ./fixtures (needs ffmpeg, zip, and curl)
 ```
 
 ## Project layout

@@ -25,12 +25,21 @@ between alpha versions.
 
 ### Changed
 
+- The report's `warnings` now also say when an HDR gain map was left out of a HEIC, an AVIF, or
+  a JPEG XL result (before: JPEG only). The gain map is found in the file itself: the auxiliary
+  picture iPhones store, the ISO 21496-1 item, or JPEG XL's `jhgm` box.
 - JPEG output keeps color at every pixel (4:4:4) for pictures with sharp colored edges: colored
   text and thin colored lines, as in screenshots and charts. Before, every JPEG stored one color
   value for each two-by-two block (4:2:0), which smears such edges: measured with SSIMULACRA2,
   screenshots with colored text did not get past a score of 80 at any quality, and now reach it
   in half the space. Photos stay 4:2:0, which reaches the same score in about 13% less space
   for them. The report's `encoder` says `4:4:4` when it was used.
+
+### Fixed
+
+- A picture that is HDR by its transfer function (PQ or HLG, such as a 10-bit AVIF or HEIC
+  without a gain map) was read as a standard picture and came out dark and flat. Such a picture
+  is now skipped with a message, until Peraz can keep or convert it.
 
 ## [0.6.0] - 2026-11-16
 

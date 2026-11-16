@@ -177,7 +177,11 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
         )
     });
     let _ = std::fs::remove_dir_all(&workdir);
-    result
+    // djxl gives the standard picture; a gain map in the file is not part of it.
+    result.map(|mut decoded| {
+        decoded.gain_map = crate::jxl_header::has_gain_map(input).unwrap_or(false);
+        decoded
+    })
 }
 
 /// The JPEG a JPEG XL input was losslessly made from, rebuilt exactly by `djxl`; `None` when the

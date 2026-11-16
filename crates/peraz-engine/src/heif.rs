@@ -75,7 +75,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         image,
         icc: properties.icc,
         metadata: read_metadata(&bytes),
-        gain_map: false,
+        gain_map: properties.gain_map,
         png_color: crate::image::PngColor::default(),
     })
 }
@@ -332,7 +332,12 @@ pub struct Properties {
     pub alpha: Option<u32>,
     pub icc: Option<Vec<u8>>,
     pub transforms: Vec<Transform>,
+    /// The file holds an HDR gain map for its picture.
+    pub gain_map: bool,
 }
+
+/// The `auxC` type of an HDR gain map as Apple's cameras store it.
+const APPLE_GAIN_MAP: &[u8] = b"urn:com:apple:photo:2020:aux:hdrgainmap";
 
 /// `auxC` types that mark an auxiliary image as an alpha plane (HEVC and AV1 conventions).
 const ALPHA_TYPES: &[&[u8]] = &[
@@ -353,9 +358,12 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
     let mut properties: Vec<Bx> = Vec::new();
     let mut associations: Vec<(u32, Vec<u16>)> = Vec::new();
     let mut auxiliary: Vec<(u32, u32)> = Vec::new();
+    // ISO 21496-1 stores a gain map with an item of type `tmap`, which says how it is applied.
+    let mut tone_map_item = false;
     for child in boxes(meta_children) {
         match &child.kind {
             b"iref" => auxiliary = parse_auxl(child.payload)?,
+            b"iinf" => tone_map_item = has_item_of_type(child.payload, *b"tmap"),
             b"pitm" => {
                 let version = *child.payload.first()?;
                 primary = Some(if version == 0 {
@@ -386,20 +394,25 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
             .collect()
     };
     let own = properties_of(primary);
-    // Auxiliary images of the primary item that are alpha planes (not depth maps or gain maps).
-    let alpha = auxiliary
-        .iter()
-        .filter(|(_, to)| *to == primary)
-        .map(|(from, _)| *from)
-        .find(|&item| {
-            properties_of(item).iter().any(|b| {
-                &b.kind == b"auxC"
-                    && b.payload.get(4..).is_some_and(|urn| {
-                        let urn = urn.split(|c| *c == 0).next().unwrap_or_default();
-                        ALPHA_TYPES.contains(&urn)
-                    })
+    // The auxiliary images of the primary item whose `auxC` type is one of `types`.
+    let auxiliary_of = |types: &[&[u8]]| {
+        auxiliary
+            .iter()
+            .filter(|(_, to)| *to == primary)
+            .map(|(from, _)| *from)
+            .find(|&item| {
+                properties_of(item).iter().any(|b| {
+                    &b.kind == b"auxC"
+                        && b.payload.get(4..).is_some_and(|urn| {
+                            let urn = urn.split(|c| *c == 0).next().unwrap_or_default();
+                            types.contains(&urn)
+                        })
+                })
             })
-        });
+    };
+    // Alpha planes, not depth maps or gain maps.
+    let alpha = auxiliary_of(ALPHA_TYPES);
+    let gain_map = tone_map_item || auxiliary_of(&[APPLE_GAIN_MAP]).is_some();
 
     let icc_of = |b: &Bx| {
         (&b.kind == b"colr")
@@ -430,6 +443,28 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         alpha,
         icc,
         transforms,
+        gain_map,
+    })
+}
+
+/// `iinf`: whether one of its items (`infe`, version 2 or 3) has this type.
+fn has_item_of_type(payload: &[u8], kind: [u8; 4]) -> bool {
+    let Some(&version) = payload.first() else {
+        return false;
+    };
+    // After the version and flags: the number of items, in 2 or 4 bytes.
+    let Some(entries) = payload.get(if version == 0 { 6 } else { 8 }..) else {
+        return false;
+    };
+    boxes(entries).any(|entry| {
+        &entry.kind == b"infe"
+            && match entry.payload.first() {
+                // Version and flags, the item's ID (2 bytes, or 4 in version 3), a protection
+                // index (2 bytes), then the type.
+                Some(2) => entry.payload.get(8..12) == Some(&kind),
+                Some(3) => entry.payload.get(10..14) == Some(&kind),
+                _ => false,
+            }
     })
 }
 
@@ -1017,6 +1052,36 @@ mod tests {
         let pitm = bx(b"pitm", &[0, 0, 0, 0, 0, 1]);
         let meta = bx(b"meta", &[vec![0, 0, 0, 0], pitm, iref, iprp].concat());
         [bx(b"ftyp", b"heic"), meta].concat()
+    }
+
+    #[test]
+    fn finds_an_hdr_gain_map() {
+        // As iPhones store it: an auxiliary image of the photo, marked as a gain map.
+        assert!(read_properties(&sample_with_auxiliary(true)).gain_map);
+        assert!(read_properties(&sample_with_auxiliary(false)).gain_map);
+        assert!(!read_properties(&sample()).gain_map);
+        // As ISO 21496-1 stores it (newer phones, AVIF): an item of type `tmap` that says how
+        // the gain map is applied.
+        let item = |id: u8, kind: &[u8; 4]| {
+            bx(
+                b"infe",
+                &[&[2, 0, 0, 0, 0, id, 0, 0][..], kind, &[0]].concat(),
+            )
+        };
+        let with_items = |items: &[Vec<u8>]| {
+            let count = u16::try_from(items.len()).unwrap().to_be_bytes();
+            let iinf = bx(
+                b"iinf",
+                &[&[0, 0, 0, 0][..], &count, &items.concat()].concat(),
+            );
+            let pitm = bx(b"pitm", &[0, 0, 0, 0, 0, 1]);
+            let meta = bx(b"meta", &[vec![0, 0, 0, 0], pitm, iinf].concat());
+            [bx(b"ftyp", b"avif"), meta].concat()
+        };
+        let iso = with_items(&[item(1, b"av01"), item(2, b"av01"), item(3, b"tmap")]);
+        assert!(read_properties(&iso).gain_map);
+        let plain = with_items(&[item(1, b"av01"), item(2, b"Exif")]);
+        assert!(!read_properties(&plain).gain_map);
     }
 
     #[test]

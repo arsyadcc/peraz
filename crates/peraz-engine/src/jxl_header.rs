@@ -120,6 +120,17 @@ fn container_codestream(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
 /// The file is a JPEG recompressed losslessly: its container has a `jbrd` box, from which
 /// `djxl` rebuilds the original JPEG file exactly.
 pub fn has_jpeg_reconstruction(path: &Path) -> std::io::Result<bool> {
+    has_box(path, *b"jbrd")
+}
+
+/// The file holds an HDR gain map: its container has a `jhgm` box, with the gain map's own
+/// picture and how it is applied (ISO 21496-1).
+pub fn has_gain_map(path: &Path) -> std::io::Result<bool> {
+    has_box(path, *b"jhgm")
+}
+
+/// The file is a container with a box of this type. A bare codestream has no boxes.
+fn has_box(path: &Path, kind: [u8; 4]) -> std::io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let mut head = [0u8; 12];
     if read_up_to(&mut file, &mut head)? < head.len() || head != CONTAINER {
@@ -127,7 +138,7 @@ pub fn has_jpeg_reconstruction(path: &Path) -> std::io::Result<bool> {
     }
     Ok(container_boxes(&mut file)?
         .iter()
-        .any(|span| &span.kind == b"jbrd"))
+        .any(|span| span.kind == kind))
 }
 
 fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -415,6 +426,14 @@ mod tests {
         let path = dir.join("from-jpeg.jxl");
         std::fs::write(&path, [parts.concat(), boxed(b"jbrd", &[0; 20])].concat()).unwrap();
         assert!(has_jpeg_reconstruction(&path).unwrap());
+        // An HDR gain map is in a box of its own.
+        assert!(!has_gain_map(&path).unwrap());
+        let path = dir.join("hdr.jxl");
+        std::fs::write(&path, [parts.concat(), boxed(b"jhgm", &[0; 20])].concat()).unwrap();
+        assert!(has_gain_map(&path).unwrap());
+        let bare = dir.join("bare.jxl");
+        std::fs::write(&bare, OPAQUE_1600X1200).unwrap();
+        assert!(!has_gain_map(&bare).unwrap());
 
         let path = dir.join("single.jxl");
         let single = [CONTAINER.to_vec(), boxed(b"jxlc", OPAQUE_1600X1200)].concat();

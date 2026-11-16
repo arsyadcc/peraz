@@ -150,6 +150,9 @@ pub enum PlanError {
     NotAnimation { kind: MediaKind },
     /// Peraz cannot read, or cannot write, this image format yet.
     UnsupportedImage { codec: String, hint: &'static str },
+    /// The picture is HDR by its transfer function (PQ or HLG), which Peraz cannot keep or
+    /// convert yet: treated as a standard picture, it would come out dark and flat.
+    HdrImage,
     /// A score target was combined with hardware encoding, which has no setting to search.
     ScoreNeedsSoftware,
     /// An animated JPEG XL that stays JPEG XL cannot be scaled down.
@@ -198,6 +201,11 @@ impl std::fmt::Display for PlanError {
             Self::UnsupportedImage { codec, hint } => {
                 write!(f, "{codec} images are not supported yet{hint}")
             }
+            Self::HdrImage => write!(
+                f,
+                "this picture is HDR (PQ or HLG), which Peraz cannot keep or convert to a \
+                 standard picture yet; it is left as it is"
+            ),
             Self::ScoreNeedsSoftware => write!(
                 f,
                 "--target-vmaf needs a software encoder; leave out --encoder hardware"
@@ -733,6 +741,19 @@ const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "apng", "webp", "bmp", "tiff", 
 /// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills.
 const FFMPEG_IMAGES: &[&str] = &["hevc", "av1"];
 
+/// How a still image with this codec (FFmpeg's name) is decoded, when Peraz reads it.
+fn image_decoder(codec: &str) -> Option<ImageDecoder> {
+    if NATIVE_IMAGES.contains(&codec) {
+        Some(ImageDecoder::Native)
+    } else if FFMPEG_IMAGES.contains(&codec) {
+        Some(ImageDecoder::Ffmpeg)
+    } else if codec == "jpegxl" {
+        Some(ImageDecoder::Djxl)
+    } else {
+        None
+    }
+}
+
 /// The format an input image is stored in, when Peraz can also write it.
 fn source_format(codec: &str) -> Option<ImageFormat> {
     match codec {
@@ -784,18 +805,16 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
     if matches!(codec, "ico" | "icns") {
         return plan_icon(info, recipe);
     }
-    let decoder = if NATIVE_IMAGES.contains(&codec) {
-        ImageDecoder::Native
-    } else if FFMPEG_IMAGES.contains(&codec) {
-        ImageDecoder::Ffmpeg
-    } else if codec == "jpegxl" {
-        ImageDecoder::Djxl
-    } else {
+    let Some(decoder) = image_decoder(codec) else {
         return Err(PlanError::UnsupportedImage {
             codec: picture.codec.clone(),
             hint: "",
         });
     };
+    // Decoded as a standard picture, PQ or HLG values come out dark and flat.
+    if picture.color.is_hdr() {
+        return Err(PlanError::HdrImage);
+    }
     let source = source_format(codec);
     let format = match (recipe.image.format, codec) {
         // A still GIF is a graphic: PNG keeps it lossless, with its transparency. A BMP is
@@ -2161,6 +2180,25 @@ mod tests {
         recipe.image.format = ImageFormat::Jpeg;
         let plan = plan_image(&image_info("png", "png_pipe", Alpha::Absent), &recipe).unwrap();
         assert_eq!((plan.flatten_alpha, plan.background), (false, None));
+    }
+
+    #[test]
+    fn hdr_stills_are_refused_until_they_can_be_kept() {
+        for transfer in ["smpte2084", "arib-std-b67"] {
+            let mut avif = image_info("av1", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Absent);
+            avif.video.as_mut().unwrap().color.transfer = Some(transfer.to_owned());
+            for format in [ImageFormat::Keep, ImageFormat::Jpeg, ImageFormat::Avif] {
+                let mut recipe = Recipe::default();
+                recipe.image.format = format;
+                let error = plan_image(&avif, &recipe).unwrap_err();
+                assert_eq!(error, PlanError::HdrImage, "{transfer}, {format}");
+                assert!(error.to_string().contains("HDR (PQ or HLG)"), "{error}");
+            }
+        }
+        // A standard picture with the same shape is planned as usual.
+        let mut avif = image_info("av1", "mov,mp4,m4a,3gp,3g2,mj2", Alpha::Absent);
+        avif.video.as_mut().unwrap().color.transfer = Some("iec61966-2-1".to_owned());
+        assert!(plan_image(&avif, &Recipe::default()).is_ok());
     }
 
     #[test]
