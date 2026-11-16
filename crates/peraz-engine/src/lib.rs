@@ -19,6 +19,7 @@ pub mod jxl_header;
 pub mod pdf;
 pub mod probe;
 mod score;
+pub mod svg;
 pub mod tiff;
 
 pub use error::EngineError;

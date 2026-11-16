@@ -35,6 +35,9 @@ tiff.workspace = true
 ssimulacra2.workspace = true
 libdeflater = { workspace = true, optional = true }
 
+[dev-dependencies]
+resvg.workspace = true
+
 [features]
 # SIMD JPEG encoding (much faster). Needs `nasm` on x86/x86_64 build machines; enable for releases.
 simd-jpeg = ["mozjpeg/nasm_simd"]

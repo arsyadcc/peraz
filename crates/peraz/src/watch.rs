@@ -32,8 +32,8 @@ const INTERVAL: Duration = Duration::from_secs(1);
 
 /// File extensions Peraz can compress.
 const MEDIA: &[&str] = &[
-    "jpg", "jpeg", "png", "apng", "webp", "heic", "heif", "avif", "jxl", "gif", "bmp", "tif",
-    "tiff", "mp4", "mov", "m4v", "mkv", "webm", "avi", "pdf", "epub",
+    "jpg", "jpeg", "png", "apng", "svg", "svgz", "webp", "heic", "heif", "avif", "jxl", "gif",
+    "bmp", "tif", "tiff", "mp4", "mov", "m4v", "mkv", "webm", "avi", "pdf", "epub",
 ];
 
 #[derive(Debug, clap::Args)]

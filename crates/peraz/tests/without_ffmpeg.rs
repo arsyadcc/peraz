@@ -192,6 +192,49 @@ fn an_animated_png_stays_one_without_ffmpeg() {
 }
 
 #[test]
+fn an_svg_is_minified_without_ffmpeg() {
+    let dir = setup("svg");
+    std::fs::write(
+        dir.0.join("logo.svg"),
+        "<?xml version=\"1.0\"?>\n<!-- made by hand -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         viewBox=\"0 0 10 10\">\n  <rect x=\"1.000\" y=\"1.000\" width=\"8.000\" height=\"8.000\"/>\n</svg>\n",
+    )
+    .unwrap();
+    let output = peraz(
+        &dir.0,
+        &["compress", "--json", "--out-dir", "out", "logo.svg"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &json["results"][0];
+    assert_eq!(result["kind"], "image", "{json}");
+    assert_eq!(result["outcome"]["status"], "compressed", "{json}");
+    assert_eq!(result["plan"]["type"], "image", "{json}");
+    assert_eq!(result["plan"]["encoding"]["format"], "svg", "{json}");
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("out/logo-1.svg")).unwrap(),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\
+         <rect x=\"1\" y=\"1\" width=\"8\" height=\"8\"/></svg>"
+    );
+    // A picture format cannot be made from it: skipped, and the run still succeeds.
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--json",
+            "--format",
+            "webp",
+            "--out-dir",
+            "out",
+            "logo.svg",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["results"][0]["outcome"]["status"], "skipped", "{json}");
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(

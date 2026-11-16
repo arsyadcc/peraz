@@ -86,6 +86,10 @@ fn encode_image_inner(prepared: &Decoded, plan: &ImagePlan) -> Result<EncodedIma
             crate::tiff::encode(image, icc.as_deref())?,
             crate::tiff::ENCODER.to_owned(),
         ),
+        // An SVG is minified as text and never reaches the pixel encoders.
+        ImageEncoding::Svg { .. } => {
+            return Err("internal error: an SVG has no pixels to encode".to_owned());
+        }
         ImageEncoding::Avif { quality } => {
             let mut rgba = image.to_rgba8();
             let avif = encode_avif(&rgba, quality)?;

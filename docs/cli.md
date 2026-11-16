@@ -10,7 +10,7 @@ people and scripts. From 0.1.0 on, renaming or removing any of them is a breakin
 ## Without FFmpeg
 
 Peraz runs FFmpeg for videos, animations, GIFs, HEIC, and AVIF. JPEG, PNG, animated PNG, WebP,
-BMP, TIFF, and JPEG XL images, PDFs, and EPUBs are handled without it, so `peraz compress` works on them when FFmpeg is
+BMP, TIFF, JPEG XL, and SVG images, PDFs, and EPUBs are handled without it, so `peraz compress` works on them when FFmpeg is
 not installed: the results are the same as with FFmpeg, and `--json` prints `"ffmpeg": null`. If
 any input needs FFmpeg, the run stops before any work with exit code `3` and names that file.
 An FFmpeg chosen with `--ffmpeg` or `PERAZ_FFMPEG` that does not exist is always exit code `3`.
@@ -68,7 +68,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | --- | --- | --- |
 | `-r`, `--recipe` | name or file | Use a recipe: a built-in or your own name, or a `.toml` file. |
 | `--ignore-project-recipe` | | Do not use a `peraz.toml` from the current folder or its parents. |
-| `-q`, `--quality` | `highest`, `high`, `balanced`, `small`, `smallest` | Quality level. Default `balanced`. |
+| `-q`, `--quality` | `highest`, `high`, `balanced`, `small`, `smallest` | Quality level. Default `balanced`. Lossless for TIFF at every level, and for animated PNG and SVG at `highest`. |
 | `--codec` | `h264`, `hevc` | Video codec. Default `h264`, or `hevc` for HDR videos (`h264` on an HDR video is an error). |
 | `--encoder` | `auto`, `software`, `hardware` | Default `auto`: software if available, else hardware. |
 | `--max-width` | pixels | Scale down to at most this width; never scales up. |
@@ -135,6 +135,12 @@ that is not smaller than the input is not kept, unless the format was changed on
 
 A TIFF with more than one page is skipped, whatever the format asked for: Peraz compresses
 single pictures, and would drop the other pages.
+
+An SVG (or a gzip-compressed `.svgz`) is minified and stays what it is. `--quality` sets how far
+its numbers are rounded (`highest` rounds nothing); `--max-width`, `--max-height`,
+`--target-ssimulacra2`, and `--measure-quality` do not apply to it. With a `--format` that names
+a picture format it is skipped, because an SVG is not converted. An SVG in a text encoding other
+than UTF-8 is skipped too.
 
 ## Environment variables
 

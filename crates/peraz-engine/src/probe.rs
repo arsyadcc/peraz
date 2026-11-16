@@ -22,6 +22,9 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
     if let Some(info) = jpeg_xl_info(path, size)? {
         return Ok(info);
     }
+    if let Some(header) = crate::svg::sniff(path).map_err(input_error)? {
+        return Ok(svg_info(header, size));
+    }
     let absolute = std::path::absolute(path).map_err(input_error)?;
     // The `file:` prefix stops ffprobe from treating names like `concat:a|b` or `http://…`
     // as protocols: only local files are ever opened.
@@ -368,7 +371,7 @@ impl RawStream {
 
 /// Parses ffprobe's stringly-typed numbers; `N/A` and garbage become `None`.
 /// Probes one file without FFmpeg. Works for PDFs, EPUBs, the still images Peraz decodes
-/// itself (JPEG, PNG, WebP, BMP, TIFF), and animated PNGs; `Ok(None)` means the file needs
+/// itself (JPEG, PNG, WebP, BMP, TIFF), SVGs, and animated PNGs; `Ok(None)` means the file needs
 /// FFmpeg (videos, other animations, GIFs, HEIC, AVIF, and anything unrecognized).
 pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineError> {
     let input_error = |source| EngineError::Input {
@@ -381,6 +384,9 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
     }
     if let Some(info) = jpeg_xl_info(path, size)? {
         return Ok(Some(info));
+    }
+    if let Some(header) = crate::svg::sniff(path).map_err(input_error)? {
+        return Ok(Some(svg_info(header, size)));
     }
     if let Some(animation) = crate::apng::png_animation(path).map_err(input_error)?
         && animation.frames > 1
@@ -426,6 +432,30 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
         }),
         audio: Vec::new(),
     }))
+}
+
+/// An SVG, read from its root element: Peraz minifies it as text.
+fn svg_info(header: crate::svg::SvgHeader, size_bytes: u64) -> MediaInfo {
+    MediaInfo {
+        kind: MediaKind::Image,
+        container: if header.gzip { "svgz" } else { "svg" }.to_owned(),
+        size_bytes,
+        duration_seconds: None,
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: "svg".to_owned(),
+            width: header.width,
+            height: header.height,
+            rotation: 0,
+            frame_rate: None,
+            frame_count: Some(1),
+            pixel_format: None,
+            color: ColorInfo::default(),
+            alpha: Alpha::Unknown,
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    }
 }
 
 /// An animated PNG, read from its header: Peraz decodes it itself.

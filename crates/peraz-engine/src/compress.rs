@@ -375,7 +375,7 @@ fn make_image(
     let failed = |message: String| Outcome::Failed { message };
     let mut plan = match plan_image(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e @ PlanError::UnsupportedImage { .. }) => {
+        Err(e @ (PlanError::UnsupportedImage { .. } | PlanError::SvgConversion { .. })) => {
             return Outcome::Skipped {
                 message: e.to_string(),
             };
@@ -383,6 +383,9 @@ fn make_image(
         Err(e) => return failed(e.to_string()),
     };
     report.plan = Some(Plan::Image(plan.clone()));
+    if let ImageEncoding::Svg { decimals } = plan.encoding {
+        return make_svg(batch, job, info, plan.extension, decimals, progress, report);
+    }
     if let Some(skipped) = multi_page_tiff(info, &job.input) {
         return skipped;
     }
@@ -475,6 +478,56 @@ fn make_image(
     outcome
 }
 
+/// Minifies an SVG, which stays an SVG: gzip-compressed again when it was.
+fn make_svg(
+    batch: &Batch,
+    job: &Job,
+    info: &MediaInfo,
+    extension: &str,
+    decimals: Option<u8>,
+    progress: Progress,
+    report: &mut Report,
+) -> Outcome {
+    use crate::svg::SvgError;
+    let failed = |message: String| Outcome::Failed { message };
+    let output = match choose_output(batch, job, extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    let minified = crate::svg::read(&job.input)
+        .and_then(|(text, gzip)| Ok((crate::svg::minify(&text, decimals)?, gzip)));
+    let (text, gzip) = match minified {
+        Ok(minified) => minified,
+        Err(SvgError::Unsupported(message)) => return Outcome::Skipped { message },
+        Err(SvgError::Invalid(message)) => {
+            return failed(format!("{}: {message}", job.input.display()));
+        }
+    };
+    let bytes = if gzip {
+        match crate::svg::gzip(&text) {
+            Ok(bytes) => bytes,
+            Err(message) => return failed(message),
+        }
+    } else {
+        text.into_bytes()
+    };
+    report.encoder = Some(
+        if gzip {
+            "SVG minifier + gzip"
+        } else {
+            "SVG minifier"
+        }
+        .to_owned(),
+    );
+    let partial = partial_path(&output);
+    if let Err(e) = std::fs::write(&partial, &bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return failed(format!("cannot write {}: {e}", output.display()));
+    }
+    progress(1.0);
+    finish(&partial, &output, info.size_bytes, false)
+}
+
 /// Only the first page of a TIFF would be read, so a document with more is skipped.
 fn multi_page_tiff(info: &MediaInfo, input: &Path) -> Option<Outcome> {
     if info.video.as_ref().is_none_or(|v| v.codec != "tiff") {
@@ -520,6 +573,10 @@ fn decode_image(
 ) -> (Result<crate::image::Decoded, String>, Option<Vec<u8>>) {
     match decoder {
         ImageDecoder::Native => (decode_native(input), None),
+        ImageDecoder::Text => (
+            Err("internal error: an SVG has no pixels to decode".to_owned()),
+            None,
+        ),
         ImageDecoder::Ffmpeg => match tools {
             Some(tools) => (crate::heif::decode(tools, input), None),
             None => (Err(NEEDS_FFMPEG.to_owned()), None),

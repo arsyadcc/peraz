@@ -27,6 +27,16 @@ between alpha versions.
   animated PNG that stays one needs no FFmpeg. **Interface:** new `--format` and recipe `format`
   value `apng`; the report's `plan.type` is `animated` with `plan.format` `apng`; `peraz watch`
   picks up `.apng` files.
+- SVG: an SVG is minified and stays an SVG, and a gzip-compressed `.svgz` stays one, kept only
+  when smaller. Comments, the XML declaration, editor data (Inkscape, Illustrator, Sketch, and
+  `<metadata>`), and whitespace between elements are removed, and numbers in paths, shapes, and
+  transforms are written in their shortest form. `--quality` sets the rounding: none at
+  `highest`, then 4, 3, 2, and 1 decimal places, never fewer than two significant digits. IDs,
+  class names, `viewBox`, style sheets, scripts, text, and `<foreignObject>` content are never
+  changed. With a `--format` that names a picture format, an SVG is skipped. No FFmpeg is needed.
+  **Interface:** in `peraz probe` and reports an SVG has `kind` `image`, with `codec` `svg` and
+  the container `svg` or `svgz`; the report's `plan.type` is `image`; `peraz watch` picks up
+  `.svg` and `.svgz` files.
 - A BMP is compressed without `--format`: it becomes a PNG, kept only when smaller. Before, a BMP
   or TIFF needed an explicit `--format` and was skipped without one.
 - `peraz compress --cancel-on-stdin` cancels the run like the first Ctrl-C when standard input

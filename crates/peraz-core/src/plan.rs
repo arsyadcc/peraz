@@ -152,6 +152,8 @@ pub enum PlanError {
     ScoreNeedsSoftware,
     /// An animated JPEG XL that stays JPEG XL cannot be scaled down.
     AnimatedJxlResize,
+    /// An SVG is only minified: it has no pixels to encode in another format.
+    SvgConversion { format: ImageFormat },
 }
 
 impl std::fmt::Display for PlanError {
@@ -199,6 +201,10 @@ impl std::fmt::Display for PlanError {
             Self::AnimatedJxlResize => write!(
                 f,
                 "an animated JPEG XL cannot be scaled down as JPEG XL; choose --format webp, avif, gif, or mp4, or leave out --max-width and --max-height"
+            ),
+            Self::SvgConversion { format } => write!(
+                f,
+                "an SVG is minified, not converted to {format}; leave out --format to minify it"
             ),
         }
     }
@@ -621,6 +627,9 @@ pub enum ImageEncoding {
     /// TIFF with lossless Deflate compression: the pixels and their bit depth are kept at every
     /// quality level.
     Tiff,
+    /// SVG, minified: comments, editor metadata, and needless whitespace removed, numbers
+    /// written in their shortest form and rounded to `decimals` places (`None`: not rounded).
+    Svg { decimals: Option<u8> },
 }
 
 /// A complete plan for compressing one still image.
@@ -655,6 +664,8 @@ pub enum ImageDecoder {
     Ffmpeg,
     /// libjxl's `djxl`, for JPEG XL.
     Djxl,
+    /// Read as text: an SVG has no pixels to decode.
+    Text,
 }
 
 /// Image codecs (FFmpeg names) decoded in process. `apng` here is an animated PNG with a single
@@ -687,6 +698,9 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         return Err(PlanError::NotImage { kind: info.kind });
     };
     let codec = picture.codec.as_str();
+    if codec == "svg" {
+        return plan_svg(info, recipe);
+    }
     let decoder = if NATIVE_IMAGES.contains(&codec) {
         ImageDecoder::Native
     } else if FFMPEG_IMAGES.contains(&codec) {
@@ -771,6 +785,37 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         decoder,
         converts_format: source != Some(format) && !default_png,
         target_ssimulacra2: recipe.image.target_ssimulacra2,
+    })
+}
+
+/// Decimal places kept in the numbers of an SVG, per quality level; the highest level does not
+/// round. Numbers below 1 keep at least two significant digits, so small coordinates under a
+/// large scale survive.
+const SVG_DECIMALS: [Option<u8>; 5] = [None, Some(4), Some(3), Some(2), Some(1)];
+
+/// Plans the minification of an SVG, which stays an SVG (`.svgz` stays gzip-compressed).
+fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
+    if recipe.image.format != ImageFormat::Keep {
+        return Err(PlanError::SvgConversion {
+            format: recipe.image.format,
+        });
+    }
+    Ok(ImagePlan {
+        encoding: ImageEncoding::Svg {
+            decimals: SVG_DECIMALS[recipe.quality as usize],
+        },
+        // A vector picture has no pixel size to reduce, and nothing to score.
+        max_width: None,
+        max_height: None,
+        flatten_alpha: false,
+        extension: if info.container == "svgz" {
+            "svgz"
+        } else {
+            "svg"
+        },
+        decoder: ImageDecoder::Text,
+        converts_format: false,
+        target_ssimulacra2: None,
     })
 }
 
@@ -1759,6 +1804,41 @@ mod tests {
         recipe.image.format = ImageFormat::Jpeg;
         let plan = plan_image(&tiff, &recipe).unwrap();
         assert!(plan.converts_format && plan.flatten_alpha);
+    }
+
+    #[test]
+    fn an_svg_is_minified_and_never_converted() {
+        let svg = image_info("svg", "svg", Alpha::Unknown);
+        let mut recipe = Recipe::default();
+        recipe.image.max_width = Some(100);
+        recipe.image.target_ssimulacra2 = Some(80);
+        let plan = plan_image(&svg, &recipe).unwrap();
+        assert_eq!(plan.encoding, ImageEncoding::Svg { decimals: Some(3) });
+        assert_eq!(
+            (plan.extension, plan.decoder, plan.converts_format),
+            ("svg", ImageDecoder::Text, false)
+        );
+        // Pixel settings do not apply to a vector picture.
+        assert_eq!((plan.max_width, plan.target_ssimulacra2), (None, None));
+        recipe.quality = Quality::Highest;
+        assert_eq!(
+            plan_image(&svg, &recipe).unwrap().encoding,
+            ImageEncoding::Svg { decimals: None }
+        );
+        let gzipped = image_info("svg", "svgz", Alpha::Unknown);
+        assert_eq!(plan_image(&gzipped, &recipe).unwrap().extension, "svgz");
+        recipe.image.format = ImageFormat::Webp;
+        let error = plan_image(&svg, &recipe).unwrap_err();
+        assert_eq!(
+            error,
+            PlanError::SvgConversion {
+                format: ImageFormat::Webp
+            }
+        );
+        assert!(
+            error.to_string().contains("not converted to webp"),
+            "{error}"
+        );
     }
 
     #[test]
