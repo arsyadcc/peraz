@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::ffmpeg::{Toolchain, check, command};
 use crate::image::Decoded;
+use crate::metadata::Metadata;
 
 /// Decodes a HEIF/AVIF still image with its orientation applied and its ICC profile.
 pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
@@ -73,6 +74,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
     Ok(Decoded {
         image,
         icc: properties.icc,
+        metadata: read_metadata(&bytes),
     })
 }
 
@@ -427,6 +429,122 @@ fn parse_properties(file: &[u8]) -> Option<Properties> {
         icc,
         transforms,
     })
+}
+
+/// Reads the EXIF and XMP items of a HEIF file. What cannot be followed is left out.
+pub fn read_metadata(file: &[u8]) -> Metadata {
+    let mut metadata = Metadata::default();
+    let Some(meta) = boxes(file).find(|b| &b.kind == b"meta") else {
+        return metadata;
+    };
+    let children = meta.payload.get(4..).unwrap_or_default();
+    let child = |kind: &[u8; 4]| boxes(children).find(|b| &b.kind == kind);
+    let (Some(infos), Some(locations)) = (child(b"iinf"), child(b"iloc")) else {
+        return metadata;
+    };
+    let inline_data = child(b"idat").map(|b| b.payload);
+    // The item list: a version, then a count (16 or 32 bits), then one `infe` box per item.
+    let entries = match infos.payload.first() {
+        Some(0) => infos.payload.get(6..),
+        Some(_) => infos.payload.get(8..),
+        None => None,
+    };
+    for info in boxes(entries.unwrap_or_default()).filter(|b| &b.kind == b"infe") {
+        // Versions 2 and 3: an item ID (16 or 32 bits), a protection index, a type, a name,
+        // and for `mime` items the content type.
+        let (id, rest) = match info.payload.first() {
+            Some(2) => (be16(info.payload, 4).map(u32::from), info.payload.get(6..)),
+            Some(3) => (be32(info.payload, 4), info.payload.get(8..)),
+            _ => (None, None),
+        };
+        let (Some(id), Some(rest)) = (id, rest) else {
+            continue;
+        };
+        let Some(kind) = rest.get(2..6) else { continue };
+        let mut texts = rest.get(6..).unwrap_or_default().split(|b| *b == 0);
+        let content_type = texts.nth(1).unwrap_or_default();
+        let is_xmp = kind == b"mime" && content_type == b"application/rdf+xml";
+        if kind != b"Exif" && !is_xmp {
+            continue;
+        }
+        let Some(data) = item_data(file, locations.payload, inline_data, id) else {
+            continue;
+        };
+        if is_xmp {
+            metadata.xmp.get_or_insert(data);
+        } else if metadata.exif.is_none() {
+            // The item starts with the offset of the TIFF structure after these four bytes.
+            let skip = be32(&data, 0).and_then(|n| usize::try_from(n).ok());
+            if let Some(block) = skip.and_then(|skip| data.get(4usize.checked_add(skip)?..)) {
+                metadata.set_exif(block);
+            }
+        }
+    }
+    metadata
+}
+
+/// The data of one item, gathered from the places the `iloc` box lists for it: in the file, or
+/// in the `idat` box.
+fn item_data(file: &[u8], iloc: &[u8], idat: Option<&[u8]>, wanted: u32) -> Option<Vec<u8>> {
+    let version = *iloc.first()?;
+    let sizes = iloc.get(4..6)?;
+    let (offset_size, length_size) = (usize::from(sizes[0] >> 4), usize::from(sizes[0] & 15));
+    let (base_size, index_size) = (usize::from(sizes[1] >> 4), usize::from(sizes[1] & 15));
+    let number = |at: usize, size: usize| -> Option<usize> {
+        match size {
+            0 => Some(0),
+            4 => usize::try_from(be32(iloc, at)?).ok(),
+            8 => usize::try_from(be64(iloc, at)?).ok(),
+            _ => None,
+        }
+    };
+    let (count, mut at) = if version < 2 {
+        (usize::from(be16(iloc, 6)?), 8)
+    } else {
+        (usize::try_from(be32(iloc, 6)?).ok()?, 10)
+    };
+    for _ in 0..count {
+        let id = if version < 2 {
+            at += 2;
+            u32::from(be16(iloc, at - 2)?)
+        } else {
+            at += 4;
+            be32(iloc, at - 4)?
+        };
+        // Versions 1 and 2 say where offsets count from: 0 the file, 1 the `idat` box.
+        let method = if version == 0 {
+            0
+        } else {
+            at += 2;
+            be16(iloc, at - 2)? & 15
+        };
+        at += 2; // data reference index
+        let base = number(at, base_size)?;
+        at += base_size;
+        let extents = usize::from(be16(iloc, at)?);
+        at += 2;
+        let mut data = Vec::new();
+        for _ in 0..extents {
+            if version > 0 {
+                at += index_size;
+            }
+            let offset = base.checked_add(number(at, offset_size)?)?;
+            let length = number(at + offset_size, length_size)?;
+            at += offset_size + length_size;
+            if id == wanted {
+                let source = match method {
+                    0 => file,
+                    1 => idat?,
+                    _ => return None,
+                };
+                data.extend_from_slice(source.get(offset..offset.checked_add(length)?)?);
+            }
+        }
+        if id == wanted {
+            return Some(data);
+        }
+    }
+    None
 }
 
 fn icc_payload(colr: &[u8]) -> Option<Vec<u8>> {

@@ -18,6 +18,7 @@ pub mod icon;
 pub mod image;
 pub mod jxl;
 pub mod jxl_header;
+pub mod metadata;
 pub mod pdf;
 pub mod probe;
 mod score;

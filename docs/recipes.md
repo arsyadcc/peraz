@@ -30,6 +30,7 @@ max_height = 2000
 | `target_ssimulacra2` | integer | 1–100. Still images only. | `--target-ssimulacra2` |
 | `fps` | integer | 1–50. GIFs and animated WebP/AVIF. | `--fps` |
 | `measure_quality` | boolean | `true` measures every result's quality (VMAF, SSIMULACRA2), also without a target. | `--measure-quality` |
+| `keep_metadata` | boolean | `true` keeps the metadata of pictures (EXIF, XMP, IPTC, with the GPS location). | `--keep-metadata` |
 
 Every key except `version` is optional, and a key that is not set takes the default. Unknown
 keys and invalid values are errors, so a typo never passes silently.

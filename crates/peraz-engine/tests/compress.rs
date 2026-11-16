@@ -386,7 +386,11 @@ fn reads_jpeg_xl_inputs() {
     let decoded =
         peraz_engine::image::decode_native(&env.fixtures.join("image-alpha.png")).unwrap();
     let alpha = env.out.join("alpha.jxl");
-    std::fs::write(&alpha, peraz_engine::jxl::encode(&decoded, 78).unwrap()).unwrap();
+    std::fs::write(
+        &alpha,
+        peraz_engine::jxl::encode(&decoded, 78, None).unwrap(),
+    )
+    .unwrap();
 
     // JPEG XL inputs are read with djxl, upright and with their transparency.
     let read = |input: &Path, output: &str, format: ImageFormat| {
@@ -462,7 +466,7 @@ fn rebuilds_the_jpeg_a_jpeg_xl_was_made_from() {
     let from_pixels = env.out.join("from-pixels.jxl");
     std::fs::write(
         &from_pixels,
-        peraz_engine::jxl::encode(&decoded, 78).unwrap(),
+        peraz_engine::jxl::encode(&decoded, 78, None).unwrap(),
     )
     .unwrap();
     assert_eq!(reconstruct_jpeg(&from_pixels).unwrap(), None);

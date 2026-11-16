@@ -146,8 +146,8 @@ pub enum ImageFormat {
 
 /// Settings for still images.
 ///
-/// EXIF/XMP metadata is always removed (it can hold location and device details); the EXIF
-/// orientation is applied to the pixels first, and the color profile is kept.
+/// EXIF/XMP metadata is removed unless `keep_metadata` is set (it can hold location and device
+/// details); the EXIF orientation is applied to the pixels first, and the color profile is kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageRecipe {
     pub format: ImageFormat,
@@ -157,6 +157,10 @@ pub struct ImageRecipe {
     /// Reach this SSIMULACRA2 score (up to 100) with the smallest file: the encoder setting is
     /// searched. Replaces the quality level for still images.
     pub target_ssimulacra2: Option<u8>,
+    /// Keep the picture's metadata (EXIF, XMP, IPTC; that includes the GPS location) where the
+    /// output format can hold it.
+    #[serde(default)]
+    pub keep_metadata: bool,
 }
 
 /// Everything that decides how a file is compressed.

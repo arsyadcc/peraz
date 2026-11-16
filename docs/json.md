@@ -243,3 +243,4 @@ makes it 1.
 | `settings.target_ssimulacra2` | integer | |
 | `settings.fps` | integer | |
 | `settings.measure_quality` | boolean | |
+| `settings.keep_metadata` | boolean | |

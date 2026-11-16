@@ -445,7 +445,7 @@ fn make_image(
     let mut identical = false;
     if let Some(kind) = lossless
         && let Some(jpeg) = rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok())
-        && let Some((bytes, encoder)) = keep_jpeg_data(&jpeg, kind)
+        && let Some((bytes, encoder)) = keep_jpeg_data(&jpeg, kind, plan.keep_metadata)
         && bytes.len() < encoded.bytes.len()
     {
         encoded.bytes = bytes;
@@ -1317,8 +1317,21 @@ enum Lossless {
 /// The JPEG's data kept losslessly, with the encoder name for the report; `None` when that is not
 /// possible (cjxl does not support some JPEGs, such as arithmetic-coded ones): the lossy encode is
 /// kept then.
-fn keep_jpeg_data(jpeg: &[u8], kind: Lossless) -> Option<(Vec<u8>, &'static str)> {
+fn keep_jpeg_data(
+    jpeg: &[u8],
+    kind: Lossless,
+    keep_metadata: bool,
+) -> Option<(Vec<u8>, &'static str)> {
     use image::ImageDecoder as _;
+    // With its metadata, the JPEG is kept whole: its own EXIF says how it is turned.
+    if keep_metadata {
+        return match kind {
+            Lossless::JpegXl => crate::jxl::recompress_whole_jpeg(jpeg)
+                .ok()
+                .map(|bytes| (bytes, "cjxl lossless JPEG recompression")),
+            Lossless::Jpeg => Some((jpeg.to_vec(), "JPEG rebuilt from JPEG XL")),
+        };
+    }
     let orientation = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(jpeg))
         .ok()?
         .orientation()

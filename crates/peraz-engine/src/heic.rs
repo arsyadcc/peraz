@@ -16,6 +16,7 @@ use image::{DynamicImage, GrayImage, RgbImage};
 
 use crate::ffmpeg::{Toolchain, command};
 use crate::image::Decoded;
+use crate::metadata::Metadata;
 
 /// The FFmpeg encoder HEIC output needs.
 pub const ENCODER: &str = "libx265";
@@ -28,7 +29,12 @@ pub fn crf(quality: u8) -> u8 {
 
 /// Encodes a picture as HEIC at a quality setting (0–100), with its color profile, and with
 /// its transparency when it has any.
-pub fn encode(tools: &Toolchain, prepared: &Decoded, quality: u8) -> Result<Vec<u8>, String> {
+pub fn encode(
+    tools: &Toolchain,
+    prepared: &Decoded,
+    quality: u8,
+    metadata: Option<&Metadata>,
+) -> Result<Vec<u8>, String> {
     let (width, height) = (prepared.image.width(), prepared.image.height());
     let rgba = prepared.image.to_rgba8();
     let has_alpha = rgba.pixels().any(|p| p[3] < 255);
@@ -56,6 +62,7 @@ pub fn encode(tools: &Toolchain, prepared: &Decoded, quality: u8) -> Result<Vec<
                 alpha,
             },
             prepared.icc.as_deref(),
+            metadata,
         )
     })();
     let _ = std::fs::remove_dir_all(&workdir);
@@ -199,6 +206,8 @@ struct Item {
     /// Properties, by their place in the property list (from 1), and whether a reader must
     /// understand each.
     properties: Vec<(u8, bool)>,
+    /// For a `mime` item: what its data is.
+    content_type: Option<&'static str>,
 }
 
 fn boxed(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
@@ -236,16 +245,35 @@ fn grid_data((width, height): (u32, u32)) -> Vec<u8> {
     out
 }
 
+/// The property that gives a picture's size.
+fn size_box((width, height): (u32, u32)) -> Vec<u8> {
+    full_box(
+        *b"ispe",
+        0,
+        0,
+        &[width.to_be_bytes(), height.to_be_bytes()].concat(),
+    )
+}
+
+/// The property that says how the colors are coded: BT.709 primaries and matrix, the sRGB
+/// curve, full range. With a color profile, the profile says what the colors are, and this
+/// only how they are stored.
+fn color_coding(has_profile: bool) -> Vec<u8> {
+    let (primaries, transfer) = if has_profile { (2u16, 2u16) } else { (1, 13) };
+    let mut nclx = b"nclx".to_vec();
+    nclx.extend(primaries.to_be_bytes());
+    nclx.extend(transfer.to_be_bytes());
+    nclx.extend(1u16.to_be_bytes());
+    nclx.push(0x80);
+    boxed(*b"colr", &nclx)
+}
+
 /// Writes the HEIF file.
-fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    let size_box = |(width, height): (u32, u32)| {
-        full_box(
-            *b"ispe",
-            0,
-            0,
-            &[width.to_be_bytes(), height.to_be_bytes()].concat(),
-        )
-    };
+fn container(
+    picture: &Picture,
+    icc: Option<&[u8]>,
+    metadata: Option<&Metadata>,
+) -> Result<Vec<u8>, String> {
     // Properties, numbered from 1 in this order.
     let mut properties: Vec<Vec<u8>> = Vec::new();
     let mut add = |property: Vec<u8>| {
@@ -259,15 +287,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
     } else {
         add(size_box(picture.coded))
     };
-    // How the colors are coded: BT.709 primaries and matrix, the sRGB curve, full range. With
-    // a color profile, the profile says what the colors are, and this only how they are stored.
-    let (primaries, transfer) = if icc.is_some() { (2u16, 2u16) } else { (1, 13) };
-    let mut nclx = b"nclx".to_vec();
-    nclx.extend(primaries.to_be_bytes());
-    nclx.extend(transfer.to_be_bytes());
-    nclx.extend(1u16.to_be_bytes());
-    nclx.push(0x80);
-    let coding = add(boxed(*b"colr", &nclx));
+    let coding = add(color_coding(icc.is_some()));
     let profile = icc.map(|icc| add(boxed(*b"colr", &[b"prof", icc].concat())));
     let three_channels = add(full_box(*b"pixi", 0, 0, &[3, 8, 8, 8]));
 
@@ -286,6 +306,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
             hidden: false,
             data: grid_data(picture.size),
             properties: shown,
+            content_type: None,
         });
         items.push(Item {
             id: 2,
@@ -293,6 +314,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
             hidden: true,
             data: picture.color.frame.clone(),
             properties: vec![(color_configuration, true), (coded_size, false)],
+            content_type: None,
         });
         references.push((*b"dimg", primary, 2));
     } else {
@@ -304,6 +326,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
             hidden: false,
             data: picture.color.frame.clone(),
             properties: all,
+            content_type: None,
         });
     }
     if let Some(alpha) = &picture.alpha {
@@ -318,6 +341,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
                 hidden: false,
                 data: grid_data(picture.size),
                 properties: marks,
+                content_type: None,
             });
             items.push(Item {
                 id: 4,
@@ -325,6 +349,7 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
                 hidden: true,
                 data: alpha.frame.clone(),
                 properties: vec![(configuration, true), (coded_size, false)],
+                content_type: None,
             });
             references.push((*b"dimg", 3, 4));
         } else {
@@ -336,12 +361,46 @@ fn container(picture: &Picture, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
                 hidden: false,
                 data: alpha.frame.clone(),
                 properties: all,
+                content_type: None,
             });
         }
         // The alpha picture is an auxiliary picture of the primary one.
         references.push((*b"auxl", 3, primary));
     }
+    metadata_items(metadata, primary, &mut items, &mut references);
     write_file(&items, primary, &references, &properties)
+}
+
+/// Adds the EXIF and XMP items, which describe the primary picture.
+fn metadata_items(
+    metadata: Option<&Metadata>,
+    primary: u16,
+    items: &mut Vec<Item>,
+    references: &mut Vec<([u8; 4], u16, u16)>,
+) {
+    if let Some(exif) = metadata.and_then(|m| m.exif.as_deref()) {
+        items.push(Item {
+            id: 5,
+            kind: *b"Exif",
+            hidden: true,
+            // The TIFF structure starts right after these four bytes.
+            data: [&[0; 4][..], exif].concat(),
+            properties: Vec::new(),
+            content_type: None,
+        });
+        references.push((*b"cdsc", 5, primary));
+    }
+    if let Some(xmp) = metadata.and_then(|m| m.xmp.as_deref()) {
+        items.push(Item {
+            id: 6,
+            kind: *b"mime",
+            hidden: true,
+            data: xmp.to_vec(),
+            properties: Vec::new(),
+            content_type: Some("application/rdf+xml"),
+        });
+        references.push((*b"cdsc", 6, primary));
+    }
 }
 
 fn write_file(
@@ -362,7 +421,12 @@ fn write_file(
         let mut info = item.id.to_be_bytes().to_vec();
         info.extend([0, 0]);
         info.extend_from_slice(&item.kind);
+        // An empty name, then the content type of a `mime` item.
         info.push(0);
+        if let Some(content_type) = item.content_type {
+            info.extend_from_slice(content_type.as_bytes());
+            info.push(0);
+        }
         infos.extend(full_box(*b"infe", 2, u32::from(item.hidden), &info));
     }
     let mut links = Vec::new();
@@ -372,11 +436,12 @@ fn write_file(
         link.extend(to.to_be_bytes());
         links.extend(boxed(*kind, &link));
     }
-    let mut associations = u32::try_from(items.len())
+    let described: Vec<&Item> = items.iter().filter(|i| !i.properties.is_empty()).collect();
+    let mut associations = u32::try_from(described.len())
         .unwrap_or(u32::MAX)
         .to_be_bytes()
         .to_vec();
-    for item in items {
+    for item in described {
         associations.extend(item.id.to_be_bytes());
         associations.push(u8::try_from(item.properties.len()).unwrap_or(u8::MAX));
         for (index, essential) in &item.properties {
@@ -459,6 +524,11 @@ mod tests {
                 alpha: None,
             },
             Some(b"a color profile"),
+            Some(&Metadata {
+                exif: Some(b"II*\0\x08\0\0\0\0\0\0\0\0\0".to_vec()),
+                xmp: Some(b"<x:xmpmeta/>".to_vec()),
+                photoshop: None,
+            }),
         )
         .unwrap();
         assert_eq!(&plain[4..12], b"ftypheic");
@@ -467,6 +537,13 @@ mod tests {
         assert_eq!(properties.alpha, None);
         assert_eq!(properties.icc.as_deref(), Some(&b"a color profile"[..]));
         assert_eq!(properties.transforms, []);
+        // The metadata items are found again.
+        let metadata = crate::heif::read_metadata(&plain);
+        assert_eq!(
+            metadata.exif.as_deref(),
+            Some(&b"II*\0\x08\0\0\0\0\0\0\0\0\0"[..])
+        );
+        assert_eq!(metadata.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         // The frame is where the item location says.
         let frame = plain.windows(40).position(|w| w == [7; 40]).unwrap();
         let location = u32::try_from(frame).unwrap().to_be_bytes();
@@ -482,12 +559,14 @@ mod tests {
                 alpha: Some(coded(9)),
             },
             None,
+            None,
         )
         .unwrap();
         let properties = crate::heif::read_properties(&odd);
         assert_eq!(properties.primary, Some(1));
         assert_eq!(properties.alpha, Some(3));
         assert_eq!(properties.icc, None);
+        assert!(crate::heif::read_metadata(&odd).is_empty());
         for kind in [&b"grid"[..], b"dimg", b"auxl", b"auxC", b"hvcC"] {
             assert!(odd.windows(4).any(|w| w == kind), "{kind:?}");
         }

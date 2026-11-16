@@ -13,6 +13,13 @@ between alpha versions.
 
 ### Added
 
+- `--keep-metadata` (recipe key `keep_metadata`) keeps the metadata of pictures: EXIF, XMP, and
+  IPTC, which includes the GPS location. The default stays the same: all of it is removed. The
+  pixels are stored upright as before, and the orientation in the kept EXIF is reset, so
+  nothing is turned twice; the color profile is kept either way. EXIF and XMP are kept in JPEG,
+  PNG, WebP, HEIC, and JPEG XL; AVIF keeps the EXIF, TIFF the XMP and IPTC, and JPEG the IPTC
+  too. A JPEG recompressed losslessly into JPEG XL keeps its metadata whole. **Interface:** new
+  flag and recipe key; `settings.keep_metadata` in `peraz recipe show --json`.
 - HEIC output: `--format heic` (recipe value `heic`, also spelled `heif`) writes a HEIC from
   any still picture, with its color profile, its transparency (as an alpha picture, the way
   Apple's software stores it), and any size, odd ones included. FFmpeg encodes the picture with

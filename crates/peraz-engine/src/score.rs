@@ -732,6 +732,7 @@ mod tests {
             decoder: peraz_core::ImageDecoder::Native,
             converts_format: false,
             target_ssimulacra2: Some(80),
+            keep_metadata: false,
         }
     }
 
@@ -744,6 +745,7 @@ mod tests {
             let decoded = Decoded {
                 image: photo_like(96, 64),
                 icc: None,
+                metadata: crate::metadata::Metadata::default(),
             };
             let (encoded, score) =
                 encode_image_to_ssimulacra2(None, decoded, &mut plan, target, &cancel).unwrap();
@@ -766,6 +768,7 @@ mod tests {
         let decoded = Decoded {
             image: photo_like(6, 6),
             icc: None,
+            metadata: crate::metadata::Metadata::default(),
         };
         let (_, score) =
             encode_image_to_ssimulacra2(None, decoded, &mut plan, 80, &AtomicBool::new(false))

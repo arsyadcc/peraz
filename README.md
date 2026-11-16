@@ -178,6 +178,7 @@ peraz --target-size 25MB long-video.mov    # fits, verified (two-pass with x264/
 peraz --target-vmaf 93 clip.mov            # smallest file that still scores VMAF 93
 peraz --target-ssimulacra2 80 photos/*     # smallest pictures that still score 80
 peraz --measure-quality clip.mov photos/*  # report each result's VMAF or SSIMULACRA2
+peraz --keep-metadata photos/*.jpg         # keep EXIF, XMP, and IPTC (GPS location too)
 peraz --start 0:12 --duration 10 clip.mov  # compress just that part
 peraz --trim-only --start 0:12 --duration 10 clip.mov  # cut only: lossless when possible
 peraz photo.jpg screenshot.png             # mozjpeg / palette PNG + oxipng
@@ -229,7 +230,9 @@ clip can always be copied.
 ### Images
 
 The EXIF orientation is applied and the color profile is kept; other metadata (EXIF, XMP,
-including GPS location) is removed. Transparent images converted to JPEG are placed on white.
+including GPS location) is removed unless you pass `--keep-metadata`, which keeps EXIF, XMP, and
+IPTC where the output format can hold them (with the orientation reset, since the pixels are
+stored upright). Transparent images converted to JPEG are placed on white.
 Every output format, AVIF and WebP included, carries the color profile, so wide-gamut photos
 (Display P3) stay wide-gamut. Transparent HEIC and AVIF pictures keep their transparency. When
 the format changes on purpose, the result is kept even if it is larger, and the report shows
@@ -358,6 +361,7 @@ target_vmaf = 93                 # videos: smallest file with this VMAF score
 target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2 score
 fps = 12                         # GIF, animated WebP/AVIF, and animated PNG from a video
 measure_quality = false          # score every result, also without a target
+keep_metadata = false            # keep EXIF, XMP, and IPTC (with the GPS location) in pictures
 ```
 
 Every key except `version` is optional, and unknown keys are errors. Use one with

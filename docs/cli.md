@@ -88,6 +88,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--target-ssimulacra2` | 1–100 | Make each still image as small as it can be while it still scores this SSIMULACRA2. Replaces `--quality` for still images. |
 | `--no-audio` | | Remove all audio tracks. |
 | `--measure-quality` | | Measure every result against its source, also without a score target, and report it in `score`: VMAF for videos (on samples of videos over 30 seconds; needs FFmpeg with libvmaf, otherwise videos are not measured and a warning says so), SSIMULACRA2 for still images. Encoding does not change. Measuring takes extra time: about as long as compressing for videos, a fraction of a second per picture. |
+| `--keep-metadata` | | Keep the metadata of pictures: EXIF, XMP, and IPTC. That includes the GPS location, camera, and dates, so leave it out for pictures you share. Without it, all of this is removed. The color profile is kept either way, and so is the right way up: the pixels are stored upright and the orientation in the kept EXIF is reset. EXIF and XMP are kept in JPEG, PNG, WebP, HEIC, and JPEG XL; AVIF keeps the EXIF only, TIFF the XMP and IPTC but not the EXIF, and JPEG the IPTC too. BMP and GIF pictures hold no metadata. Videos, GIFs, animations, SVGs, icon files, and documents are not affected. |
 | `-j`, `--jobs` | number | How many files to work on at once. Default: one per logical core. |
 | `--json` | | Print [JSON](json.md) instead of text. |
 

@@ -12,6 +12,7 @@ use peraz_core::plan::fit_within;
 use peraz_core::{ImageEncoding, ImagePlan};
 
 use crate::ffmpeg::Toolchain;
+use crate::metadata::Metadata;
 
 /// An encoded image, ready to be written.
 #[derive(Debug)]
@@ -23,11 +24,13 @@ pub struct EncodedImage {
     pub encoder: String,
 }
 
-/// A decoded picture, already upright, with its color profile.
+/// A decoded picture, already upright, with its color profile and its metadata (which is
+/// written to the output only on request).
 #[derive(Debug, Clone)]
 pub struct Decoded {
     pub image: DynamicImage,
     pub icc: Option<Vec<u8>>,
+    pub metadata: Metadata,
 }
 
 /// Encodes a decoded picture according to `plan`. `tools` is the FFmpeg to use for the formats
@@ -42,7 +45,11 @@ pub fn encode_image(
 
 /// Fits a decoded picture in the plan's box: the pixels the encoder gets.
 pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
-    let Decoded { mut image, icc } = decoded;
+    let Decoded {
+        mut image,
+        icc,
+        metadata,
+    } = decoded;
     if let Some((w, h)) = fit_within(
         (image.width(), image.height()),
         plan.max_width,
@@ -50,7 +57,11 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
     ) {
         image = image.resize_exact(w, h, FilterType::Lanczos3);
     }
-    Decoded { image, icc }
+    Decoded {
+        image,
+        icc,
+        metadata,
+    }
 }
 
 /// Encodes a picture that [`prepare`] made ready, according to `plan`.
@@ -71,7 +82,13 @@ fn encode_image_inner(
     prepared: &Decoded,
     plan: &ImagePlan,
 ) -> Result<EncodedImage, String> {
-    let Decoded { image, icc } = prepared;
+    let Decoded {
+        image,
+        icc,
+        metadata,
+    } = prepared;
+    // The metadata to write: only on request, and only when there is any.
+    let kept = Some(metadata).filter(|m| plan.keep_metadata && !m.is_empty());
     let (width, height) = (image.width(), image.height());
     let (bytes, encoder) = match plan.encoding {
         ImageEncoding::Jpeg { quality } => {
@@ -80,32 +97,40 @@ fn encode_image_inner(
             } else {
                 image.to_rgb8()
             };
+            let jpeg = encode_jpeg(&rgb, quality, icc.as_deref())?;
             (
-                encode_jpeg(&rgb, quality, icc.as_deref())?,
+                kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg)),
                 format!("mozjpeg q{quality}"),
             )
         }
         ImageEncoding::Png {
             min_quality,
             max_quality,
-        } => encode_png(&image.to_rgba8(), min_quality, max_quality, icc.as_deref())?,
+        } => {
+            let (png, encoder) =
+                encode_png(&image.to_rgba8(), min_quality, max_quality, icc.as_deref())?;
+            (
+                kept.map_or_else(|| png.clone(), |m| m.into_png(&png)),
+                encoder,
+            )
+        }
         ImageEncoding::Webp { quality } => (
-            encode_webp(&image.to_rgba8(), quality, icc.as_deref())?,
+            encode_webp(&image.to_rgba8(), quality, icc.as_deref(), kept)?,
             format!("libwebp q{quality}"),
         ),
         ImageEncoding::Jxl { quality, .. } => (
-            crate::jxl::encode(prepared, quality)?,
+            crate::jxl::encode(prepared, quality, kept)?,
             format!("cjxl q{quality}"),
         ),
         ImageEncoding::Heic { quality } => {
             let tools = tools.ok_or("HEIC output needs FFmpeg, which was not found")?;
             (
-                crate::heic::encode(tools, prepared, quality)?,
+                crate::heic::encode(tools, prepared, quality, kept)?,
                 format!("x265 crf {}", crate::heic::crf(quality)),
             )
         }
         ImageEncoding::Tiff => (
-            crate::tiff::encode(image, icc.as_deref())?,
+            crate::tiff::encode(image, icc.as_deref(), kept)?,
             crate::tiff::ENCODER.to_owned(),
         ),
         // SVGs and icon files are rewritten whole and never reach the pixel encoders.
@@ -114,7 +139,9 @@ fn encode_image_inner(
         }
         ImageEncoding::Avif { quality } => {
             let mut rgba = image.to_rgba8();
-            let avif = encode_avif(&rgba, quality)?;
+            // AVIF carries the EXIF block; this encoder has no place for XMP.
+            let exif = kept.and_then(|m| m.exif.as_deref());
+            let avif = encode_avif(&rgba, quality, exif)?;
             let tagged = match icc.as_deref() {
                 Some(profile) => crate::heif::embed_icc(&avif, profile).ok_or(profile),
                 None => Ok(avif),
@@ -129,7 +156,7 @@ fn encode_image_inner(
                         ""
                     };
                     (
-                        encode_avif(&rgba, quality)?,
+                        encode_avif(&rgba, quality, exif)?,
                         format!("rav1e q{quality}{note}"),
                     )
                 }
@@ -163,7 +190,14 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
     let reader = ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("cannot read {name}: {e}"))?;
-    decode_reader(reader, name)
+    let mut decoded = decode_reader(reader, name)?;
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        // A JPEG's segments are read here, to get the Photoshop resources (IPTC) too.
+        decoded.metadata = Metadata::from_jpeg(bytes);
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        decoded.metadata.photoshop = crate::tiff::photoshop_resources(bytes);
+    }
+    Ok(decoded)
 }
 
 fn decode_reader<R: std::io::BufRead + std::io::Seek>(
@@ -174,9 +208,25 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     let mut decoder = reader.into_decoder().map_err(error)?;
     let orientation = decoder.orientation().map_err(error)?;
     let icc = decoder.icc_profile().map_err(error)?;
+    let metadata = decoder_metadata(&mut decoder);
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
-    Ok(Decoded { image, icc })
+    Ok(Decoded {
+        image,
+        icc,
+        metadata,
+    })
+}
+
+/// The EXIF and XMP a decoder found in its file. Metadata that cannot be read is left out:
+/// the picture itself is what matters.
+pub(crate) fn decoder_metadata(decoder: &mut impl ImageDecoder) -> Metadata {
+    let mut metadata = Metadata::default();
+    if let Ok(Some(exif)) = decoder.exif_metadata() {
+        metadata.set_exif(&exif);
+    }
+    metadata.xmp = decoder.xmp_metadata().ok().flatten();
+    metadata
 }
 
 /// Why `path` is a cut-off JPEG or GIF, or `None` when it is complete (or another format).
@@ -453,7 +503,12 @@ fn to_srgb(rgba: &mut RgbaImage, icc: &[u8]) -> Result<bool, String> {
     Ok(true)
 }
 
-fn encode_webp(rgba: &RgbaImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
+fn encode_webp(
+    rgba: &RgbaImage,
+    quality: u8,
+    icc: Option<&[u8]>,
+    metadata: Option<&Metadata>,
+) -> Result<Vec<u8>, String> {
     let mut config = webp::WebPConfig::new()
         .map_err(|()| "libwebp: cannot create a configuration".to_owned())?;
     config.quality = f32::from(quality);
@@ -471,18 +526,25 @@ fn encode_webp(rgba: &RgbaImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<
         webp::Encoder::from_rgb(rgb.as_raw(), rgba.width(), rgba.height()).encode_advanced(&config)
     }
     .map_err(|e| format!("libwebp: {e:?}"))?;
-    match icc {
-        Some(icc) => webp_with_icc(&encoded, icc, rgba.width(), rgba.height(), has_alpha),
-        None => Ok(encoded.to_vec()),
+    let exif = metadata.and_then(|m| m.exif.as_deref());
+    let xmp = metadata.and_then(|m| m.xmp.as_deref());
+    if icc.is_none() && exif.is_none() && xmp.is_none() {
+        return Ok(encoded.to_vec());
     }
+    let extras = WebpExtras { icc, exif, xmp };
+    webp_extended(&encoded, &extras, rgba.width(), rgba.height(), has_alpha)
 }
 
-fn encode_avif(rgba: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
+fn encode_avif(rgba: &RgbaImage, quality: u8, exif: Option<&[u8]>) -> Result<Vec<u8>, String> {
     let av1 = ravif::Encoder::new()
         .with_quality(f32::from(quality))
         .with_alpha_quality(f32::from(quality.saturating_add(10).min(100)))
         // rav1e speed 1–10; 6 keeps encoding interactive without much size loss.
         .with_speed(6);
+    let av1 = match exif {
+        Some(exif) => av1.with_exif(exif),
+        None => av1,
+    };
     let (width, height) = (rgba.width() as usize, rgba.height() as usize);
     let pixels: Vec<ravif::RGBA8> = rgba
         .pixels()
@@ -495,19 +557,30 @@ fn encode_avif(rgba: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
     Ok(encoded.avif_file)
 }
 
-/// Rewrites a simple WebP file as an extended (VP8X) file carrying an ICC profile.
+/// What an extended WebP file carries besides the picture.
+struct WebpExtras<'a> {
+    icc: Option<&'a [u8]>,
+    exif: Option<&'a [u8]>,
+    xmp: Option<&'a [u8]>,
+}
+
+/// Rewrites a simple WebP file as an extended (VP8X) file carrying a color profile and
+/// metadata.
 ///
-/// Follows the WebP container specification: `RIFF` header, a `VP8X` chunk with the ICC flag,
-/// an `ICCP` chunk, then the image chunks (`ALPH`, `VP8 `/`VP8L`) in their original order.
-fn webp_with_icc(
+/// Follows the WebP container specification: `RIFF` header, a `VP8X` chunk with a flag per
+/// extra, the `ICCP` chunk, the image chunks (`ALPH`, `VP8 `/`VP8L`) in their original order,
+/// then the `EXIF` and `XMP ` chunks.
+fn webp_extended(
     webp: &[u8],
-    icc: &[u8],
+    extras: &WebpExtras,
     width: u32,
     height: u32,
     has_alpha: bool,
 ) -> Result<Vec<u8>, String> {
     const ICC_FLAG: u8 = 0x20;
     const ALPHA_FLAG: u8 = 0x10;
+    const EXIF_FLAG: u8 = 0x08;
+    const XMP_FLAG: u8 = 0x04;
     let invalid = || "libwebp produced an unexpected file layout".to_owned();
     if webp.len() < 12 || &webp[0..4] != b"RIFF" || &webp[8..12] != b"WEBP" {
         return Err(invalid());
@@ -525,7 +598,7 @@ fn webp_with_icc(
         let end = offset + 8 + size + (size & 1);
         let chunk = webp.get(offset..end.min(webp.len())).ok_or_else(invalid)?;
         if fourcc == b"VP8X" {
-            flags |= chunk.get(8).copied().unwrap_or(0) & !ICC_FLAG;
+            flags |= chunk.get(8).copied().unwrap_or(0) & ALPHA_FLAG;
         } else {
             image_chunks.extend_from_slice(chunk);
         }
@@ -534,14 +607,31 @@ fn webp_with_icc(
     if image_chunks.is_empty() {
         return Err(invalid());
     }
-    let mut vp8x = vec![flags | ICC_FLAG, 0, 0, 0];
+    for (extra, flag) in [
+        (extras.icc, ICC_FLAG),
+        (extras.exif, EXIF_FLAG),
+        (extras.xmp, XMP_FLAG),
+    ] {
+        if extra.is_some() {
+            flags |= flag;
+        }
+    }
+    let mut vp8x = vec![flags, 0, 0, 0];
     vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
     vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
 
     let mut body = b"WEBP".to_vec();
     push_chunk(&mut body, *b"VP8X", &vp8x);
-    push_chunk(&mut body, *b"ICCP", icc);
+    if let Some(icc) = extras.icc {
+        push_chunk(&mut body, *b"ICCP", icc);
+    }
     body.extend_from_slice(&image_chunks);
+    if let Some(exif) = extras.exif {
+        push_chunk(&mut body, *b"EXIF", exif);
+    }
+    if let Some(xmp) = extras.xmp {
+        push_chunk(&mut body, *b"XMP ", xmp);
+    }
     let mut out = b"RIFF".to_vec();
     out.extend_from_slice(
         &u32::try_from(body.len())
@@ -651,7 +741,7 @@ mod tests {
     fn webp_keeps_alpha_and_icc() {
         let icc = moxcms::ColorProfile::new_display_p3().encode().unwrap();
         for transparent in [false, true] {
-            let webp = encode_webp(&gradient(64, 48, transparent), 80, Some(&icc)).unwrap();
+            let webp = encode_webp(&gradient(64, 48, transparent), 80, Some(&icc), None).unwrap();
             let mut decoder =
                 image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
             assert_eq!(
@@ -670,7 +760,7 @@ mod tests {
 
     #[test]
     fn avif_is_written() {
-        let avif = encode_avif(&gradient(32, 32, true), 70).unwrap();
+        let avif = encode_avif(&gradient(32, 32, true), 70, None).unwrap();
         assert_eq!(&avif[4..12], b"ftypavif");
     }
 

@@ -19,6 +19,7 @@ use serde::Serialize;
 
 use crate::ffmpeg::{BUNDLED_DIR, bundled_dir, command, exe_name, find_on_path};
 use crate::image::Decoded;
+use crate::metadata::Metadata;
 
 /// Environment variable that points Peraz at a specific `cjxl` binary.
 pub const CJXL_ENV: &str = "PERAZ_CJXL";
@@ -99,13 +100,23 @@ fn tools() -> Result<&'static JxlTools, String> {
 }
 
 /// Encodes a picture at a `cjxl` quality setting (0–100, where 100 is lossless). The color
-/// profile is kept.
-pub fn encode(prepared: &Decoded, quality: u8) -> Result<Vec<u8>, String> {
+/// profile is kept, and `metadata` when given: `cjxl` carries over what the PNG it reads holds.
+pub fn encode(
+    prepared: &Decoded,
+    quality: u8,
+    metadata: Option<&Metadata>,
+) -> Result<Vec<u8>, String> {
     let tools = tools()?;
     let workdir = crate::compress::work_folder()?;
     let input = workdir.join("in.png");
     let output = workdir.join("out.jxl");
     let result = write_png(&prepared.image, prepared.icc.as_deref(), &input)
+        .and_then(|()| match metadata {
+            Some(metadata) => std::fs::read(&input)
+                .and_then(|png| std::fs::write(&input, metadata.into_png(&png)))
+                .map_err(|e| format!("cannot write a work file: {e}")),
+            None => Ok(()),
+        })
         .and_then(|()| run_cjxl(&tools.cjxl, &input, &output, &["-q", &quality.to_string()]));
     let _ = std::fs::remove_dir_all(&workdir);
     result
@@ -120,6 +131,19 @@ pub fn recompress_jpeg(jpeg: &[u8], orientation: u8) -> Result<Vec<u8>, String> 
     let input = workdir.join("in.jpg");
     let output = workdir.join("out.jxl");
     let result = std::fs::write(&input, stripped)
+        .map_err(|e| format!("cannot write a work file: {e}"))
+        .and_then(|()| run_cjxl(&tools.cjxl, &input, &output, &["--lossless_jpeg=1"]));
+    let _ = std::fs::remove_dir_all(&workdir);
+    result
+}
+
+/// Recompresses a JPEG losslessly as it is, with all its metadata.
+pub fn recompress_whole_jpeg(jpeg: &[u8]) -> Result<Vec<u8>, String> {
+    let tools = tools()?;
+    let workdir = crate::compress::work_folder()?;
+    let input = workdir.join("in.jpg");
+    let output = workdir.join("out.jxl");
+    let result = std::fs::write(&input, jpeg)
         .map_err(|e| format!("cannot write a work file: {e}"))
         .and_then(|()| run_cjxl(&tools.cjxl, &input, &output, &["--lossless_jpeg=1"]));
     let _ = std::fs::remove_dir_all(&workdir);
@@ -272,8 +296,17 @@ fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String
         .into_decoder()
         .map_err(error)?;
     let icc = image::ImageDecoder::icc_profile(&mut decoder).map_err(error)?;
+    // djxl copies the file's EXIF and XMP into the PNG, as text chunks.
+    let mut metadata = crate::image::decoder_metadata(&mut decoder);
+    if let Ok(png) = std::fs::read(&output) {
+        metadata.add_png_raw_profiles(&png);
+    }
     let image = DynamicImage::from_decoder(decoder).map_err(error)?;
-    Ok(Decoded { image, icc })
+    Ok(Decoded {
+        image,
+        icc,
+        metadata,
+    })
 }
 
 fn run_cjxl(cjxl: &Path, input: &Path, output: &Path, args: &[&str]) -> Result<Vec<u8>, String> {

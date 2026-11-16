@@ -153,7 +153,8 @@ fn printed_json_matches_the_docs() {
         config.join("recipes/mine.toml"),
         "version = 1\ndescription = \"Mine\"\nquality = \"small\"\nformat = \"webp\"\n\
          max_width = 800\nmax_height = 600\ncodec = \"hevc\"\nencoder = \"software\"\n\
-         no_audio = true\ntarget_size = \"5MB\"\ntarget_ssimulacra2 = 80\nfps = 10\nmeasure_quality = true\n",
+         no_audio = true\ntarget_size = \"5MB\"\ntarget_ssimulacra2 = 80\nfps = 10\nmeasure_quality = true\n\
+         keep_metadata = true\n",
     )
     .unwrap();
     std::fs::write(

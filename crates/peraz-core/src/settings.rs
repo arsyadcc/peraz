@@ -17,6 +17,7 @@
 //! target_vmaf = 93                 # videos: smallest file with this VMAF score
 //! target_ssimulacra2 = 80          # still images: smallest file with this SSIMULACRA2 score
 //! measure_quality = false          # score every result (VMAF, SSIMULACRA2), even without a target
+//! keep_metadata = false            # keep EXIF, XMP, and IPTC (with the GPS location) in pictures
 //! fps = 12                         # GIF and animated WebP/AVIF frame rate
 //! ```
 //!
@@ -65,6 +66,8 @@ pub struct Settings {
     pub fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measure_quality: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_metadata: Option<bool>,
 }
 
 fn current_version() -> u32 {
@@ -88,6 +91,7 @@ impl Default for Settings {
             target_ssimulacra2: None,
             fps: None,
             measure_quality: None,
+            keep_metadata: None,
         }
     }
 }
@@ -244,6 +248,7 @@ impl Settings {
             target_ssimulacra2: self.target_ssimulacra2.or(below.target_ssimulacra2),
             fps: self.fps.or(below.fps),
             measure_quality: self.measure_quality.or(below.measure_quality),
+            keep_metadata: self.keep_metadata.or(below.keep_metadata),
         }
     }
 
@@ -279,6 +284,7 @@ impl Settings {
                 max_width: self.max_width,
                 max_height: self.max_height,
                 target_ssimulacra2: self.target_ssimulacra2,
+                keep_metadata: self.keep_metadata.unwrap_or(false),
             },
             gif: GifRecipe { fps: self.fps },
             clip: Clip {
@@ -465,9 +471,11 @@ mod tests {
             fps: Some(10),
             target_size: Some("8MB".into()),
             measure_quality: Some(true),
+            keep_metadata: Some(true),
             ..Settings::default()
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()).unwrap(), settings);
-        assert!(settings.to_recipe(None, None).unwrap().measure_quality);
+        let recipe = settings.to_recipe(None, None).unwrap();
+        assert!(recipe.measure_quality && recipe.image.keep_metadata);
     }
 }

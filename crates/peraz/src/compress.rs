@@ -110,6 +110,11 @@ pub struct SettingsArgs {
     /// does not change.
     #[arg(long)]
     pub measure_quality: bool,
+
+    /// Keep the metadata of pictures (EXIF, XMP, IPTC), which includes the GPS location. By
+    /// default it is removed; the color profile is always kept.
+    #[arg(long)]
+    pub keep_metadata: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -645,6 +650,7 @@ pub fn recipe(args: &SettingsArgs) -> Result<(Recipe, Option<String>), String> {
         target_ssimulacra2: args.target_ssimulacra2,
         fps: args.fps,
         measure_quality: args.measure_quality.then_some(true),
+        keep_metadata: args.keep_metadata.then_some(true),
         ..Settings::default()
     };
     let project = if args.recipe.is_none() && !args.ignore_project_recipe {

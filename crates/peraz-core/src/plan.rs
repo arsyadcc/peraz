@@ -665,6 +665,9 @@ pub struct ImagePlan {
     /// Search the encoder's quality setting for the smallest file with this SSIMULACRA2 score;
     /// `encoding` then holds the setting the search starts from (and, once done, the one used).
     pub target_ssimulacra2: Option<u8>,
+    /// The input's metadata (EXIF, XMP, IPTC) is written to the output, where its format can
+    /// hold it. The orientation in it is reset, because the pixels are stored upright.
+    pub keep_metadata: bool,
 }
 
 /// How a still image is decoded.
@@ -812,6 +815,7 @@ pub fn plan_image(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanEr
         decoder,
         converts_format: source != Some(format) && !default_png,
         target_ssimulacra2: recipe.image.target_ssimulacra2,
+        keep_metadata: recipe.image.keep_metadata,
     })
 }
 
@@ -843,6 +847,7 @@ fn plan_svg(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> {
         decoder: ImageDecoder::Text,
         converts_format: false,
         target_ssimulacra2: None,
+        keep_metadata: false,
     })
 }
 
@@ -870,6 +875,7 @@ fn plan_icon(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan, PlanError> 
         decoder: ImageDecoder::Native,
         converts_format: false,
         target_ssimulacra2: None,
+        keep_metadata: false,
     })
 }
 
@@ -995,6 +1001,7 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
         decoder: ImageDecoder::Djxl,
         converts_format: false,
         target_ssimulacra2: None,
+        keep_metadata: false,
     })
 }
 
@@ -1345,6 +1352,7 @@ impl DocumentPlan {
             decoder: ImageDecoder::Native,
             converts_format: false,
             target_ssimulacra2: None,
+            keep_metadata: false,
         }
     }
 }

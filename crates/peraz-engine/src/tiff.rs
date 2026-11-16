@@ -10,15 +10,29 @@ use tiff::encoder::colortype::{self, ColorType};
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, TiffValue};
 use tiff::tags::{ExtraSamples, Predictor, Tag, Type};
 
+use crate::metadata::Metadata;
+
 /// What the report names as the encoder of a TIFF.
 pub const ENCODER: &str = "TIFF Deflate (lossless)";
 
 /// Encodes a picture as a Deflate-compressed TIFF with the same samples: 8-bit, 16-bit, or
 /// floating point; gray or RGB; with or without transparency. Gray with transparency is stored
 /// as RGB with transparency, which every TIFF reader understands.
-pub fn encode(image: &DynamicImage, icc: Option<&[u8]>) -> Result<Vec<u8>, String> {
+///
+/// With `metadata`, its XMP packet and Photoshop resources (IPTC) are written to the tags TIFF
+/// has for them.
+pub fn encode(
+    image: &DynamicImage,
+    icc: Option<&[u8]>,
+    metadata: Option<&Metadata>,
+) -> Result<Vec<u8>, String> {
     let (width, height) = (image.width(), image.height());
-    let page = Page { width, height, icc };
+    let page = Page {
+        width,
+        height,
+        icc,
+        metadata,
+    };
     let mut out = Cursor::new(Vec::new());
     match image {
         DynamicImage::ImageLuma8(pixels) => {
@@ -67,6 +81,7 @@ struct Page<'a> {
     width: u32,
     height: u32,
     icc: Option<&'a [u8]>,
+    metadata: Option<&'a Metadata>,
 }
 
 impl Page<'_> {
@@ -100,8 +115,30 @@ impl Page<'_> {
         if let Some(icc) = self.icc {
             image.encoder().write_tag(Tag::IccProfile, Undefined(icc))?;
         }
+        if let Some(xmp) = self.metadata.and_then(|m| m.xmp.as_deref()) {
+            image.encoder().write_tag(Tag::Unknown(XMP_TAG), xmp)?;
+        }
+        if let Some(resources) = self.metadata.and_then(|m| m.photoshop.as_deref()) {
+            image
+                .encoder()
+                .write_tag(Tag::Unknown(PHOTOSHOP_TAG), resources)?;
+        }
         image.write_data(samples)
     }
+}
+
+/// The TIFF tag that holds the XMP packet.
+const XMP_TAG: u16 = 700;
+/// The TIFF tag that holds Photoshop image resources, IPTC among them.
+const PHOTOSHOP_TAG: u16 = 34377;
+
+/// The Photoshop image resources of a TIFF file held in memory, if it has any.
+pub fn photoshop_resources(tiff: &[u8]) -> Option<Vec<u8>> {
+    tiff::decoder::Decoder::new(Cursor::new(tiff))
+        .ok()?
+        .get_tag_u8_vec(Tag::Unknown(PHOTOSHOP_TAG))
+        .ok()
+        .filter(|resources| !resources.is_empty())
 }
 
 /// Bytes stored with the TIFF type `UNDEFINED`, which the ICC profile tag is specified to use.
@@ -276,7 +313,7 @@ mod tests {
         ];
         let icc = b"not a real profile, only bytes to carry".to_vec();
         for picture in pictures {
-            let tiff = encode(&picture, Some(&icc)).unwrap();
+            let tiff = encode(&picture, Some(&icc), None).unwrap();
             let (back, profile) = read_back(&tiff);
             // Gray with transparency is stored as RGB with transparency, at the same depth.
             let expected = match picture {
@@ -301,7 +338,7 @@ mod tests {
         let picture = DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(256, 256, |x, y| {
             image::Rgb([(x * 250) as u16, (y * 250) as u16, ((x + y) * 120) as u16])
         }));
-        let tiff = encode(&picture, None).unwrap();
+        let tiff = encode(&picture, None, None).unwrap();
         assert!(
             tiff.len() * 10 < picture.as_bytes().len(),
             "{} bytes for {} bytes of samples",

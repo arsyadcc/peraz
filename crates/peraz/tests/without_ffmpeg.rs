@@ -292,6 +292,43 @@ fn heic_output_without_ffmpeg_stops_the_run_before_any_work() {
 }
 
 #[test]
+fn metadata_is_kept_only_with_the_flag() {
+    let dir = setup("metadata");
+    // A PNG with an EXIF chunk before its picture data.
+    let png = std::fs::read(dir.0.join("photo.png")).unwrap();
+    let exif = b"II*\0\x08\0\0\0\0\0\0\0\0\0";
+    let mut chunk = u32::try_from(exif.len()).unwrap().to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(exif);
+    // The checksum of the chunk's name and data.
+    let mut crc = u32::MAX;
+    for byte in &chunk[4..] {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    chunk.extend((!crc).to_be_bytes());
+    let tagged = [&png[..33], &chunk, &png[33..]].concat();
+    std::fs::write(dir.0.join("tagged.png"), tagged).unwrap();
+    let has_exif = |name: &str| {
+        let jpeg = std::fs::read(dir.0.join(name)).unwrap();
+        jpeg.windows(6).any(|w| w == b"Exif\0\0")
+    };
+    for (flags, name, kept) in [
+        (&["--keep-metadata"][..], "kept.jpg", true),
+        (&[][..], "plain.jpg", false),
+    ] {
+        let mut args = vec!["compress", "--format", "jpeg", "-o", name];
+        args.extend(flags);
+        args.push("tagged.png");
+        let output = peraz(&dir.0, &args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(has_exif(name), kept, "{name}");
+    }
+}
+
+#[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
     let output = peraz(
