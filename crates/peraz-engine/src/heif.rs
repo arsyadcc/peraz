@@ -738,6 +738,177 @@ pub fn embed_icc(file: &[u8], icc: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Adds an XMP packet to a HEIF/AVIF file, the way the format stores one: an item of type
+/// `mime` with XMP's content type. Returns `None` when the file's structure is not one this
+/// understands.
+pub fn embed_xmp(file: &[u8], xmp: &[u8]) -> Option<Vec<u8>> {
+    add_item(file, b"mime\0application/rdf+xml\0", xmp)
+}
+
+/// Adds an EXIF block to a HEIF/AVIF file: an item of type `Exif`, whose data starts with the
+/// offset of the block in it (none). Returns `None` when the file's structure is not one this
+/// understands.
+pub fn embed_exif(file: &[u8], exif: &[u8]) -> Option<Vec<u8>> {
+    add_item(file, b"Exif\0", &[&[0; 4][..], exif].concat())
+}
+
+/// Adds a metadata item to a HEIF/AVIF file: listed with `kind` (its type, its name, and for a
+/// `mime` item its content type), describing the primary item (`cdsc`), with its data in one
+/// piece in a box of its own at the end of the file.
+fn add_item(file: &[u8], kind: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    let top: Vec<Bx> = boxes(file).collect();
+    let whole: usize = top.iter().map(|b| b.header + b.payload.len()).sum();
+    if whole != file.len() {
+        return None;
+    }
+    let meta = top.iter().find(|b| &b.kind == b"meta")?;
+    let meta_end = offset_in(file, meta.payload)? + meta.payload.len();
+    let (meta_head, meta_children) = meta.payload.split_at_checked(4)?;
+    let children: Vec<Bx> = boxes(meta_children).collect();
+    // Rewritten boxes get 8-byte headers, so only the added bytes move the image data.
+    if std::iter::once(meta)
+        .chain(&children)
+        .any(|b| b.header != 8)
+    {
+        return None;
+    }
+    let child = |kind: &[u8; 4]| children.iter().find(|b| &b.kind == kind);
+    let pitm = child(b"pitm")?;
+    let primary = match *pitm.payload.first()? {
+        0 => u32::from(be16(pitm.payload, 4)?),
+        _ => be32(pitm.payload, 4)?,
+    };
+    let (item, new_infos) = listed(child(b"iinf")?.payload, primary, kind)?;
+    let old_references = child(b"iref").map(|b| b.payload);
+    let new_references = describing(old_references, item, primary)?;
+    let locations = child(b"iloc")?.payload;
+    // What the three boxes grow by, and a header for the reference box when there was none.
+    let added = new_infos.len() - child(b"iinf")?.payload.len()
+        + location_entry(locations, item, 0, 0)?.len()
+        + new_references.len()
+        - old_references.map_or(0, <[u8]>::len)
+        + if old_references.is_none() { 8 } else { 0 };
+    // The data goes after everything else, in a box of its own.
+    let data_at = file.len() + added + 8;
+    let mut new_locations = shift_iloc(locations, meta_end, added)?;
+    if *locations.first()? < 2 {
+        let count = be16(locations, 6)?.checked_add(1)?;
+        new_locations[6..8].copy_from_slice(&count.to_be_bytes());
+    } else {
+        let count = be32(locations, 6)?.checked_add(1)?;
+        new_locations[6..10].copy_from_slice(&count.to_be_bytes());
+    }
+    new_locations.extend(location_entry(locations, item, data_at, data.len())?);
+
+    let mut new_meta = meta_head.to_vec();
+    for child in &children {
+        let payload = match &child.kind {
+            b"iinf" => &new_infos,
+            b"iref" => &new_references,
+            b"iloc" => &new_locations,
+            _ => child.payload,
+        };
+        new_meta.extend(make_box(child.kind, payload)?);
+    }
+    if old_references.is_none() {
+        new_meta.extend(make_box(*b"iref", &new_references)?);
+    }
+    let new_meta = make_box(*b"meta", &new_meta)?;
+    if new_meta.len() != meta.header + meta.payload.len() + added {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(file.len() + added + 8 + data.len());
+    for b in &top {
+        if &b.kind == b"meta" {
+            out.extend_from_slice(&new_meta);
+        } else {
+            let start = offset_in(file, b.payload)? - b.header;
+            out.extend_from_slice(&file[start..start + b.header + b.payload.len()]);
+        }
+    }
+    out.extend(make_box(*b"mdat", data)?);
+    Some(out)
+}
+
+/// `iinf` with one more item, numbered after the highest there is: the new item's number, and
+/// the new box content.
+fn listed(infos: &[u8], primary: u32, kind: &[u8]) -> Option<(u16, Vec<u8>)> {
+    let wide_count = *infos.first()? != 0;
+    let entries = infos.get(if wide_count { 8 } else { 6 }..)?;
+    let highest = boxes(entries)
+        .filter(|b| &b.kind == b"infe")
+        .filter_map(|b| match b.payload.first() {
+            Some(2) => be16(b.payload, 4).map(u32::from),
+            Some(3) => be32(b.payload, 4),
+            _ => None,
+        })
+        .max()?;
+    let item = u16::try_from(highest.max(primary).checked_add(1)?).ok()?;
+    let info = make_box(
+        *b"infe",
+        &[&[2, 0, 0, 0][..], &item.to_be_bytes(), &[0, 0], kind].concat(),
+    )?;
+    let mut new_infos = infos.to_vec();
+    if wide_count {
+        let count = be32(infos, 4)?.checked_add(1)?;
+        new_infos[4..8].copy_from_slice(&count.to_be_bytes());
+    } else {
+        let count = be16(infos, 4)?.checked_add(1)?;
+        new_infos[4..6].copy_from_slice(&count.to_be_bytes());
+    }
+    new_infos.extend_from_slice(&info);
+    Some((item, new_infos))
+}
+
+/// `iref` with one more reference: `item` describes the primary item. Without an `iref` box
+/// so far, the content of a new one.
+fn describing(references: Option<&[u8]>, item: u16, primary: u32) -> Option<Vec<u8>> {
+    let wide_ids = references.is_some_and(|payload| payload.first() != Some(&0));
+    let ids = if wide_ids {
+        let item = u32::from(item).to_be_bytes();
+        [&item[..], &[0, 1], &primary.to_be_bytes()].concat()
+    } else {
+        let primary = u16::try_from(primary).ok()?;
+        [&item.to_be_bytes()[..], &[0, 1], &primary.to_be_bytes()].concat()
+    };
+    let reference = make_box(*b"cdsc", &ids)?;
+    Some([references.unwrap_or(&[0, 0, 0, 0]), &reference].concat())
+}
+
+/// An `iloc` entry for `item`, in the layout the box gives its entries: one extent of
+/// `length` bytes at `offset` in the file.
+fn location_entry(locations: &[u8], item: u16, offset: usize, length: usize) -> Option<Vec<u8>> {
+    let version = *locations.first()?;
+    let sizes = locations.get(4..6)?;
+    let (offset_size, length_size) = (usize::from(sizes[0] >> 4), usize::from(sizes[0] & 15));
+    let (base_size, index_size) = (usize::from(sizes[1] >> 4), usize::from(sizes[1] & 15));
+    let field = |value: usize, size: usize| -> Option<Vec<u8>> {
+        match size {
+            4 => Some(u32::try_from(value).ok()?.to_be_bytes().to_vec()),
+            8 => Some(u64::try_from(value).ok()?.to_be_bytes().to_vec()),
+            _ => None,
+        }
+    };
+    let mut entry = if version < 2 {
+        item.to_be_bytes().to_vec()
+    } else {
+        u32::from(item).to_be_bytes().to_vec()
+    };
+    if version > 0 {
+        entry.extend([0, 0]); // the offset counts from the start of the file
+    }
+    entry.extend([0, 0]); // the data is in this file
+    entry.extend(vec![0; base_size]);
+    entry.extend([0, 1]); // one extent
+    if version > 0 {
+        entry.extend(vec![0; index_size]);
+    }
+    entry.extend(field(offset, offset_size)?);
+    entry.extend(field(length, length_size)?);
+    Some(entry)
+}
+
 /// Where `part` (a subslice of `file`) starts in `file`.
 fn offset_in(file: &[u8], part: &[u8]) -> Option<usize> {
     (part.as_ptr() as usize).checked_sub(file.as_ptr() as usize)

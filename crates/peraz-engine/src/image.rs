@@ -156,38 +156,26 @@ fn encode_image_inner(
                 format!("x265 crf {}", crate::heic::crf(quality)),
             )
         }
-        ImageEncoding::Tiff => (
-            crate::tiff::encode(image, icc.as_deref(), kept)?,
-            crate::tiff::ENCODER.to_owned(),
-        ),
+        ImageEncoding::Tiff => {
+            let mut tiff = crate::tiff::encode(image, icc.as_deref(), kept)?;
+            // EXIF in a TIFF is not one block: its tags join the file's own directories.
+            if let Some(exif) = kept.and_then(|m| m.exif.as_deref()) {
+                match crate::exif::into_tiff(tiff.clone(), exif) {
+                    Some(tagged) => tiff = tagged,
+                    None => warnings.push(
+                        "the EXIF data could not be written into the TIFF and was left out"
+                            .to_owned(),
+                    ),
+                }
+            }
+            (tiff, crate::tiff::ENCODER.to_owned())
+        }
         // SVGs and icon files are rewritten whole and never reach the pixel encoders.
         ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => {
             return Err("internal error: this file is not encoded from pixels".to_owned());
         }
         ImageEncoding::Avif { quality } => {
-            let mut rgba = image.to_rgba8();
-            // AVIF carries the EXIF block; this encoder has no place for XMP.
-            let exif = kept.and_then(|m| m.exif.as_deref());
-            let avif = encode_avif(&rgba, quality, exif)?;
-            let tagged = match icc.as_deref() {
-                Some(profile) => crate::heif::embed_icc(&avif, profile).ok_or(profile),
-                None => Ok(avif),
-            };
-            match tagged {
-                Ok(avif) => (avif, format!("rav1e q{quality}")),
-                // The container could not take the profile: keep the colors by converting.
-                Err(profile) => {
-                    let note = if to_srgb(&mut rgba, profile)? {
-                        " (converted to sRGB)"
-                    } else {
-                        ""
-                    };
-                    (
-                        encode_avif(&rgba, quality, exif)?,
-                        format!("rav1e q{quality}{note}"),
-                    )
-                }
-            }
+            avif_of(image, quality, icc.as_deref(), kept, &mut warnings)?
         }
     };
     Ok(EncodedImage {
@@ -252,6 +240,12 @@ pub fn decode_native_bytes(bytes: &[u8], name: &str) -> Result<Decoded, String> 
         }
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         decoded.metadata.photoshop = crate::tiff::photoshop_resources(bytes);
+        // A TIFF keeps its EXIF among its own directories: gathered into one block here.
+        if decoded.metadata.exif.is_none()
+            && let Some(block) = crate::exif::of_tiff(bytes)
+        {
+            decoded.metadata.set_exif(&block);
+        }
     }
     Ok(decoded)
 }
@@ -395,6 +389,57 @@ fn jpeg_is_complete(bytes: &[u8]) -> bool {
         return false;
     };
     bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9])
+}
+
+/// The warning for metadata that the AVIF container could not take.
+const AVIF_ITEM_LEFT_OUT: &str = "the {} could not be written into the AVIF and was left out";
+
+/// The picture as an AVIF, with the encoder's name: with its color profile, and with the EXIF
+/// block and the XMP packet of `kept`.
+fn avif_of(
+    image: &DynamicImage,
+    quality: u8,
+    icc: Option<&[u8]>,
+    kept: Option<&Metadata>,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<u8>, String), String> {
+    let mut rgba = image.to_rgba8();
+    let avif = encode_avif(&rgba, quality)?;
+    let tagged = match icc {
+        Some(profile) => crate::heif::embed_icc(&avif, profile).ok_or(profile),
+        None => Ok(avif),
+    };
+    let (mut avif, encoder) = match tagged {
+        Ok(avif) => (avif, format!("rav1e q{quality}")),
+        // The container could not take the profile: keep the colors by converting.
+        Err(profile) => {
+            let note = if to_srgb(&mut rgba, profile)? {
+                " (converted to sRGB)"
+            } else {
+                ""
+            };
+            (
+                encode_avif(&rgba, quality)?,
+                format!("rav1e q{quality}{note}"),
+            )
+        }
+    };
+    // The EXIF block and the XMP packet are added to the encoder's file as items of their own,
+    // each in one piece: the encoder has no place for XMP, and stores EXIF in two pieces, which
+    // FFmpeg does not read.
+    if let Some(exif) = kept.and_then(|m| m.exif.as_deref()) {
+        match crate::heif::embed_exif(&avif, exif) {
+            Some(with_item) => avif = with_item,
+            None => warnings.push(AVIF_ITEM_LEFT_OUT.replace("{}", "EXIF data")),
+        }
+    }
+    if let Some(xmp) = kept.and_then(|m| m.xmp.as_deref()) {
+        match crate::heif::embed_xmp(&avif, xmp) {
+            Some(with_item) => avif = with_item,
+            None => warnings.push(AVIF_ITEM_LEFT_OUT.replace("{}", "XMP packet")),
+        }
+    }
+    Ok((avif, encoder))
 }
 
 /// The picture as a JPEG, with the settings it was written with: gray stays one channel,
@@ -956,16 +1001,12 @@ fn encode_webp(
     webp_extended(&encoded, &extras, rgba.width(), rgba.height(), has_alpha)
 }
 
-fn encode_avif(rgba: &RgbaImage, quality: u8, exif: Option<&[u8]>) -> Result<Vec<u8>, String> {
+fn encode_avif(rgba: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
     let av1 = ravif::Encoder::new()
         .with_quality(f32::from(quality))
         .with_alpha_quality(f32::from(quality.saturating_add(10).min(100)))
         // rav1e speed 1–10; 6 keeps encoding interactive without much size loss.
         .with_speed(6);
-    let av1 = match exif {
-        Some(exif) => av1.with_exif(exif),
-        None => av1,
-    };
     let (width, height) = (rgba.width() as usize, rgba.height() as usize);
     let pixels: Vec<ravif::RGBA8> = rgba
         .pixels()
@@ -1244,7 +1285,7 @@ mod tests {
 
     #[test]
     fn avif_is_written() {
-        let avif = encode_avif(&gradient(32, 32, true), 70, None).unwrap();
+        let avif = encode_avif(&gradient(32, 32, true), 70).unwrap();
         assert_eq!(&avif[4..12], b"ftypavif");
     }
 

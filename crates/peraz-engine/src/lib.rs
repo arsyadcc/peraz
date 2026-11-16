@@ -10,6 +10,7 @@ pub mod batch;
 pub mod compress;
 pub mod epub;
 mod error;
+pub mod exif;
 pub mod ffmpeg;
 mod fit;
 pub mod gif;

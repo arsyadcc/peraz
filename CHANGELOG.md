@@ -25,6 +25,10 @@ between alpha versions.
 
 ### Changed
 
+- `--keep-metadata` now keeps EXIF in a TIFF and XMP in an AVIF. A TIFF carries the camera and
+  dates among its own tags and the rest in its EXIF and GPS directories, where other programs
+  look for them, and a TIFF input's EXIF is read from there and kept in the other formats. An
+  AVIF carries the XMP packet as an item of its own.
 - The report's `warnings` now also say when an HDR gain map was left out of a HEIC, an AVIF, or
   a JPEG XL result (before: JPEG only). The gain map is found in the file itself: the auxiliary
   picture iPhones store, the ISO 21496-1 item, or JPEG XL's `jhgm` box.
@@ -37,6 +41,9 @@ between alpha versions.
 
 ### Fixed
 
+- An AVIF written with `--keep-metadata` could not be read by FFmpeg (and so not by Peraz
+  itself): its EXIF was stored in two pieces, which FFmpeg does not read. EXIF is now stored in
+  one piece.
 - A picture that is HDR by its transfer function (PQ or HLG, such as a 10-bit AVIF or HEIC
   without a gain map) was read as a standard picture and came out dark and flat. Such a picture
   is now skipped with a message, until Peraz can keep or convert it.
