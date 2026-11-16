@@ -2,16 +2,18 @@
 //!
 //! Photos (`DCTDecode`) are re-encoded with mozjpeg. Uncompressed or Flate pictures become
 //! indexed (palette) images when a palette holds their quality, and JPEG otherwise. A picture is
-//! replaced only when the new version is smaller. Afterwards unused objects are removed and the
-//! file is written with compressed object streams.
+//! replaced only when the new version is smaller. Afterwards unused objects are removed, every
+//! Flate-compressed stream (page contents, fonts, color profiles) is deflated again at the best
+//! level, and the file is written with compressed object streams.
 //!
 //! Some documents are not rewritten at all (signed ones, and ones that need a password), and
 //! some keep what they need: a PDF/A its plain structure, a PDF with permission restrictions
 //! its encryption and restrictions.
 
 use std::collections::HashSet;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
+use std::sync::Mutex;
 
 use image::{DynamicImage, GrayImage, RgbImage, imageops::FilterType};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -31,6 +33,9 @@ pub enum DocumentError {
 /// The most a picture may take once decoded: 512 MB, which is far more than a page scanned for
 /// print needs. A larger one is left as it is, so that a small file cannot ask for gigabytes.
 const MAX_PICTURE_BYTES: u64 = 512_000_000;
+
+/// The most a stream may hold, once inflated, to be deflated again.
+const MAX_STREAM_BYTES: u64 = 256_000_000;
 
 /// Recompresses the pictures of the PDF at `input`. Returns the new file, what happened to the
 /// pictures, and what the report should warn about.
@@ -113,6 +118,7 @@ pub fn compress_pdf(
         }
     }
     doc.compress();
+    deflate_again(&mut doc);
     if let Some(state) = &protection {
         doc.encrypt(state)
             .map_err(|e| DocumentError::Failed(format!("cannot encrypt the PDF again: {e}")))?;
@@ -128,6 +134,68 @@ pub fn compress_pdf(
     saved.map_err(|e| DocumentError::Failed(format!("cannot write the PDF: {e}")))?;
     read_back(&out, pages)?;
     Ok((out, stats, warnings))
+}
+
+/// Deflates every Flate-compressed stream again at the best level, and keeps the result where
+/// it is smaller. Many PDF writers compress fast, not well. Only the compression changes: what
+/// a stream inflates to stays byte for byte, so a predictor (`DecodeParms`) still applies as
+/// before. Streams with another filter, or more than one, are left alone, and so is data that
+/// does not inflate cleanly.
+fn deflate_again(doc: &mut Document) {
+    let streams: Vec<&mut Stream> = doc
+        .objects
+        .values_mut()
+        .filter_map(|object| match object {
+            Object::Stream(stream) if is_only_flate(&stream.dict) => Some(stream),
+            _ => None,
+        })
+        .collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(streams.len());
+    // The best level is slow: the streams are shared out between the processor's cores.
+    let queue = Mutex::new(streams);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut compressor =
+                    libdeflater::Compressor::new(libdeflater::CompressionLvl::best());
+                while let Some(stream) = queue.lock().ok().and_then(|mut queue| queue.pop()) {
+                    let Some(data) = inflate(&stream.content) else {
+                        continue;
+                    };
+                    let mut packed = vec![0; compressor.zlib_compress_bound(data.len())];
+                    if let Ok(length) = compressor.zlib_compress(&data, &mut packed)
+                        && length < stream.content.len()
+                    {
+                        packed.truncate(length);
+                        stream.set_content(packed);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// The stream's only filter is `FlateDecode`.
+fn is_only_flate(dict: &Dictionary) -> bool {
+    let flate = |name: &Object| name.as_name().is_ok_and(|name| name == b"FlateDecode");
+    match dict.get(b"Filter") {
+        Ok(Object::Array(filters)) => filters.len() == 1 && flate(&filters[0]),
+        Ok(filter) => flate(filter),
+        Err(_) => false,
+    }
+}
+
+/// What a zlib stream holds, or `None` when it is damaged or holds more than
+/// [`MAX_STREAM_BYTES`].
+fn inflate(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    flate2::read::ZlibDecoder::new(bytes)
+        .take(MAX_STREAM_BYTES + 1)
+        .read_to_end(&mut data)
+        .ok()?;
+    (data.len() as u64 <= MAX_STREAM_BYTES).then_some(data)
 }
 
 /// Checks the new file before it takes anyone's place: it must load, with as many pages as

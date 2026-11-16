@@ -33,7 +33,7 @@ ravif.workspace = true
 png.workspace = true
 tiff.workspace = true
 ssimulacra2.workspace = true
-libdeflater = { workspace = true, optional = true }
+libdeflater.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 xattr.workspace = true
@@ -48,7 +48,7 @@ simd-jpeg = ["mozjpeg/nasm_simd"]
 simd-avif = ["ravif/asm"]
 # Link the system libdeflate (found with pkg-config) instead of building the bundled copy. The
 # JPEG and WebP encoders have no such option in their crates and stay bundled.
-system-libs = ["dep:libdeflater", "libdeflater/dynamic"]
+system-libs = ["libdeflater/dynamic"]
 
 [lints]
 workspace = true

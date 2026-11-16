@@ -626,3 +626,183 @@ fn a_pdf_that_needs_a_password_is_left_alone() {
         assert!(!output.exists(), "{kind}");
     }
 }
+
+/// `data`, deflated the way a writer in a hurry does it.
+fn deflated_fast(data: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// Text as a page's content stream has it: many similar drawing commands.
+fn drawing_commands(lines: u32) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for line in 0..lines {
+        let (x, y) = (50 + line % 7 * 3, 800 - line % 60 * 12);
+        let size = 9 + line % 4;
+        let _ = writeln!(
+            text,
+            "BT /F1 {size} Tf {x} {y} Td (Line {line} of the sample document) Tj ET"
+        );
+        let _ = writeln!(text, "{x} {y} m {} {} l S", x + 200 + line % 13, y - 2);
+    }
+    text.into_bytes()
+}
+
+/// A stream that is in the document without being drawn: the catalog names it.
+fn attach(doc: &mut Document, catalog: ObjectId, name: &str, stream: Stream) {
+    let id = doc.add_object(stream);
+    doc.get_dictionary_mut(catalog).unwrap().set(name, id);
+}
+
+/// The stream the catalog names `name`.
+fn attached(doc: &Document, name: &str) -> Stream {
+    let id = doc
+        .catalog()
+        .unwrap()
+        .get(name.as_bytes())
+        .and_then(Object::as_reference)
+        .unwrap();
+    doc.get_object(id).unwrap().as_stream().unwrap().clone()
+}
+
+const CMYK_SIZE: (usize, usize) = (300, 200);
+
+/// A document whose streams were deflated in a hurry: `commands` and `table` as streams of
+/// their own, and a CMYK picture stored as `rows` with a predictor. Peraz does not rewrite
+/// CMYK pictures, so only its compression may change. Two more streams must stay as they are:
+/// one with two filters (returned as it is stored), and one that does not inflate.
+fn hurried_document(commands: &[u8], table: &[u8], rows: &[u8]) -> (Document, ObjectId, Vec<u8>) {
+    let (width, height) = (
+        i64::try_from(CMYK_SIZE.0).unwrap(),
+        i64::try_from(CMYK_SIZE.1).unwrap(),
+    );
+    let mut sample = Sample::new("1.7");
+    let mut cmyk = Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image", "Width" => width, "Height" => height,
+            "ColorSpace" => "DeviceCMYK", "BitsPerComponent" => 8, "Filter" => "FlateDecode",
+            "DecodeParms" => dictionary! {
+                "Predictor" => 15, "Colors" => 4, "BitsPerComponent" => 8, "Columns" => width,
+            },
+        },
+        deflated_fast(rows),
+    );
+    cmyk.allows_compression = false;
+    let cmyk = sample.picture(cmyk);
+    let (mut doc, catalog) = sample.finish();
+    let fast = |data: &[u8]| {
+        Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            deflated_fast(data),
+        )
+        .with_compression(false)
+    };
+    attach(&mut doc, catalog, "PerazText", fast(commands));
+    attach(&mut doc, catalog, "PerazTable", fast(table));
+    let hex: Vec<u8> = deflated_fast(commands)
+        .iter()
+        .flat_map(|byte| format!("{byte:02X}").into_bytes())
+        .chain(*b">")
+        .collect();
+    attach(
+        &mut doc,
+        catalog,
+        "PerazChained",
+        Stream::new(
+            dictionary! { "Filter" => vec!["ASCIIHexDecode".into(), "FlateDecode".into()] },
+            hex.clone(),
+        )
+        .with_compression(false),
+    );
+    attach(
+        &mut doc,
+        catalog,
+        "PerazBroken",
+        Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            b"not deflated".to_vec(),
+        )
+        .with_compression(false),
+    );
+    (doc, cmyk, hex)
+}
+
+#[test]
+fn flate_streams_are_deflated_again_at_the_best_level() {
+    let dir = dir("deflate");
+    let commands = drawing_commands(4000);
+    let table: Vec<u8> = (0..60_000u32)
+        .flat_map(|i| (i * i % 1021).to_be_bytes())
+        .collect();
+    // Each row starts with the predictor's tag, here "up" (2), and holds the differences
+    // from the row above.
+    let rows: Vec<u8> = (0..CMYK_SIZE.1)
+        .flat_map(|y| {
+            std::iter::once(2u8)
+                .chain((0..CMYK_SIZE.0 * 4).map(move |x| u8::try_from((x / 4 + y) % 3).unwrap()))
+        })
+        .collect();
+    let (mut doc, cmyk, hex) = hurried_document(&commands, &table, &rows);
+    let input = dir.0.join("fast.pdf");
+    save(&mut doc, &input);
+    let before = Document::load(&input).unwrap();
+
+    let report = run(&input, &dir.0.join("fast-1.pdf"));
+    let after = Document::load(compressed(&report)).unwrap();
+    // What the streams hold is the same, byte for byte; they take less room.
+    for (name, holds) in [("PerazText", &commands), ("PerazTable", &table)] {
+        let (was, is) = (attached(&before, name), attached(&after, name));
+        assert_eq!(&is.decompressed_content().unwrap(), holds, "{name}");
+        assert!(
+            is.content.len() < was.content.len(),
+            "{name}: {} bytes, was {}",
+            is.content.len(),
+            was.content.len()
+        );
+    }
+    let picture_before = before.get_object(cmyk).unwrap().as_stream().unwrap();
+    let picture = pictures(&after)
+        .into_iter()
+        .find(|stream| {
+            stream
+                .dict
+                .get(b"ColorSpace")
+                .and_then(Object::as_name)
+                .ok()
+                == Some(b"DeviceCMYK")
+        })
+        .unwrap();
+    assert!(picture.content.len() < picture_before.content.len());
+    assert_eq!(
+        picture.dict.get(b"DecodeParms").unwrap(),
+        picture_before.dict.get(b"DecodeParms").unwrap(),
+        "the predictor stays"
+    );
+    let mut inflated = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::ZlibDecoder::new(picture.content.as_slice()),
+        &mut inflated,
+    )
+    .unwrap();
+    assert_eq!(inflated, rows, "the rows as the predictor left them");
+    assert_eq!(
+        picture.decompressed_content().unwrap(),
+        picture_before.decompressed_content().unwrap(),
+        "the same pixels"
+    );
+    assert_eq!(attached(&after, "PerazChained").content, hex);
+    assert_eq!(attached(&after, "PerazBroken").content, b"not deflated");
+
+    // Deflated at the best level already: nothing gets smaller, and the original is kept.
+    let report = run(&compressed(&report), &dir.0.join("fast-2.pdf"));
+    assert!(
+        matches!(
+            report.outcome,
+            Outcome::KeptOriginal(peraz_core::KeepReason::NotSmaller { .. })
+        ),
+        "{:?}",
+        report.outcome
+    );
+}

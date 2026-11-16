@@ -27,7 +27,8 @@ mozjpeg = { version = "0.10", default-features = false, features = ["parallel"] 
 # enables it through its default features, which also require nasm.
 mozjpeg-sys = { version = "2", default-features = false, features = ["parallel", "unwinding"] }
 oxipng = { version = "10", default-features = false, features = ["parallel"] }
-# Only named to turn on its `dynamic` feature for `system-libs`; oxipng uses it for zlib output.
+# Deflates the streams of a PDF again at the best level; oxipng uses it for zlib output too.
+# `system-libs` turns on its `dynamic` feature.
 libdeflater = { version = "1", default-features = false }
 png = "0.18"
 # TIFF output; the same crate `image` reads TIFF with.

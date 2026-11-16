@@ -327,7 +327,9 @@ to another format: with a `--format` for pictures it is skipped.
 
 PDF and EPUB files keep their text, layout, and links: only the pictures inside are
 recompressed (photos with mozjpeg, graphics as palette images), and a picture is replaced only
-when the new version is smaller. DRM-protected EPUBs are skipped.
+when the new version is smaller. In a PDF, everything else that is Flate-compressed (page
+contents, fonts, color profiles) is deflated again at the best level, which changes nothing but
+the size. DRM-protected EPUBs are skipped.
 
 Some PDFs must not be rewritten, and Peraz leaves them alone: one that needs a password to
 open, and one with a digital signature, which any change would break. A PDF that opens without

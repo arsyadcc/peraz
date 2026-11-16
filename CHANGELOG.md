@@ -89,6 +89,10 @@ between alpha versions.
 
 ### Changed
 
+- PDF: every Flate-compressed stream (page contents, fonts, color profiles, pictures Peraz does
+  not rewrite) is deflated again at the best level with libdeflate, and kept where that is
+  smaller. What the streams hold stays byte for byte, so pages render the same. On eleven PDFs
+  from several writers, results were 0% to 23% smaller than before (7% on average).
 - A PDF that opens without a password but restricts printing, copying, or changing is now
   compressed: the result has the same encryption, the same owner password, and every
   restriction. Before, it was skipped like a PDF that needs a password, which is still skipped.

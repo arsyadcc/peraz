@@ -168,7 +168,8 @@ flags do not apply to it, and with a `--format` that names a picture format it i
 ## PDF files
 
 Peraz changes only the pictures inside a PDF; text, fonts, layout, links, and forms stay as they
-are. Some files and pictures are left alone on purpose:
+are. Streams that are Flate-compressed are deflated again at the best level, which keeps what
+they hold byte for byte. Some files and pictures are left alone on purpose:
 
 | What | What Peraz does | Why |
 | --- | --- | --- |
