@@ -363,6 +363,40 @@ pub fn apple_hdr_note(block: &[u8]) -> Option<Vec<u8>> {
     .block()
 }
 
+/// How much brighter than standard white an iPhone photo's HDR rendition goes, from the two
+/// values of its maker note, by the rule Apple documents for them. `block` is an EXIF block
+/// as [`apple_hdr_note`] gives it (or any with those values).
+#[must_use]
+pub fn apple_headroom(block: &[u8]) -> Option<f64> {
+    let note = apple_hdr_note(block)?;
+    let (reader, first) = Reader::new(&note)?;
+    let pointers = reader.directory(first, |tag| tag == EXIF_POINTER);
+    let exif_at = reader.pointed(&pointers, EXIF_POINTER)?;
+    let note = reader.directory(exif_at, |tag| tag == MAKER_NOTE);
+    let apple = Reader {
+        bytes: &note.first()?.value,
+        big_endian: true,
+    };
+    let value = |tag: u16| {
+        let entry = apple
+            .directory(APPLE_NOTE.len(), |found| found == tag)
+            .into_iter()
+            .next()?;
+        let count = i32::from_be_bytes(entry.value.get(..4)?.try_into().ok()?);
+        let parts = i32::from_be_bytes(entry.value.get(4..8)?.try_into().ok()?);
+        (parts != 0).then(|| f64::from(count) / f64::from(parts))
+    };
+    let (headroom, gain) = (value(APPLE_HDR_TAGS[0])?, value(APPLE_HDR_TAGS[1])?);
+    // Stops of headroom, from the second value, on one of four lines.
+    let stops = match (headroom < 1.0, gain <= 0.01) {
+        (true, true) => -20.0 * gain + 1.8,
+        (true, false) => -0.101 * gain + 1.601,
+        (false, true) => -70.0 * gain + 3.0,
+        (false, false) => -0.303 * gain + 2.303,
+    };
+    Some(stops.exp2())
+}
+
 /// The EXIF of a TIFF file, gathered from its directories into one EXIF block; `None` when it
 /// has none.
 #[must_use]
@@ -507,7 +541,11 @@ mod tests {
         .directory(APPLE_NOTE.len(), |_| true);
         assert_eq!(kept, [values[1].clone(), values[3].clone()]);
         // Taken from its own result, it is the same block.
-        assert_eq!(apple_hdr_note(&small), Some(small));
+        assert_eq!(apple_hdr_note(&small), Some(small.clone()));
+        // The two values give the headroom: 2^(3 - 70 × 0.0016857) = 7.37, from either block.
+        let headroom = apple_headroom(&small).unwrap();
+        assert!((headroom - 7.3717).abs() < 0.001, "{headroom}");
+        assert_eq!(apple_headroom(&block), Some(headroom));
 
         // Without the two values, or without an Apple maker note, there is nothing to take.
         let other = Directories {
@@ -519,6 +557,7 @@ mod tests {
         .unwrap();
         assert_eq!(apple_hdr_note(&other), None);
         assert_eq!(apple_hdr_note(b"not EXIF"), None);
+        assert_eq!(apple_headroom(&other), None);
     }
 
     fn sample(big_endian: bool) -> Directories {

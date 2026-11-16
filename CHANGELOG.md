@@ -45,10 +45,22 @@ between alpha versions.
   `plan.hdr` is `kept` or `converted` for such a picture (else `null`); the `encoder` text
   says `10-bit, HDR kept`; a skipped result no longer has this cause.
 
+- An HDR photo stays HDR when its format changes. A gain map goes from JPEG, HEIC, AVIF, and
+  JPEG XL into each of the others: it is read into one form (its picture and the ISO 21496-1
+  numbers for how it is applied) and written the way the new format stores it. A JPEG gets
+  both the Ultra HDR attributes and the standard's segment. An older iPhone's gain map, which
+  follows a rule of its own, is rewritten for the standard's rule (macOS shows the result as
+  it shows the original). So an iPhone HEIC becomes a JPEG that is still HDR on Android and
+  in browsers, and an Ultra HDR JPEG becomes an HDR AVIF. A JPEG whose own data is kept
+  losslessly in a JPEG XL takes its gain map along, and gets it back as a JPEG. PNG, WebP,
+  and TIFF still give the standard picture with the warning. The README has a table.
+
 ### Fixed
 
 - The XMP packet of a HEIC's gain map is no longer taken for the picture's own XMP when the
   file lists it first.
+- A 10-bit HEIC says in its HEVC stream what its values mean with every FFmpeg version; with
+  older ones the stream left the primaries and the transfer function out.
 
 - A gain map written into a HEIC is described as it is coded (full range, BT.709), whatever
   the input said about its own gain map picture. Before, the input's description was copied,

@@ -275,7 +275,7 @@ fn a_heic_or_avif_gain_map_that_is_left_out_is_reported() {
         assert!(properties.gain_map, "{name}");
         let Some(tools) = ffmpeg() else { continue };
         for (format, output) in [
-            (ImageFormat::Jpeg, "out.jpg"),
+            (ImageFormat::Webp, "out.webp"),
             (ImageFormat::Png, "out.png"),
         ] {
             let report = run_with(Some(&tools), &input, &dir.0.join(output), format);
@@ -940,11 +940,176 @@ fn a_heic_from_an_older_iphone_keeps_its_gain_map() {
     let kept = result.heif_gain_map.expect("the gain map's picture");
     assert_eq!(kept.pixels.width(), 378);
 
-    // An AVIF has no place for a gain map stored this way: it is left out, and reported.
+    // An AVIF has no place for a gain map stored this way: there it is rewritten the
+    // standard's way.
     let avif = dir.0.join("out.avif");
     let report = run_with(Some(&tools), &input, &avif, ImageFormat::Avif);
-    assert!(warns_about_the_gain_map(&report), "{:?}", report.warnings);
-    assert!(!read_properties(&std::fs::read(&avif).unwrap()).gain_map);
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let properties = read_properties(&std::fs::read(&avif).unwrap());
+    assert!(properties.tone_map.is_some() && properties.auxiliary_map.is_none());
+}
+
+/// The gain map of a file in the common form, read the way its format needs.
+fn common_of(
+    tools: &(Toolchain, Capabilities),
+    path: &Path,
+) -> Option<peraz_engine::gain_params::CommonMap> {
+    let extension = path.extension()?.to_str()?;
+    match extension {
+        "jpg" => {
+            let decoded = peraz_engine::image::decode_native(path).unwrap();
+            decoded
+                .jpeg_gain_map?
+                .common(decoded.metadata.exif.as_deref())
+        }
+        "jxl" => peraz_engine::jxl::decode_file(path)
+            .unwrap()
+            .jxl_gain_map?
+            .common(),
+        _ => peraz_engine::heif::decode(&tools.0, path)
+            .unwrap()
+            .heif_gain_map?
+            .common(),
+    }
+}
+
+/// How far apart two gain maps' pictures are on average (0 to 255), at the first one's size.
+fn maps_apart(a: &image::DynamicImage, b: &image::DynamicImage) -> u64 {
+    let a = a.to_rgb8();
+    let b = b
+        .resize_exact(a.width(), a.height(), image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    let sum: u64 = a
+        .as_raw()
+        .iter()
+        .zip(b.as_raw())
+        .map(|(p, q)| u64::from(p.abs_diff(*q)))
+        .sum();
+    sum / a.as_raw().len() as u64
+}
+
+#[test]
+fn a_gain_map_goes_from_one_format_to_another() {
+    let dir = dir("across");
+    let Some(tools) = ffmpeg() else { return };
+    let x265 = tools.1.has_encoder("libx265");
+    let jxl = JxlTools::locate().is_some_and(|tools| tools.djxl.is_some());
+    if !x265 {
+        eprintln!("skipped: this FFmpeg has no libx265");
+    }
+    if !jxl {
+        eprintln!("skipped: cjxl and djxl not found");
+    }
+    // The samples: Ultra HDR and an iPhone's JPEG, the standard's item in AVIF and HEIC, and
+    // an older iPhone's HEIC. The HEIC with the standard's item is made on macOS only.
+    for (name, everywhere) in [
+        ("hdr-ultrahdr.jpg", true),
+        ("hdr-apple-gainmap.jpg", true),
+        ("hdr-gainmap.avif", true),
+        ("hdr-gainmap.heic", false),
+        ("hdr-iphone-gainmap.heic", true),
+    ] {
+        if !everywhere && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let Some(input) = sample(name) else { continue };
+        let before = common_of(&tools, &input).expect("the sample's gain map");
+        for (format, extension, possible) in [
+            (ImageFormat::Jpeg, "jpg", true),
+            (ImageFormat::Heic, "heic", x265),
+            (ImageFormat::Avif, "avif", true),
+            (ImageFormat::Jxl, "jxl", jxl),
+        ] {
+            if !possible {
+                continue;
+            }
+            let case = format!("{name} to {extension}");
+            let output = dir.0.join(format!("out.{extension}"));
+            let mut recipe = Recipe::default();
+            recipe.image.format = format;
+            // Half the size, so that the gain map has to be scaled as well.
+            recipe.image.max_width = Some(before.picture_size.0 / 2);
+            let job = Job {
+                input: input.clone(),
+                output: OutputTarget::File(output.clone()),
+                recipe,
+                existing: ExistingOutput::Replace,
+                recompress: true,
+            };
+            let report = compress(Some(&tools.0), &tools.1, &job, &mut |_| {}, &NOT_CANCELLED);
+            assert!(
+                matches!(report.outcome, Outcome::Compressed { .. }),
+                "{case}: {:?}",
+                report.outcome
+            );
+            assert_eq!(report.warnings, Vec::<String>::new(), "{case}");
+            assert!(
+                report.encoder.unwrap().contains("HDR gain map kept"),
+                "{case}"
+            );
+            // Read back, the gain map is applied the same way, and it is the same picture
+            // at half the size.
+            let after = common_of(&tools, &output).unwrap_or_else(|| panic!("{case}: no map"));
+            let same_layout = name.ends_with("iphone-gainmap.heic") && extension == "heic";
+            if !same_layout {
+                assert_eq!(after.parameters, before.parameters, "{case}");
+            }
+            let (was, now) = (before.pixels.width(), after.pixels.width());
+            assert!(now.abs_diff(was / 2) <= 1, "{case}: {was} to {now}");
+            let apart = maps_apart(&after.pixels, &before.pixels);
+            assert!(apart <= 8, "{case}: {apart} apart on average");
+        }
+    }
+}
+
+#[test]
+fn a_jpeg_kept_losslessly_in_jpeg_xl_takes_its_gain_map_along() {
+    let dir = dir("lossless");
+    if JxlTools::locate().is_none_or(|tools| tools.djxl.is_none()) {
+        eprintln!("skipped: cjxl and djxl not found");
+        return;
+    }
+    let Some(sample) = sample("hdr-ultrahdr.jpg") else {
+        return;
+    };
+    let Some(tools) = ffmpeg() else { return };
+    let at = |quality, format| {
+        let mut recipe = Recipe {
+            quality,
+            ..Recipe::default()
+        };
+        recipe.image.format = format;
+        recipe
+    };
+    // A JPEG that is small already: encoded anew at a high quality it would grow, so its
+    // own data is what is kept.
+    let input = dir.0.join("small.jpg");
+    let smallest = at(peraz_core::Quality::Smallest, ImageFormat::Jpeg);
+    let report = run_recipe(&sample, &input, smallest);
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let before = common_of(&tools, &input).unwrap();
+    // The JPEG's data is recompressed losslessly, and the gain map goes into the JPEG XL's
+    // container.
+    let highest = |format| at(peraz_core::Quality::Highest, format);
+    let jxl = dir.0.join("out.jxl");
+    let report = run_recipe(&input, &jxl, highest(ImageFormat::Jxl));
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let encoder = report.encoder.unwrap();
+    assert!(encoder.contains("lossless JPEG recompression"), "{encoder}");
+    assert!(encoder.contains("HDR gain map kept"), "{encoder}");
+    assert!(peraz_engine::jxl_header::has_jpeg_reconstruction(&jxl).unwrap());
+    let stored = common_of(&tools, &jxl).expect("the gain map in the JPEG XL");
+    assert_eq!(stored.parameters, before.parameters);
+    // Back to a JPEG: the very JPEG data again, with the gain map after it.
+    let jpeg = dir.0.join("back.jpg");
+    let report = run_recipe(&jxl, &jpeg, highest(ImageFormat::Jpeg));
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let encoder = report.encoder.unwrap();
+    assert!(encoder.contains("rebuilt from JPEG XL"), "{encoder}");
+    assert!(encoder.contains("HDR gain map kept"), "{encoder}");
+    let back = common_of(&tools, &jpeg).expect("the gain map after the JPEG");
+    assert_eq!(back.parameters, before.parameters);
+    assert!(maps_apart(&back.pixels, &before.pixels) <= 8);
 }
 
 #[test]

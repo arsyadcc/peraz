@@ -16,6 +16,7 @@ use peraz_core::Alpha;
 use serde::Deserialize;
 
 use crate::ffmpeg::{Toolchain, check, command};
+use crate::gain_params::{CommonMap, Parameters};
 use crate::image::Decoded;
 use crate::metadata::Metadata;
 
@@ -551,6 +552,67 @@ pub struct GainMap {
 }
 
 impl GainMap {
+    /// The gain map in the common form, for another format. `None` when the file does not
+    /// say how it is applied in a way that is understood.
+    #[must_use]
+    pub fn common(&self) -> Option<CommonMap> {
+        match &self.description {
+            // The item's data: a version (0), then the standard's binary form.
+            MapDescription::Iso(tone_map) => {
+                let (version, parameters) = tone_map.metadata.split_first()?;
+                let pixels = if self.pixels.color().channel_count() == 1 {
+                    DynamicImage::ImageLuma8(self.pixels.to_luma8())
+                } else {
+                    DynamicImage::ImageRgb8(self.pixels.to_rgb8())
+                };
+                Some(CommonMap {
+                    pixels,
+                    picture_size: self.picture_size,
+                    parameters: Parameters::of_iso(parameters).filter(|_| *version == 0)?,
+                })
+            }
+            // An older iPhone photo: only a headroom, from the maker note.
+            MapDescription::Auxiliary(map) => {
+                let headroom = crate::exif::apple_headroom(map.headroom_note.as_deref()?)?;
+                Some(CommonMap::of_apple(
+                    &self.pixels,
+                    self.picture_size,
+                    headroom,
+                ))
+            }
+        }
+    }
+
+    /// A gain map from another format, stored the standard's way. The HDR rendition is
+    /// described as PQ with 10 bits per channel, which is what such files usually say; the
+    /// gain is applied in the picture's own color space either way.
+    #[must_use]
+    pub fn of_common(map: &CommonMap) -> Self {
+        let rendition = vec![
+            [
+                &19u32.to_be_bytes()[..],
+                b"colrnclx",
+                &[0, 1, 0, 16, 0, 6, 0x80],
+            ]
+            .concat(),
+            [
+                &16u32.to_be_bytes()[..],
+                b"pixi",
+                &[0, 0, 0, 0, 3, 10, 10, 10],
+            ]
+            .concat(),
+        ];
+        Self {
+            pixels: map.pixels.clone(),
+            picture_size: map.picture_size,
+            description: MapDescription::Iso(ToneMap {
+                map_item: 0,
+                metadata: [&[0][..], &map.parameters.iso()].concat(),
+                rendition,
+            }),
+        }
+    }
+
     /// The gain map's pixels for a picture that is now `size` (upright): scaled by the same
     /// factor as the picture, so it keeps its proportion to it; to even sides when `even`.
     #[must_use]

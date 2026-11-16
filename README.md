@@ -249,19 +249,33 @@ IPTC where the output format can hold them (with the orientation reset, since th
 stored upright). Transparent images converted to JPEG are placed on white, or on the color
 given with `--background` (a page's background, for example).
 
-An HDR photo stays HDR as a JPEG, a HEIC, an AVIF, and a JPEG XL: its gain map is compressed
-with the picture, turned and scaled like it, and written back with its description, so HDR
-screens still show the photo brighter and every other program shows the standard picture. For a
-JPEG that is Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC and an AVIF, the
-gain map as the standard (ISO 21496-1) stores it, which also goes from one of the two formats to
-the other. A HEIC from an older iPhone, which stores its gain map as an auxiliary picture, keeps
-it that way as a HEIC; the two numbers in the photo's EXIF that say how bright the HDR rendition
-goes are kept with it, also when the rest of the metadata is removed. A JPEG XL keeps the gain
-map box of its container (`jhgm`): as it is when the picture keeps its size, and with the gain
-map encoded again when the picture is scaled down. A gain map is not yet carried from one of
-these layouts to another: between JPEG, JPEG XL, and the other formats, and from an older
-iPhone's HEIC to AVIF. Such a photo is compressed as its standard picture, and the report warns
-that the gain map was removed.
+An HDR photo stays HDR as a JPEG, a HEIC, an AVIF, and a JPEG XL, also when its format changes:
+its gain map is compressed with the picture, turned and scaled like it, and written back with
+its description, so HDR screens still show the photo brighter and every other program shows the
+standard picture. Each format stores a gain map its own way, and Peraz reads and writes them
+all: in a JPEG, Ultra HDR (Android, Adobe) and what iPhones write; in a HEIC and an AVIF, the
+item the standard (ISO 21496-1) defines; in a JPEG XL, the gain map box of its container
+(`jhgm`); and in a HEIC from an older iPhone, an auxiliary picture with two numbers in the
+photo's EXIF that say how bright the HDR rendition goes.
+
+When the format stays the same, the gain map is stored as it was. When it changes, the gain map
+is written the way the new format stores it, with the same numbers for how it is applied (a JPEG
+gets both the Ultra HDR attributes and the standard's segment, for readers of either). An older
+iPhone's gain map follows a rule of its own, so its values are rewritten for the standard's
+rule. PNG, WebP, and TIFF have no place for a gain map: there the photo is its standard picture,
+and the report warns that the gain map was removed.
+
+| From, to → | JPEG | HEIC | AVIF | JPEG XL | PNG, WebP, TIFF |
+| --- | --- | --- | --- | --- | --- |
+| JPEG (Ultra HDR, iPhone) | as it was | kept | kept | kept | removed |
+| HEIC | kept | as it was | kept | kept | removed |
+| HEIC (older iPhone) | kept, rewritten | as it was | kept, rewritten | kept, rewritten | removed |
+| AVIF | kept | kept | as it was | kept | removed |
+| JPEG XL | kept | kept | kept | as it was | removed |
+
+A JPEG that becomes a JPEG XL with its own data kept losslessly takes its gain map along into
+the container, and gets it back when that JPEG XL becomes a JPEG again. Nothing but Peraz was
+found to read a JPEG XL's gain map box back with, so that part is checked against Peraz alone.
 
 A picture can also be HDR by its pixel values alone, without a gain map: they are stored with
 the PQ or the HLG curve, usually at 10 bits (AVIF and HEIC from photo editors, screenshots of

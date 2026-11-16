@@ -462,21 +462,14 @@ fn make_image(
         Err(message) => return failed(message),
     };
     // The JPEG's own data holds the very same pixels.
-    let mut identical = false;
-    if let Some(kind) = lossless
-        && let Some(jpeg) = rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok())
-        && let Some((bytes, encoder)) = keep_jpeg_data(&jpeg, kind, plan.keep_metadata)
-        && bytes.len() < encoded.bytes.len()
-    {
-        encoded.bytes = bytes;
-        encoder.clone_into(&mut encoded.encoder);
-        identical = true;
-        if let Some(score) = &mut report.score {
-            score.score = 100.0;
-        }
+    let jpeg = lossless.and_then(|_| rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok()));
+    let identical = lossless
+        .zip(jpeg)
+        .is_some_and(|(kind, jpeg)| take_jpeg_data(&jpeg, kind, plan.keep_metadata, &mut encoded));
+    if identical && let Some(score) = &mut report.score {
+        score.score = 100.0;
     }
-    // The gain map the encoder attached is gone when the JPEG's own data took its place.
-    let kept_gain_map = encoded.kept_gain_map && !identical;
+    let kept_gain_map = encoded.kept_gain_map;
     report.encoder = Some(encoded.encoder);
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
@@ -824,7 +817,9 @@ fn decode_image(
         },
         ImageDecoder::Djxl => match crate::jxl::reconstruct_jpeg(input) {
             Ok(Some(jpeg)) => (
-                crate::image::decode_native_bytes(&jpeg, &input.display().to_string()),
+                // The JPEG is the picture; a gain map is in the JPEG XL's own container.
+                crate::image::decode_native_bytes(&jpeg, &input.display().to_string())
+                    .map(|decoded| crate::jxl::with_stored_gain_map(decoded, input)),
                 Some(jpeg),
             ),
             Ok(None) => (crate::jxl::decode_file(input), None),
@@ -1608,6 +1603,58 @@ enum Lossless {
     JpegXl,
     /// As it is, with its metadata removed.
     Jpeg,
+}
+
+/// Puts the JPEG's own data in the place of the encoded result when that is smaller, and
+/// says whether it did. A gain map the encoder attached goes along where it can.
+fn take_jpeg_data(
+    jpeg: &[u8],
+    kind: Lossless,
+    keep_metadata: bool,
+    encoded: &mut crate::image::EncodedImage,
+) -> bool {
+    let Some((bytes, name)) = keep_jpeg_data(jpeg, kind, keep_metadata) else {
+        return false;
+    };
+    // Kept whole with its metadata, a JPEG keeps what it has, a gain map included.
+    let moved = (encoded.kept_gain_map && !keep_metadata)
+        .then(|| with_gain_map_of(&encoded.bytes, kind, &bytes))
+        .flatten();
+    let with_map = moved.is_some();
+    let bytes = moved.unwrap_or(bytes);
+    if bytes.len() >= encoded.bytes.len() {
+        return false;
+    }
+    encoded.bytes = bytes;
+    name.clone_into(&mut encoded.encoder);
+    if with_map {
+        encoded.encoder.push_str(", HDR gain map kept");
+    }
+    encoded.kept_gain_map = with_map;
+    true
+}
+
+/// The gain map that the encoder put into its result (`encoded`), moved to the JPEG's own
+/// data that may take the result's place: into the container of a JPEG XL, or after a JPEG
+/// that is stored upright (a JPEG's gain map is stored turned like its picture, and the
+/// encoder's is upright). `None` when it cannot be moved.
+fn with_gain_map_of(encoded: &[u8], kind: Lossless, bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageDecoder as _;
+    match kind {
+        Lossless::JpegXl => {
+            let map = crate::jxl_header::gain_map_box(encoded)?;
+            crate::jxl_header::with_box(bytes, *b"jhgm", map)
+        }
+        Lossless::Jpeg => {
+            let stored = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes))
+                .ok()?
+                .orientation()
+                .ok()?;
+            let map = crate::gainmap::of_jpeg(encoded)?;
+            (stored == image::metadata::Orientation::NoTransforms)
+                .then(|| map.attach(bytes, &map.jpeg))
+        }
+    }
 }
 
 /// The JPEG's data kept losslessly, with the encoder name for the report; `None` when that is not

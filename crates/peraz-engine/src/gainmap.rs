@@ -13,15 +13,20 @@
 use image::DynamicImage;
 use image::metadata::Orientation;
 
+use crate::gain_params::{CommonMap, Parameters};
+
 const XMP_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const MPF_HEADER: &[u8] = b"MPF\0";
 const ISO_HEADER: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
 
 /// The gain map of a JPEG, as it is stored after the main picture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JpegGainMap {
-    /// The gain map's own JPEG file.
+    /// The gain map's own JPEG file. For a gain map that came from another format, only its
+    /// description: the segments that say how it is applied.
     pub jpeg: Vec<u8>,
+    /// The gain map's pixels, upright, when it came from another format.
+    pub pixels: Option<DynamicImage>,
     /// How the main picture is stored turned; the gain map is stored the same way.
     pub orientation: Orientation,
     /// The main picture's size, upright.
@@ -97,6 +102,7 @@ pub fn of_jpeg(jpeg: &[u8]) -> Option<JpegGainMap> {
     };
     Some(JpegGainMap {
         jpeg: map.to_vec(),
+        pixels: None,
         orientation: Orientation::NoTransforms,
         picture_size: (0, 0),
         names_ultra_hdr: own.iter().any(|segment| {
@@ -116,8 +122,11 @@ impl JpegGainMap {
     /// picture was, and scaled by the same factor. A gain map is often stored smaller than its
     /// picture; it keeps that proportion.
     pub fn pixels_for(&self, size: (u32, u32)) -> Result<DynamicImage, String> {
-        let mut map = image::load_from_memory_with_format(&self.jpeg, image::ImageFormat::Jpeg)
-            .map_err(|e| format!("cannot read the HDR gain map: {e}"))?;
+        let mut map = match &self.pixels {
+            Some(pixels) => pixels.clone(),
+            None => image::load_from_memory_with_format(&self.jpeg, image::ImageFormat::Jpeg)
+                .map_err(|e| format!("cannot read the HDR gain map: {e}"))?,
+        };
         map.apply_orientation(self.orientation);
         let scaled = |length: u32, now: u32, was: u32| {
             let pixels = u64::from(length) * u64::from(now) / u64::from(was.max(1));
@@ -131,6 +140,71 @@ impl JpegGainMap {
             map = map.resize_exact(wanted.0, wanted.1, image::imageops::FilterType::Lanczos3);
         }
         Ok(map)
+    }
+
+    /// The gain map in the common form, for another format. `exif` is the main picture's
+    /// EXIF, where an older iPhone photo says how bright its HDR rendition goes. `None` when
+    /// the file does not say how the gain map is applied in a way that is understood.
+    #[must_use]
+    pub fn common(&self, exif: Option<&[u8]>) -> Option<CommonMap> {
+        let pixels = self.pixels_for(self.picture_size).ok()?;
+        let described = self.description();
+        let body_of = |marker: u8, header: &[u8]| {
+            described
+                .iter()
+                .find(|(found, body)| *found == marker && body.starts_with(header))
+                .map(|(_, body)| &body[header.len()..])
+        };
+        // The standard's own segment first, then the XMP attributes.
+        let xmp = body_of(0xE1, XMP_HEADER);
+        let parameters = body_of(0xE2, ISO_HEADER)
+            .and_then(Parameters::of_iso)
+            .or_else(|| xmp.and_then(Parameters::of_xmp));
+        if let Some(parameters) = parameters {
+            return Some(CommonMap {
+                pixels: match pixels {
+                    DynamicImage::ImageLuma8(_) => pixels,
+                    other => DynamicImage::ImageRgb8(other.to_rgb8()),
+                },
+                picture_size: self.picture_size,
+                parameters,
+            });
+        }
+        // An older iPhone photo: only a headroom, in the maker note.
+        let headroom = xmp
+            .filter(|xmp| contains(xmp, b"HDRGainMap"))
+            .and_then(|_| crate::exif::apple_headroom(exif?))?;
+        Some(CommonMap::of_apple(&pixels, self.picture_size, headroom))
+    }
+
+    /// A gain map from another format, as a JPEG's: described by XMP attributes (Ultra HDR)
+    /// and by the standard's segment, for readers of either.
+    #[must_use]
+    pub fn of_common(map: &CommonMap) -> Self {
+        let xmp = [XMP_HEADER, map.parameters.xmp().as_bytes()].concat();
+        let iso = [ISO_HEADER, &map.parameters.iso()[..]].concat();
+        // The description alone, in the shape of a JPEG: its segments between the markers
+        // for the start and the end of a picture.
+        let mut jpeg = vec![0xFF, 0xD8];
+        for (marker, body) in [(0xE1, &xmp), (0xE2, &iso)] {
+            jpeg.extend([0xFF, marker]);
+            jpeg.extend(
+                u16::try_from(body.len() + 2)
+                    .unwrap_or(u16::MAX)
+                    .to_be_bytes(),
+            );
+            jpeg.extend_from_slice(body);
+        }
+        jpeg.extend([0xFF, 0xD9]);
+        Self {
+            jpeg,
+            pixels: Some(map.pixels.clone()),
+            orientation: Orientation::NoTransforms,
+            picture_size: map.picture_size,
+            names_ultra_hdr: true,
+            // In the main picture, the segment holds the standard's version alone.
+            iso_version: Some([ISO_HEADER, &[0; 4]].concat()),
+        }
     }
 
     /// The metadata segments of the stored gain map that describe it: its XMP, and its
@@ -346,6 +420,60 @@ fn ultra_hdr_xmp(map_length: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_gain_map_from_another_format_is_described_both_ways() {
+        let common = CommonMap {
+            pixels: DynamicImage::ImageLuma8(image::GrayImage::from_fn(40, 30, |x, _| {
+                image::Luma([u8::try_from(x * 6).unwrap()])
+            })),
+            picture_size: (80, 60),
+            parameters: Parameters::up_to(4.0),
+        };
+        let map = JpegGainMap::of_common(&common);
+        // Its description: the XMP attributes, and the standard's segment.
+        let described: Vec<u8> = map
+            .description()
+            .iter()
+            .map(|(marker, _)| *marker)
+            .collect();
+        assert_eq!(described, [0xE1, 0xE2]);
+        assert!(map.names_ultra_hdr);
+        assert_eq!(map.iso_version, Some([ISO_HEADER, &[0; 4]].concat()));
+        // The pixels are the ones given, scaled with the picture.
+        let half = map.pixels_for((40, 30)).unwrap();
+        assert_eq!((half.width(), half.height()), (20, 15));
+        // Read back, it is the same gain map; from either description alone, too.
+        let back = map.common(None).unwrap();
+        assert_eq!(back.parameters, common.parameters);
+        assert_eq!(back.picture_size, (80, 60));
+        assert_eq!(back.pixels.to_luma8(), common.pixels.to_luma8());
+        let only = |kept: u8| {
+            let mut jpeg = vec![0xFF, 0xD8];
+            for (marker, body) in map.description() {
+                if marker == kept {
+                    jpeg.extend([0xFF, marker]);
+                    jpeg.extend(u16::try_from(body.len() + 2).unwrap().to_be_bytes());
+                    jpeg.extend_from_slice(body);
+                }
+            }
+            jpeg.extend([0xFF, 0xD9]);
+            JpegGainMap {
+                jpeg,
+                ..map.clone()
+            }
+        };
+        assert_eq!(
+            only(0xE1).common(None).unwrap().parameters,
+            common.parameters
+        );
+        assert_eq!(
+            only(0xE2).common(None).unwrap().parameters,
+            common.parameters
+        );
+        // Without either, and without an iPhone's headroom, there is nothing to go by.
+        assert!(only(0).common(None).is_none());
+    }
+
     /// A small JPEG with these segments (marker, content) before its picture.
     fn jpeg(gray: bool, segments: &[(u8, &[u8])]) -> Vec<u8> {
         let picture = if gray {
@@ -422,6 +550,7 @@ mod tests {
     fn the_gain_map_is_turned_and_scaled_with_the_picture() {
         let map = JpegGainMap {
             jpeg: jpeg(true, &[]),
+            pixels: None,
             orientation: Orientation::Rotate90,
             picture_size: (64, 96),
             names_ultra_hdr: false,
@@ -440,6 +569,7 @@ mod tests {
         let stored = jpeg(true, &[(0xE1, &map_xmp()), (0xE0, b"JFIF\0")]);
         let map = JpegGainMap {
             jpeg: stored,
+            pixels: None,
             orientation: Orientation::NoTransforms,
             picture_size: (48, 32),
             names_ultra_hdr: true,
@@ -478,6 +608,7 @@ mod tests {
         let picture = jpeg(false, &[(0xE1, &own_xmp)]);
         let map = JpegGainMap {
             jpeg: jpeg(true, &[(0xE1, &map_xmp())]),
+            pixels: None,
             orientation: Orientation::NoTransforms,
             picture_size: (48, 32),
             names_ultra_hdr: true,

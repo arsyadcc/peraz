@@ -18,6 +18,7 @@ use image::DynamicImage;
 use serde::Serialize;
 
 use crate::ffmpeg::{BUNDLED_DIR, bundled_dir, command, exe_name, find_on_path};
+use crate::gain_params::{CommonMap, Parameters};
 use crate::image::Decoded;
 use crate::metadata::Metadata;
 
@@ -135,6 +136,53 @@ impl JxlGainMap {
         })
     }
 
+    /// The gain map in the common form, for another format: its picture decoded with `djxl`,
+    /// and the standard's numbers from the box. `None` when either cannot be read.
+    #[must_use]
+    pub fn common(&self) -> Option<CommonMap> {
+        // A version, then the size of the standard's binary form, then that.
+        let length = usize::from(u16::from_be_bytes([
+            *self.description.get(1)?,
+            *self.description.get(2)?,
+        ]));
+        let parameters = Parameters::of_iso(self.description.get(3..3 + length)?)?;
+        let pixels = decode(&self.codestream).ok()?;
+        Some(CommonMap {
+            pixels: if pixels.color().channel_count() < 3 {
+                DynamicImage::ImageLuma8(pixels.to_luma8())
+            } else {
+                DynamicImage::ImageRgb8(pixels.to_rgb8())
+            },
+            picture_size: self.picture_size,
+            parameters,
+        })
+    }
+
+    /// A gain map from another format for a picture that is now `size`: scaled like the
+    /// picture, encoded with `cjxl` at `quality`, and described in the standard's binary
+    /// form, without a color encoding or a profile for the HDR rendition.
+    pub fn of_common(map: &CommonMap, size: (u32, u32), quality: u8) -> Result<Self, String> {
+        let workdir = crate::compress::work_folder()?;
+        let codestream = encode_map(&map.pixels_for(size), quality, &workdir);
+        let _ = std::fs::remove_dir_all(&workdir);
+        let parameters = map.parameters.iso();
+        let length = u16::try_from(parameters.len()).map_err(|e| e.to_string())?;
+        let description = [
+            &[0][..],
+            &length.to_be_bytes(),
+            &parameters,
+            &[0],
+            &0u32.to_be_bytes(),
+        ]
+        .concat();
+        Ok(Self {
+            description,
+            codestream: codestream?,
+            picture_size: size,
+            stored_upright: true,
+        })
+    }
+
     /// The gain map's codestream for a picture that is now `size`: as it is when the picture
     /// keeps its size and was stored upright, and else decoded, scaled by the same factor as
     /// the picture, and encoded again at `quality`.
@@ -142,7 +190,7 @@ impl JxlGainMap {
         if size == self.picture_size && self.stored_upright {
             return Ok(self.codestream.clone());
         }
-        let (tools, djxl) = (tools()?, djxl()?);
+        let djxl = djxl()?;
         let workdir = crate::compress::work_folder()?;
         let result = (|| {
             let stored = workdir.join("map.jxl");
@@ -162,18 +210,28 @@ impl JxlGainMap {
             } else {
                 map.resize_exact(wanted.0, wanted.1, image::imageops::FilterType::Lanczos3)
             };
-            // A gray gain map stays gray.
-            let input = workdir.join("map.png");
-            map.save_with_format(&input, image::ImageFormat::Png)
-                .map_err(|e| format!("cannot write a work file: {e}"))?;
-            let output = workdir.join("map-out.jxl");
-            let encoded = run_cjxl(&tools.cjxl, &input, &output, &["-q", &quality.to_string()])?;
-            crate::jxl_header::codestream(&encoded)
-                .ok_or_else(|| "cjxl wrote a gain map that cannot be read back".to_owned())
+            encode_map(&map, quality, &workdir)
         })();
         let _ = std::fs::remove_dir_all(&workdir);
         result
     }
+}
+
+/// A gain map's pixels as a JPEG XL codestream, encoded with `cjxl` at `quality` in
+/// `workdir`. A gray gain map stays gray.
+fn encode_map(map: &DynamicImage, quality: u8, workdir: &Path) -> Result<Vec<u8>, String> {
+    let input = workdir.join("map.png");
+    map.save_with_format(&input, image::ImageFormat::Png)
+        .map_err(|e| format!("cannot write a work file: {e}"))?;
+    let output = workdir.join("map-out.jxl");
+    let encoded = run_cjxl(
+        &tools()?.cjxl,
+        &input,
+        &output,
+        &["-q", &quality.to_string()],
+    )?;
+    crate::jxl_header::codestream(&encoded)
+        .ok_or_else(|| "cjxl wrote a gain map that cannot be read back".to_owned())
 }
 
 /// Encodes a picture at a `cjxl` quality setting (0–100, where 100 is lossless). The color
@@ -186,6 +244,18 @@ pub fn encode(
     quality: u8,
     map_quality: u8,
     metadata: Option<&Metadata>,
+) -> Result<(Vec<u8>, bool), String> {
+    let map = prepared.jxl_gain_map.as_ref();
+    encode_with_map(prepared, quality, map_quality, metadata, map)
+}
+
+/// [`encode`] with the gain map to write given: the input's own, or one from another format.
+pub fn encode_with_map(
+    prepared: &Decoded,
+    quality: u8,
+    map_quality: u8,
+    metadata: Option<&Metadata>,
+    gain_map: Option<&JxlGainMap>,
 ) -> Result<(Vec<u8>, bool), String> {
     let tools = tools()?;
     let workdir = crate::compress::work_folder()?;
@@ -217,7 +287,7 @@ pub fn encode(
     // An HDR photo stays one: its gain map follows the picture, scaled like it. When that
     // fails, the standard picture is still written.
     let size = (prepared.image.width(), prepared.image.height());
-    let with_map = prepared.jxl_gain_map.as_ref().and_then(|map| {
+    let with_map = gain_map.and_then(|map| {
         let codestream = map.codestream_for(size, map_quality).ok()?;
         let content = [&map.description[..], &codestream].concat();
         crate::jxl_header::with_box(&file, *b"jhgm", &content)
@@ -284,11 +354,8 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
     });
     let _ = std::fs::remove_dir_all(&workdir);
     // djxl gives the standard picture; a gain map in the file is not part of it.
-    result.map(|mut decoded| {
-        decoded.gain_map = crate::jxl_header::has_gain_map(input).unwrap_or(false);
-        if decoded.gain_map {
-            decoded.jxl_gain_map = stored_gain_map(input, &decoded.image);
-        }
+    result.map(|decoded| {
+        let mut decoded = with_stored_gain_map(decoded, input);
         // The header says when the values are PQ or HLG; the profile djxl writes for them
         // says the same in another way, and is not needed then.
         decoded.hdr = crate::jxl_header::sniff(input)
@@ -300,6 +367,16 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
         }
         decoded
     })
+}
+
+/// A picture decoded from the JPEG XL file `input`, with the file's gain map when it has one.
+#[must_use]
+pub fn with_stored_gain_map(mut decoded: Decoded, input: &Path) -> Decoded {
+    if crate::jxl_header::has_gain_map(input).unwrap_or(false) {
+        decoded.gain_map = true;
+        decoded.jxl_gain_map = stored_gain_map(input, &decoded.image);
+    }
+    decoded
 }
 
 /// The gain map in a JPEG XL file whose picture was decoded as `image`.

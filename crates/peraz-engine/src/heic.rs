@@ -38,6 +38,18 @@ pub fn encode(
     quality: u8,
     metadata: Option<&Metadata>,
 ) -> Result<(Vec<u8>, bool), String> {
+    let map = prepared.heif_gain_map.as_ref();
+    encode_with_map(tools, prepared, quality, metadata, map)
+}
+
+/// [`encode`] with the gain map to write given: the input's own, or one from another format.
+pub fn encode_with_map(
+    tools: &Toolchain,
+    prepared: &Decoded,
+    quality: u8,
+    metadata: Option<&Metadata>,
+    gain_map: Option<&crate::heif::GainMap>,
+) -> Result<(Vec<u8>, bool), String> {
     let (width, height) = (prepared.image.width(), prepared.image.height());
     let rgba = prepared.image.to_rgba8();
     let has_alpha = rgba.pixels().any(|p| p[3] < 255);
@@ -66,9 +78,7 @@ pub fn encode(
             None
         };
         // The gain map: when it cannot be encoded, the standard picture is still written.
-        let gain_map = prepared
-            .heif_gain_map
-            .as_ref()
+        let gain_map = gain_map
             .and_then(|map| gain_map_picture(tools, &workdir, map, (width, height), quality).ok());
         let kept_gain_map = gain_map.is_some();
         let file = container(
@@ -191,7 +201,13 @@ fn hevc_picture(tools: &Toolchain, workdir: &Path, plane: Plane, crf: u8) -> Res
             &format!("scale=out_color_matrix={matrix}:out_range=full,format={output_format}"),
         ])
         .args(["-frames:v", "1", "-c:v", ENCODER, "-crf", &crf.to_string()])
-        .args(["-preset", "slow", "-x265-params", "log-level=error:info=0"])
+        // The color description is given to x265 itself too: older FFmpeg versions take it
+        // from the frames, which do not have it, and not from the options below.
+        .args(["-preset", "slow", "-x265-params"])
+        .arg(format!(
+            "log-level=error:info=0:range=full:colorprim={primaries}:transfer={transfer}:\
+             colormatrix={colorspace}"
+        ))
         .args(["-color_range", "pc", "-colorspace", colorspace])
         .args(["-color_primaries", primaries, "-color_trc", transfer])
         .args(["-tag:v", "hvc1", "-an", "-f", "mp4"])

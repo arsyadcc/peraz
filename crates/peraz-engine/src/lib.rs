@@ -15,6 +15,7 @@ mod error;
 pub mod exif;
 pub mod ffmpeg;
 mod fit;
+pub mod gain_params;
 pub mod gainmap;
 pub mod gif;
 pub mod hdr;

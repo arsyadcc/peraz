@@ -13,6 +13,8 @@ use peraz_core::plan::fit_within;
 use peraz_core::{ImageEncoding, ImagePlan};
 
 use crate::ffmpeg::Toolchain;
+use crate::gain_params::CommonMap;
+use crate::heif::GainMap;
 use crate::metadata::Metadata;
 
 /// An encoded image, ready to be written.
@@ -132,85 +134,44 @@ fn encode_image_inner(
     let kept = Some(metadata).filter(|m| plan.keep_metadata && !m.is_empty());
     let (width, height) = (image.width(), image.height());
     let mut warnings = Vec::new();
-    let mut kept_gain_map = false;
-    let (bytes, encoder) = match plan.encoding {
+    // What each arm gives: the result, the encoder's name, and whether the input's gain map
+    // is in the result.
+    let without_map = |(bytes, encoder): (Vec<u8>, String)| (bytes, encoder, false);
+    let (bytes, encoder, kept_gain_map) = match plan.encoding {
         ImageEncoding::Jpeg {
             quality,
             progressive,
-        } => {
-            let (jpeg, settings) = jpeg_of(image, plan, quality, progressive, icc.as_deref())?;
-            warnings.extend(kept.map(Metadata::too_large_for_jpeg).unwrap_or_default());
-            let mut jpeg = kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg));
-            // An HDR photo stays one: its gain map follows the picture, turned and scaled
-            // like it. When that fails, the standard picture is still written.
-            if let Some(map) = &prepared.jpeg_gain_map {
-                match gain_map_jpeg(map, (width, height), settings) {
-                    Ok(encoded) => {
-                        jpeg = map.attach(&jpeg, &encoded);
-                        kept_gain_map = true;
-                    }
-                    Err(why) => warnings.push(format!("the HDR gain map was left out: {why}")),
-                }
-            }
-            let name = if kept_gain_map {
-                format!("{}, HDR gain map kept", settings.name())
-            } else {
-                settings.name()
-            };
-            (jpeg, name)
-        }
+        } => jpeg_with_map(prepared, plan, (quality, progressive), kept, &mut warnings)?,
         ImageEncoding::Png {
             min_quality,
             max_quality,
-        } => png_of(
+        } => without_map(png_of(
             prepared,
             plan,
             (min_quality, max_quality),
             kept,
             &mut warnings,
-        )?,
+        )?),
         ImageEncoding::Webp { quality } => (
             encode_webp(&image.to_rgba8(), quality, icc.as_deref(), kept)?,
             format!("libwebp q{quality}"),
+            false,
         ),
-        ImageEncoding::Jxl { quality, .. } => {
-            let map_quality = quality.max(GAIN_MAP_QUALITY);
-            let (jxl, with_gain_map) = crate::jxl::encode(prepared, quality, map_quality, kept)?;
-            kept_gain_map = with_gain_map;
-            let note = if with_gain_map {
-                ", HDR gain map kept"
-            } else {
-                ""
-            };
-            (jxl, format!("cjxl q{quality}{note}"))
-        }
+        ImageEncoding::Jxl { quality, .. } => jxl_with_map(prepared, quality, kept)?,
         ImageEncoding::Heic { quality } => {
             let tools = tools.ok_or("HEIC output needs FFmpeg, which was not found")?;
-            let (heic, with_gain_map) = crate::heic::encode(tools, prepared, quality, kept)?;
-            kept_gain_map = with_gain_map;
-            let note = match (with_gain_map, prepared.hdr) {
-                (true, _) => ", HDR gain map kept",
-                (false, Some(_)) => ", 10-bit, HDR kept",
-                (false, None) => "",
-            };
-            (
-                heic,
-                format!("x265 crf {}{note}", crate::heic::crf(quality)),
-            )
+            heic_with_map(tools, prepared, quality, kept)?
         }
         ImageEncoding::Tiff => (
             tiff_of(image, icc.as_deref(), kept, &mut warnings)?,
             crate::tiff::ENCODER.to_owned(),
+            false,
         ),
         // SVGs and icon files are rewritten whole and never reach the pixel encoders.
         ImageEncoding::Svg { .. } | ImageEncoding::Icon { .. } => {
             return Err("internal error: this file is not encoded from pixels".to_owned());
         }
-        ImageEncoding::Avif { quality } => {
-            let (avif, encoder, with_gain_map) = avif_of(prepared, quality, kept, &mut warnings)?;
-            kept_gain_map = with_gain_map;
-            (avif, encoder)
-        }
+        ImageEncoding::Avif { quality } => avif_of(prepared, quality, kept, &mut warnings)?,
     };
     Ok(EncodedImage {
         bytes,
@@ -220,6 +181,112 @@ fn encode_image_inner(
         warnings,
         kept_gain_map,
     })
+}
+
+/// The picture as a JPEG with the input's gain map after it: the encoder's name, and whether
+/// the gain map is there. `mode` is the quality and whether the JPEG is progressive.
+fn jpeg_with_map(
+    prepared: &Decoded,
+    plan: &ImagePlan,
+    (quality, progressive): (u8, bool),
+    kept: Option<&Metadata>,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<u8>, String, bool), String> {
+    let (image, icc) = (&prepared.image, prepared.icc.as_deref());
+    let (jpeg, settings) = jpeg_of(image, plan, quality, progressive, icc)?;
+    warnings.extend(kept.map(Metadata::too_large_for_jpeg).unwrap_or_default());
+    let mut jpeg = kept.map_or_else(|| jpeg.clone(), |m| m.into_jpeg(&jpeg));
+    // An HDR photo stays one: its gain map follows the picture, turned and scaled like it.
+    // When that fails, the standard picture is still written.
+    let from_another = other_map(prepared, prepared.jpeg_gain_map.is_none(), |map| {
+        Some(crate::gainmap::JpegGainMap::of_common(map))
+    });
+    let mut kept_gain_map = false;
+    if let Some(map) = prepared.jpeg_gain_map.as_ref().or(from_another.as_ref()) {
+        match gain_map_jpeg(map, (image.width(), image.height()), settings) {
+            Ok(encoded) => {
+                jpeg = map.attach(&jpeg, &encoded);
+                kept_gain_map = true;
+            }
+            Err(why) => warnings.push(format!("the HDR gain map was left out: {why}")),
+        }
+    }
+    let name = if kept_gain_map {
+        format!("{}, HDR gain map kept", settings.name())
+    } else {
+        settings.name()
+    };
+    Ok((jpeg, name, kept_gain_map))
+}
+
+/// The picture as a JPEG XL with the input's gain map in its container.
+fn jxl_with_map(
+    prepared: &Decoded,
+    quality: u8,
+    kept: Option<&Metadata>,
+) -> Result<(Vec<u8>, String, bool), String> {
+    let size = (prepared.image.width(), prepared.image.height());
+    let map_quality = quality.max(GAIN_MAP_QUALITY);
+    let from_another = other_map(prepared, prepared.jxl_gain_map.is_none(), |map| {
+        crate::jxl::JxlGainMap::of_common(map, size, map_quality).ok()
+    });
+    let map = prepared.jxl_gain_map.as_ref().or(from_another.as_ref());
+    let (jxl, with_gain_map) =
+        crate::jxl::encode_with_map(prepared, quality, map_quality, kept, map)?;
+    let note = if with_gain_map {
+        ", HDR gain map kept"
+    } else {
+        ""
+    };
+    Ok((jxl, format!("cjxl q{quality}{note}"), with_gain_map))
+}
+
+/// The picture as a HEIC with the input's gain map.
+fn heic_with_map(
+    tools: &Toolchain,
+    prepared: &Decoded,
+    quality: u8,
+    kept: Option<&Metadata>,
+) -> Result<(Vec<u8>, String, bool), String> {
+    let from_another = other_map(prepared, prepared.heif_gain_map.is_none(), |map| {
+        Some(GainMap::of_common(map))
+    });
+    let map = prepared.heif_gain_map.as_ref().or(from_another.as_ref());
+    let (heic, with_gain_map) = crate::heic::encode_with_map(tools, prepared, quality, kept, map)?;
+    let note = match (with_gain_map, prepared.hdr) {
+        (true, _) => ", HDR gain map kept",
+        (false, Some(_)) => ", 10-bit, HDR kept",
+        (false, None) => "",
+    };
+    let encoder = format!("x265 crf {}{note}", crate::heic::crf(quality));
+    Ok((heic, encoder, with_gain_map))
+}
+
+/// The input's gain map in the one form every output format is written from, whatever
+/// layout it has. `None` when there is none, or when the file does not say how it is applied
+/// in a way that is understood.
+fn common_map(prepared: &Decoded) -> Option<CommonMap> {
+    if let Some(map) = &prepared.jpeg_gain_map {
+        return map.common(prepared.metadata.exif.as_deref());
+    }
+    if let Some(map) = &prepared.heif_gain_map {
+        return map.common();
+    }
+    prepared.jxl_gain_map.as_ref()?.common()
+}
+
+/// A gain map for an output format the input's gain map is not stored for: made by `make`
+/// from the common form, when it is `needed` (the input's own cannot be written as it is).
+/// `None` also when there is none to convert.
+fn other_map<T>(
+    prepared: &Decoded,
+    needed: bool,
+    make: impl FnOnce(&CommonMap) -> Option<T>,
+) -> Option<T> {
+    if !needed {
+        return None;
+    }
+    make(&common_map(prepared)?)
 }
 
 /// The quality a gain map is encoded at, at least: it is smooth, so this costs little, and
@@ -561,7 +628,14 @@ fn avif_of(
     let avif = encode_avif(&rgba, quality)?;
     // An HDR photo stays one: its gain map follows the picture, scaled like it, in a file
     // written here. When that fails, the standard picture is still written.
-    if let Some(map) = &prepared.heif_gain_map {
+    // An AVIF holds a gain map the standard's way only: an older iPhone's is rewritten, like
+    // one from another format.
+    let own = prepared
+        .heif_gain_map
+        .as_ref()
+        .filter(|map| matches!(map.description, crate::heif::MapDescription::Iso(_)));
+    let rewritten = other_map(prepared, own.is_none(), |map| Some(GainMap::of_common(map)));
+    if let Some(map) = own.or(rewritten.as_ref()) {
         let size = rgba.dimensions();
         let map_quality = quality.max(GAIN_MAP_QUALITY);
         if let Ok(file) = crate::avif::with_gain_map(&avif, map, size, map_quality, icc, kept) {
