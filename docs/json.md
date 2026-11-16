@@ -65,10 +65,11 @@ the event. The order is:
 3. one `done`, after every input has its `file_done`.
 
 Every input gets its `file_start` and `file_done`, including files that cannot be read and files
-cancelled by Ctrl-C or SIGTERM (status `cancelled`, exit code 130). After `file_start`, a file may
-wait for a free encoder before its first `progress`. The output file is named in the `file_done`
-report. `progress` comes at most every 0.1 seconds per file and only when the percentage changed;
-pictures and documents may report only 100%.
+cancelled by Ctrl-C, SIGTERM, or [`--cancel-on-stdin`](cli.md#compress-only) (status `cancelled`,
+exit code 130). After `file_start`, a file may wait for a free encoder before its first
+`progress`. The output file is named in the `file_done` report. `progress` comes at most every 0.1
+seconds per file and only when the percentage changed; pictures and documents may report only
+100%.
 
 | Field | Type | Description |
 | --- | --- | --- |

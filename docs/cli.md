@@ -96,6 +96,7 @@ The same settings can come from a [recipe](recipes.md); a flag overrides the rec
 | `--check` | | Write nothing; exit with code 4 when a file could be made at least `--check-threshold` percent smaller. |
 | `--check-threshold` | 1–99 | With `--check`: the smallest saving, in percent, that counts. Default 10. |
 | `--events` | | Print [events](json.md#peraz-compress---events) as they happen, one JSON object per line, instead of text: each file's start, progress, and report, then the totals. For programs that show progress. Cannot be combined with `--json`. |
+| `--cancel-on-stdin` | | Cancel the run like the first Ctrl-C when standard input sends a line `cancel` or is closed; other lines are ignored. For programs that cannot send Ctrl-C or SIGTERM, such as a Windows app without a console: start `peraz` with a pipe as its standard input, and write `cancel` or close the pipe. Without this flag, standard input is not read. |
 
 ### `watch` only
 
@@ -148,6 +149,6 @@ that is not smaller than the input is not kept, unless the format was changed on
 | `2` | Invalid usage. |
 | `3` | Environment problem, for example FFmpeg not found when a file needs it ([Without FFmpeg](#without-ffmpeg)), or `cjxl` not found with `--format jxl` (`djxl` with a JPEG XL input). |
 | `4` | `--check` found files that could be smaller. |
-| `130` | Cancelled with Ctrl-C or SIGTERM; the current file's partial output is removed. |
+| `130` | Cancelled with Ctrl-C, SIGTERM, or `--cancel-on-stdin`; the current file's partial output is removed. |
 
 When several apply, the first in this order wins: 130, 1, 4.

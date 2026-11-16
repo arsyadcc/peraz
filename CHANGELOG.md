@@ -11,6 +11,13 @@ between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- `peraz compress --cancel-on-stdin` cancels the run like the first Ctrl-C when standard input
+  sends a line `cancel` or is closed: the current file stops and its partial output is removed,
+  the rest is skipped, and the exit code is 130. For programs that cannot send Ctrl-C or SIGTERM,
+  such as a Windows app without a console. **Interface:** new flag.
+
 ## [0.5.0] - 2026-11-16
 
 ### Added

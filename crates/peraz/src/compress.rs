@@ -155,6 +155,11 @@ pub struct Args {
     /// start, progress, and report, then the totals. For programs that show progress.
     #[arg(long, conflicts_with = "json")]
     events: bool,
+
+    /// Cancel the run like the first Ctrl-C when standard input closes or sends a line
+    /// `cancel`. For programs that cannot send Ctrl-C, such as a Windows app without a console.
+    #[arg(long)]
+    cancel_on_stdin: bool,
 }
 
 /// `--format`: checked here so mistakes are usage errors; the meaning lives in `peraz-core`.
@@ -273,6 +278,9 @@ pub fn run(ffmpeg: Option<&Path>, args: &Args) -> u8 {
     let target = output_target(args);
     let check_dir = check_folder(args, recipe_name.as_deref());
     let cancel = install_cancel_handler();
+    if args.cancel_on_stdin {
+        cancel_on_stdin();
+    }
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let workers = args
         .jobs
@@ -738,10 +746,12 @@ pub(crate) fn run_parallel(
         .collect()
 }
 
+/// Set once the run is cancelled; [`install_cancel_handler`] hands it out.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
 /// First Ctrl-C (or SIGTERM): stop the current file cleanly and skip the rest.
 /// Second Ctrl-C: exit immediately.
 pub(crate) fn install_cancel_handler() -> &'static AtomicBool {
-    static CANCEL: AtomicBool = AtomicBool::new(false);
     let result = ctrlc::set_handler(|| {
         if CANCEL.swap(true, Ordering::SeqCst) {
             std::process::exit(i32::from(exit::CANCELLED));
@@ -752,6 +762,23 @@ pub(crate) fn install_cancel_handler() -> &'static AtomicBool {
         eprintln!("warning: Ctrl-C handling unavailable: {e}");
     }
     &CANCEL
+}
+
+/// `--cancel-on-stdin`: a line `cancel` on standard input, or its end, acts like the first
+/// Ctrl-C. Other lines are ignored.
+fn cancel_on_stdin() {
+    std::thread::spawn(|| {
+        for line in std::io::stdin().lines() {
+            match line {
+                Ok(line) if line.trim() == "cancel" => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        if !CANCEL.swap(true, Ordering::SeqCst) {
+            eprintln!("cancelling…");
+        }
+    });
 }
 
 pub(crate) fn summarize(reports: &[Report]) -> Summary {

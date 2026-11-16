@@ -62,6 +62,20 @@ jobs:
       - run: cargo run --locked -- probe fixtures/*.mp4 fixtures/*.png
       - run: cargo run --locked -- compress --out-dir "$RUNNER_TEMP" fixtures/*.mp4
 
+  cancel-windows:
+    name: cancel without a console (windows, bundled FFmpeg)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -- ffmpeg install
+      - run: cargo test -p peraz --locked --test cancel -- --nocapture 2>&1 | tee test.log
+        shell: bash
+      - name: no test skipped for a missing FFmpeg
+        shell: bash
+        run: "! grep -F 'skipped: ' test.log"
+
   macos:
     name: test and integration (macos, Homebrew FFmpeg)
     # Pinned: the newest image has the least capacity, and changes without notice.
