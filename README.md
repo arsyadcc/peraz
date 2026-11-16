@@ -228,6 +228,10 @@ to a floor below which pictures look broken, and when even the floor is too larg
 is scaled down step by step, with the quality searched again at each size. Every candidate is a
 real encode, so the result is known to fit; when nothing fits, the file fails and the original
 stays. `--keep-dimensions` never scales: it fails as soon as lower quality alone cannot fit.
+A PNG has one more step before it is scaled: a palette of fewer colors (128 down to 8), with
+dithering or without it, whichever looks better. A flat graphic usually keeps its size that
+way, because without dithering its areas stay flat and compress well; a photo is scaled down
+instead once so few colors would look worse than fewer pixels.
 This applies to JPEG, PNG, WebP, AVIF, HEIC, and JPEG XL output; a TIFF is lossless, so it fits
 as it is or fails with a message that says the size needs a lossy format.
 

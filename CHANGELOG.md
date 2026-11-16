@@ -25,6 +25,12 @@ between alpha versions.
 
 ### Changed
 
+- With `--target-size`, a PNG that is too large at the lowest palette quality gets a palette
+  of fewer colors (128 down to 8) before it is scaled down, with dithering or without it,
+  whichever scores better. Flat graphics keep their size that way (scaling them down made
+  them larger, and could end with nothing that fits), and with `--keep-dimensions` fewer PNGs
+  fail. A photo is still scaled down when so few colors would look worse than fewer pixels.
+  The report shows the palette in `plan.target.palette` and in `encoder`.
 - GIFs are smaller below `--quality highest`: the frame data is compressed with a little loss,
   where a pixel may come out as a color close to its own so that runs of pixels repeat. A GIF
   that stays a GIF now gets smaller with every frame kept (a dithered clip by 13% at `high`

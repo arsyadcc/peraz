@@ -13,9 +13,9 @@ pub mod units;
 pub use media::{Alpha, AudioTrack, ColorInfo, MediaInfo, MediaKind, Rational, VideoTrack};
 pub use plan::{
     AnimatedPlan, DocumentPlan, GifPlan, ImageDecoder, ImageEncoding, ImagePlan, ImageSizeTarget,
-    Pass, PlanError, RateControl, ScoreTarget, SizeTarget, TrimMethod, TrimPlan, VideoPlan,
-    plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng, plan_document, plan_gif,
-    plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
+    Pass, PlanError, PngPalette, RateControl, ScoreTarget, SizeTarget, TrimMethod, TrimPlan,
+    VideoPlan, plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng, plan_document,
+    plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
 };
 pub use recipe::{
     Clip, Color, EncoderPreference, GifRecipe, ImageFormat, ImageRecipe, JpegMode, Quality, Recipe,

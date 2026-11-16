@@ -133,7 +133,10 @@ fn encode_image_inner(
             // A PNG states its gamma and primaries in its own chunks, not in a profile made
             // from them.
             let profile = icc.as_deref().filter(|_| !png_color.profile_from_chunks);
-            let (png, encoder, reduced) = encode_png(image, min_quality, max_quality, profile)?;
+            // A size target may have cut the palette down below what the quality range gives.
+            let palette = plan.target.and_then(|target| target.palette);
+            let (png, encoder, reduced) =
+                encode_png(image, min_quality, max_quality, profile, palette)?;
             warnings.extend(reduced);
             let png = with_png_chunks(&png, &png_color.chunks);
             (
@@ -648,13 +651,17 @@ fn encode_png(
     min_quality: u8,
     max_quality: u8,
     icc: Option<&[u8]>,
+    cut: Option<peraz_core::PngPalette>,
 ) -> Result<(Vec<u8>, String, Option<String>), String> {
     let (width, height) = (image.width(), image.height());
     // 16 bits per channel: kept on the lossless path, reduced by a palette (which holds 8-bit
     // colors), and then the report says so.
     let deep = image.color().bytes_per_pixel() / image.color().channel_count() == 2;
     let rgba = image.to_rgba8();
-    let quantized = quantize(&rgba, min_quality, max_quality)?;
+    let quantized = match cut {
+        Some(cut) => Some(quantize_cut(&rgba, cut)?),
+        None => quantize(&rgba, min_quality, max_quality)?,
+    };
     let mut reduced = None;
     let (png, encoder) = if let Some((palette, indexes, achieved)) = quantized {
         let rgb: Vec<u8> = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
@@ -674,10 +681,15 @@ fn encode_png(
                     .to_owned(),
             );
         }
-        (
-            write_png(width, height, &pixels, icc)?,
-            format!("imagequant q{achieved} + oxipng"),
-        )
+        let name = match cut {
+            Some(cut) => format!(
+                "imagequant {} colors{} + oxipng",
+                palette.len(),
+                if cut.dithering { "" } else { ", no dithering" }
+            ),
+            None => format!("imagequant q{achieved} + oxipng"),
+        };
+        (write_png(width, height, &pixels, icc)?, name)
     } else if deep {
         let (color, samples): (png::ColorType, Vec<u16>) = match image {
             DynamicImage::ImageLuma16(gray) => (png::ColorType::Grayscale, gray.as_raw().clone()),
@@ -850,6 +862,29 @@ pub(crate) fn quantize(
     attributes
         .set_quality(min_quality, max_quality)
         .map_err(liq_error)?;
+    quantize_with(rgba, attributes, 1.0)
+}
+
+/// The best palette of at most `cut.colors` colors, whatever quality that is: for a picture
+/// that has to fit a size.
+fn quantize_cut(rgba: &RgbaImage, cut: peraz_core::PngPalette) -> Result<Quantized, String> {
+    let liq_error = |e: imagequant::Error| format!("imagequant: {e}");
+    let mut attributes = imagequant::new();
+    attributes
+        .set_max_colors(u32::from(cut.colors.clamp(2, 256)))
+        .map_err(liq_error)?;
+    let dithering = if cut.dithering { 1.0 } else { 0.0 };
+    quantize_with(rgba, attributes, dithering)?
+        .ok_or_else(|| "imagequant: no palette for this picture".to_owned())
+}
+
+fn quantize_with(
+    rgba: &RgbaImage,
+    mut attributes: imagequant::Attributes,
+    dithering: f32,
+) -> Result<Option<Quantized>, String> {
+    let liq_error = |e: imagequant::Error| format!("imagequant: {e}");
+    let max_quality = attributes.quality().1;
     attributes.set_speed(4).map_err(liq_error)?;
     let pixels: Vec<imagequant::RGBA> = rgba
         .pixels()
@@ -863,7 +898,7 @@ pub(crate) fn quantize(
         Err(imagequant::Error::QualityTooLow) => return Ok(None),
         Err(e) => return Err(liq_error(e)),
     };
-    result.set_dithering_level(1.0).map_err(liq_error)?;
+    result.set_dithering_level(dithering).map_err(liq_error)?;
     let achieved = result.quantization_quality().unwrap_or(max_quality);
     let (palette, indexes) = result.remapped(&mut image).map_err(liq_error)?;
     Ok(Some((palette, indexes, achieved)))
@@ -1242,7 +1277,7 @@ mod tests {
         }
         let icc = b"fake icc profile bytes".to_vec();
         let picture = DynamicImage::ImageRgba8(rgba.clone());
-        let (png, encoder, _) = encode_png(&picture, 0, 100, Some(&icc)).unwrap();
+        let (png, encoder, _) = encode_png(&picture, 0, 100, Some(&icc), None).unwrap();
         assert!(encoder.starts_with("imagequant"), "{encoder}");
         let mut decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&png)).unwrap();
         assert_eq!(decoder.icc_profile().unwrap(), Some(icc));

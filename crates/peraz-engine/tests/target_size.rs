@@ -247,3 +247,104 @@ fn a_picture_within_the_target_is_compressed_as_usual() {
     assert!(output_bytes(&report) <= 50_000_000);
     assert!(image_plan(&report).target.unwrap().reached);
 }
+
+/// A flat graphic: blocks of many different colors with thin lines between them, as a chart
+/// or a map has them. More colors than a palette holds, and no gradients.
+fn flat_graphic(path: &Path) {
+    image::RgbImage::from_fn(640, 480, |x, y| {
+        let (column, row) = (x / 20, y / 20);
+        if x % 20 == 0 || y % 20 == 0 {
+            return image::Rgb([20, 20, 30]);
+        }
+        let channel = |v: u32| u8::try_from(v % 256).unwrap();
+        image::Rgb([
+            channel(column * 37 + row * 11),
+            channel(row * 53 + column * 7),
+            channel(column * row * 5 + 40),
+        ])
+    })
+    .save(path)
+    .unwrap();
+}
+
+/// A photo-like picture: smooth light and color with fine grain that does not repeat.
+fn grainy_photo(path: &Path) {
+    image::RgbImage::from_fn(640, 480, |x, y| {
+        let mut mixed = x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77);
+        mixed ^= mixed >> 15;
+        mixed = mixed.wrapping_mul(0xC2B2_AE3D);
+        mixed ^= mixed >> 13;
+        let grain = mixed % 24;
+        let channel = |v: u32| u8::try_from(v.min(255)).unwrap();
+        let glow = 80 - ((x.abs_diff(400) + y.abs_diff(180)) / 8).min(80);
+        image::Rgb([
+            channel(x * 200 / 640 + grain + glow / 2),
+            channel(y * 180 / 480 + grain + glow),
+            channel(60 + (x + y) / 12 + grain),
+        ])
+    })
+    .save(path)
+    .unwrap();
+}
+
+#[test]
+fn a_png_gets_fewer_colors_before_it_gets_smaller() {
+    let (dir, _) = setup("palette");
+    let photo = dir.0.join("grainy.png");
+    grainy_photo(&photo);
+    let graphic = dir.0.join("graphic.png");
+    flat_graphic(&graphic);
+    let output = dir.0.join("fit.png");
+    // The picture fitted to `percent` of what the usual compression gives.
+    let fitted = |input: &Path, percent: u64, keep_dimensions: bool| {
+        let usual = output_bytes(&run(
+            input,
+            &dir.0.join("usual.png"),
+            fit(ImageFormat::Png, 50_000_000),
+        ));
+        let target = usual * percent / 100;
+        let mut recipe = fit(ImageFormat::Png, target);
+        recipe.image.keep_dimensions = keep_dimensions;
+        let report = run(input, &output, recipe);
+        let bytes = output_bytes(&report);
+        assert!(bytes <= target, "{bytes} > {target}");
+        let picture = image::open(&output).unwrap();
+        let found = image_plan(&report).target.unwrap();
+        assert!(found.reached, "{found:?}");
+        (found, (picture.width(), picture.height()), report.encoder)
+    };
+
+    // A lower palette quality alone gets a photo to 80%: nothing else changes.
+    let (found, size, _) = fitted(&photo, 80, false);
+    assert_eq!(
+        (found.palette, found.scaled_to, size),
+        (None, None, (640, 480))
+    );
+
+    // At half the size, a photo that must keep its dimensions gets fewer colors, dithered:
+    // before, it failed. The report says what was used.
+    let (found, size, encoder) = fitted(&photo, 50, true);
+    let palette = found.palette.expect("a smaller palette");
+    assert!(palette.dithering && palette.colors < 256, "{palette:?}");
+    assert_eq!((found.scaled_to, size), (None, (640, 480)));
+    let encoder = encoder.unwrap();
+    assert!(
+        encoder.contains(" colors") && !encoder.contains("no dithering"),
+        "{encoder}"
+    );
+    // Free to get smaller, it does: for a photo, fewer pixels look better than so few colors.
+    let (found, size, _) = fitted(&photo, 50, false);
+    let scaled = found.scaled_to.expect("a smaller picture");
+    assert_eq!((found.palette, size), (None, scaled));
+    assert!(scaled.0 < 640);
+
+    // A flat graphic keeps its size either way: without dithering its areas stay flat, which
+    // fits easily, while a smaller picture of it would be blurred and larger.
+    for keep_dimensions in [true, false] {
+        let (found, size, encoder) = fitted(&graphic, 80, keep_dimensions);
+        let palette = found.palette.expect("a smaller palette");
+        assert!(!palette.dithering, "{palette:?}");
+        assert_eq!((found.scaled_to, size), (None, (640, 480)));
+        assert!(encoder.unwrap().contains("no dithering"));
+    }
+}

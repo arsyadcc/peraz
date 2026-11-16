@@ -615,6 +615,31 @@ pub(crate) fn encode_image_to_ssimulacra2(
     Ok((encoded, scores.get(&loss).copied()))
 }
 
+/// The SSIMULACRA2 score of a PNG, JPEG, or WebP Peraz just encoded against the picture it
+/// was made from; `None` when the picture is too small to score or cannot be read back.
+pub(crate) fn score_of(reference: &image::DynamicImage, encoded: &[u8]) -> Option<f64> {
+    if reference.width() < 8 || reference.height() < 8 {
+        return None;
+    }
+    let image = image::load_from_memory(encoded).ok()?;
+    // A result that was made smaller is judged as it would be shown in the picture's place:
+    // at the picture's size.
+    let image = if (image.width(), image.height()) == (reference.width(), reference.height()) {
+        image
+    } else {
+        image.resize_exact(
+            reference.width(),
+            reference.height(),
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    ssimulacra2::compute_frame_ssimulacra2(
+        linear_input(reference).ok()?,
+        linear_input(&image).ok()?,
+    )
+    .ok()
+}
+
 /// A picture as SSIMULACRA2 reads it: sRGB, transparency composited onto white.
 fn linear_input(image: &image::DynamicImage) -> Result<ssimulacra2::Rgb, String> {
     let rgba = image.to_rgba32f();

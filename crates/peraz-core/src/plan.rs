@@ -702,6 +702,19 @@ pub struct ImageSizeTarget {
     /// The size the picture was scaled down to because lower quality alone did not fit; `None`
     /// when it kept its size (filled in by the engine).
     pub scaled_to: Option<(u32, u32)>,
+    /// For a PNG that did not fit at the lowest palette quality: the smaller palette it got
+    /// before its size in pixels had to change (filled in by the engine).
+    pub palette: Option<PngPalette>,
+}
+
+/// A PNG palette cut down to fit a file size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PngPalette {
+    /// The most colors the palette has (2 to 256).
+    pub colors: u16,
+    /// Colors that are not in the palette are mixed from neighboring pixels. Without it, flat
+    /// areas stay flat, which compresses far better; gradients show bands.
+    pub dithering: bool,
 }
 
 impl ImageEncoding {
@@ -790,6 +803,7 @@ fn size_target(recipe: &Recipe) -> Option<ImageSizeTarget> {
         reached: false,
         attempts: 0,
         scaled_to: None,
+        palette: None,
     })
 }
 
@@ -2130,6 +2144,7 @@ mod tests {
                 reached: false,
                 attempts: 0,
                 scaled_to: None,
+                palette: None,
             })
         );
         // The search starts from the quality level's setting.
