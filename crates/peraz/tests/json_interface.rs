@@ -343,6 +343,23 @@ fn check_vmaf_report(docs: &Docs, out: &str, config: &Path) {
     assert_eq!(json["results"][0]["score"]["metric"], "vmaf");
 }
 
+/// A recipe's format is printed as it was written: the documented list has every name, and
+/// the other spellings of some.
+#[test]
+fn documented_formats_are_the_ones_a_recipe_accepts() {
+    use peraz_core::settings::OutputFormat;
+    let Some(docs) = docs() else { return };
+    let listed = one_of(&docs["Recipe"]["settings.format"]).expect("a One of list");
+    let mut formats: BTreeSet<String> = OutputFormat::NAMES
+        .iter()
+        .chain(&["jpg", "heif", "tif"])
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(formats, listed);
+    formats.retain(|format| format.parse::<OutputFormat>().is_err());
+    assert_eq!(formats, BTreeSet::new(), "every listed format is accepted");
+}
+
 /// The *One of* lists name every value the code can produce, no more.
 #[test]
 fn documented_values_are_complete() {

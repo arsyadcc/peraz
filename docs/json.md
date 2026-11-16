@@ -12,6 +12,11 @@ Every document starts with `schema_version`, currently **1**. Within one schema 
 - nothing is renamed or removed, no field changes its type, and no value is added to a list
   marked *One of*. Any such change comes with a new `schema_version`.
 
+Two lists are the exception, because they grow as Peraz learns formats and reasons: the
+`format` of a recipe (`settings.format`) and the `outcome.reason` of a skipped file. A release
+can add a value to them without a new schema version, and the changelog says so; treat a value
+you do not know as "some other format" or "skipped for another reason".
+
 Two parts are informational and may change in any release, without a new schema version:
 
 - everything inside `plan` except `plan.type`: how the file was encoded (encoder settings,
@@ -233,7 +238,7 @@ makes it 1.
 | `settings.version` | integer | The recipe format version. |
 | `settings.description` | string | |
 | `settings.quality` | string | One of `highest`, `high`, `balanced`, `small`, `smallest`. |
-| `settings.format` | string | One of `keep`, `jpeg`, `jpg`, `png`, `webp`, `avif`, `jxl`, `gif`, `mp4`. |
+| `settings.format` | string | One of `keep`, `jpeg`, `jpg`, `png`, `webp`, `avif`, `jxl`, `heic`, `heif`, `tiff`, `tif`, `gif`, `apng`, `mp4`. This list grows with the formats Peraz writes. |
 | `settings.max_width` | integer | |
 | `settings.max_height` | integer | |
 | `settings.codec` | string | One of `h264`, `hevc`. |

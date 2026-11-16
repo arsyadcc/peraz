@@ -1,6 +1,6 @@
 {
   "name": "peraz",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Compress videos, images, GIFs, PDFs, and EPUBs with the peraz CLI, and read its reports",
   "author": {
     "name": "Arsyad",

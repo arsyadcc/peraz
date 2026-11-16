@@ -19,7 +19,7 @@ max_height = 2000
 | `version` | integer | `1` | |
 | `description` | string | Shown by `peraz recipe list`. | |
 | `quality` | string | `highest`, `high`, `balanced`, `small`, `smallest` | `--quality` |
-| `format` | string | `keep`, `jpeg` (or `jpg`), `png`, `webp`, `avif`, `jxl`, `gif`, `mp4` | `--format` |
+| `format` | string | `keep`, `jpeg` (or `jpg`), `png`, `webp`, `avif`, `jxl`, `heic` (or `heif`), `tiff` (or `tif`), `gif`, `apng`, `mp4` | `--format` |
 | `max_width` | integer | Pixels; never scales up. | `--max-width` |
 | `max_height` | integer | Pixels; never scales up. | `--max-height` |
 | `codec` | string | `h264`, `hevc` | `--codec` |
@@ -29,7 +29,7 @@ max_height = 2000
 | `keep_dimensions` | boolean | With `target_size`: `true` never scales a picture down to fit. | `--keep-dimensions` |
 | `target_vmaf` | integer | 1–100. Videos only; not with `target_size`. | `--target-vmaf` |
 | `target_ssimulacra2` | integer | 1–100. Still images only. | `--target-ssimulacra2` |
-| `fps` | integer | 1–50. GIFs and animated WebP/AVIF. | `--fps` |
+| `fps` | integer | 1–50. GIFs, animated WebP/AVIF, and animated PNGs made from videos. | `--fps` |
 | `measure_quality` | boolean | `true` measures every result's quality (VMAF, SSIMULACRA2), also without a target. | `--measure-quality` |
 | `keep_metadata` | boolean | `true` keeps the metadata of pictures (EXIF, XMP, IPTC, with the GPS location). | `--keep-metadata` |
 

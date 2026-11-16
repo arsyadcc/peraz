@@ -11,6 +11,8 @@ between alpha versions.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
 ### Added
 
 - `--keep-metadata` (recipe key `keep_metadata`) keeps the metadata of pictures: EXIF, XMP, and
@@ -105,8 +107,12 @@ between alpha versions.
   from JPEG to HEIC.
 - A GIF that stays a GIF keeps every frame at every quality level; the level sets its width and
   palette. Before, the level also lowered the frame rate (12 frames per second at `balanced`).
-  `--fps` still lowers it on request. A GIF is now described from its own frames, with or
-  without FFmpeg: in `peraz probe`, `pixel_format` is `null` for a GIF.
+  `--fps` still lowers it on request. **Interface:** a GIF is now described from its own
+  frames, with or without FFmpeg: in `peraz probe`, `pixel_format` is `null` for a GIF.
+- **Interface:** the JSON documentation now names the two value lists that grow without a new
+  schema version: a recipe's `format` (`settings.format`; new values in this release are `heic`,
+  `heif`, `tiff`, `tif`, and `apng`) and the `outcome.reason` of a skipped file. A program that
+  reads them should accept a value it does not know.
 - An animated PNG is an animation, not a video: `kind` is `animation` in `peraz probe` and in
   reports (it was `video`), and by default it stays an animated PNG instead of becoming an MP4;
   `--format mp4` still makes a video from it. An animated PNG with a single frame is a still
@@ -369,7 +375,8 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/arsyadcc/peraz/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/arsyadcc/peraz/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arsyadcc/peraz/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arsyadcc/peraz/compare/v0.2.0...v0.3.0
