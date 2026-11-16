@@ -393,6 +393,87 @@ fn a_jpeg_xl_gain_map_that_is_left_out_is_reported() {
     }
 }
 
+#[test]
+fn a_jpeg_xl_keeps_its_gain_map() {
+    use peraz_engine::jxl::JxlGainMap;
+    use peraz_engine::jxl_header::{codestream, gain_map_box, with_box};
+    if JxlTools::locate().is_none_or(|tools| tools.djxl.is_none()) {
+        eprintln!("skipped: cjxl and djxl not found");
+        return;
+    }
+    let dir = dir("jxl-kept");
+    // No JPEG XL with a gain map was found that may be used here: one is put together from
+    // a picture and a gain map that cjxl encodes.
+    let picture = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(320, 240, |x, y| {
+        let grain = (x.wrapping_mul(2_654_435_761).wrapping_add(y * 40_503) >> 28) & 15;
+        let channel = |v: u32| u8::try_from(v.min(255)).unwrap();
+        image::Rgb([
+            channel(x * 220 / 320 + grain),
+            channel(y * 220 / 240 + grain),
+            channel(90 + grain),
+        ])
+    }));
+    let brighter = image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(160, 120, |x, _| {
+        image::Luma([u8::try_from(x * 255 / 159).unwrap()])
+    }));
+    let encoded = |image: image::DynamicImage, quality: u8| {
+        let path = dir.0.join("source.png");
+        image.save(&path).unwrap();
+        let decoded = peraz_engine::image::decode_native(&path).unwrap();
+        peraz_engine::jxl::encode(&decoded, quality, quality, None)
+            .unwrap()
+            .0
+    };
+    let map = codestream(&encoded(brighter, 95)).unwrap();
+    let description = [
+        &[0][..],
+        &27u16.to_be_bytes(),
+        b"how the gain map is applied",
+        &[0],
+        &0u32.to_be_bytes(),
+    ]
+    .concat();
+    let content = [&description[..], &map].concat();
+    let input = dir.0.join("hdr.jxl");
+    std::fs::write(
+        &input,
+        with_box(&encoded(picture, 98), *b"jhgm", &content).unwrap(),
+    )
+    .unwrap();
+
+    let output = dir.0.join("out.jxl");
+    let compressed = |max_width: Option<u32>| {
+        let mut recipe = Recipe::default();
+        recipe.image.format = ImageFormat::Jxl;
+        recipe.image.max_width = max_width;
+        let report = run_recipe(&input, &output, recipe);
+        assert!(
+            matches!(report.outcome, Outcome::Compressed { .. }),
+            "{:?}",
+            report.outcome
+        );
+        assert_eq!(report.warnings, Vec::<String>::new());
+        assert!(report.encoder.unwrap().contains("HDR gain map kept"));
+        let file = std::fs::read(&output).unwrap();
+        let kept = gain_map_box(&file).expect("the result's gain map");
+        JxlGainMap::of_box(kept, (0, 0), true).expect("a gain map that can be read")
+    };
+    // The picture keeps its size: the gain map is the input's, byte for byte.
+    let kept = compressed(None);
+    assert_eq!(kept.description, description);
+    assert_eq!(kept.codestream, map);
+    // Scaled down, the gain map is scaled with the picture and says the same about itself.
+    let kept = compressed(Some(160));
+    assert_eq!(kept.description, description);
+    let small = peraz_engine::jxl::decode(&kept.codestream).unwrap();
+    assert_eq!((small.width(), small.height()), (80, 60));
+    // Bright where the input's is bright.
+    let small = small.to_luma8();
+    assert!(small.get_pixel(2, 30)[0] < 40 && small.get_pixel(77, 30)[0] > 215);
+    let result = peraz_engine::jxl::decode(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!((result.width(), result.height()), (160, 120));
+}
+
 /// An FFmpeg that also writes HEIC (libx265), or `None` with a note.
 fn ffmpeg_with_x265() -> Option<(Toolchain, Capabilities)> {
     let tools = ffmpeg()?;

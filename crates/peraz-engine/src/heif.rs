@@ -99,6 +99,7 @@ pub fn decode(tools: &Toolchain, input: &Path) -> Result<Decoded, String> {
         gain_map: properties.gain_map,
         jpeg_gain_map: None,
         heif_gain_map,
+        jxl_gain_map: None,
         png_color: crate::image::PngColor::default(),
     })
 }

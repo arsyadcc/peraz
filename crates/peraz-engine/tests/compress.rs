@@ -389,7 +389,7 @@ fn reads_jpeg_xl_inputs() {
     let alpha = env.out.join("alpha.jxl");
     std::fs::write(
         &alpha,
-        peraz_engine::jxl::encode(&decoded, 78, None).unwrap(),
+        peraz_engine::jxl::encode(&decoded, 78, 85, None).unwrap().0,
     )
     .unwrap();
 
@@ -467,7 +467,7 @@ fn rebuilds_the_jpeg_a_jpeg_xl_was_made_from() {
     let from_pixels = env.out.join("from-pixels.jxl");
     std::fs::write(
         &from_pixels,
-        peraz_engine::jxl::encode(&decoded, 78, None).unwrap(),
+        peraz_engine::jxl::encode(&decoded, 78, 85, None).unwrap().0,
     )
     .unwrap();
     assert_eq!(reconstruct_jpeg(&from_pixels).unwrap(), None);

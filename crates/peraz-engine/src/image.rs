@@ -42,6 +42,8 @@ pub struct Decoded {
     pub jpeg_gain_map: Option<crate::gainmap::JpegGainMap>,
     /// The gain map of a HEIC or AVIF, which a HEIC or AVIF made from it can carry.
     pub heif_gain_map: Option<crate::heif::GainMap>,
+    /// The gain map of a JPEG XL, which a JPEG XL made from it can carry.
+    pub jxl_gain_map: Option<crate::jxl::JxlGainMap>,
     /// What a PNG says about its colors without a profile (gamma, primaries, "this is sRGB").
     pub png_color: PngColor,
 }
@@ -75,6 +77,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         gain_map,
         jpeg_gain_map,
         heif_gain_map,
+        jxl_gain_map,
         png_color,
     } = decoded;
     if let Some((w, h)) = fit_within(
@@ -91,6 +94,7 @@ pub fn prepare(decoded: Decoded, plan: &ImagePlan) -> Decoded {
         gain_map,
         jpeg_gain_map,
         heif_gain_map,
+        jxl_gain_map,
         png_color,
     }
 }
@@ -173,10 +177,17 @@ fn encode_image_inner(
             encode_webp(&image.to_rgba8(), quality, icc.as_deref(), kept)?,
             format!("libwebp q{quality}"),
         ),
-        ImageEncoding::Jxl { quality, .. } => (
-            crate::jxl::encode(prepared, quality, kept)?,
-            format!("cjxl q{quality}"),
-        ),
+        ImageEncoding::Jxl { quality, .. } => {
+            let map_quality = quality.max(GAIN_MAP_QUALITY);
+            let (jxl, with_gain_map) = crate::jxl::encode(prepared, quality, map_quality, kept)?;
+            kept_gain_map = with_gain_map;
+            let note = if with_gain_map {
+                ", HDR gain map kept"
+            } else {
+                ""
+            };
+            (jxl, format!("cjxl q{quality}{note}"))
+        }
         ImageEncoding::Heic { quality } => {
             let tools = tools.ok_or("HEIC output needs FFmpeg, which was not found")?;
             let (heic, with_gain_map) = crate::heic::encode(tools, prepared, quality, kept)?;
@@ -348,6 +359,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
         gain_map: false,
         jpeg_gain_map: None,
         heif_gain_map: None,
+        jxl_gain_map: None,
         png_color: PngColor::default(),
     })
 }

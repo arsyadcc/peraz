@@ -249,19 +249,21 @@ IPTC where the output format can hold them (with the orientation reset, since th
 stored upright). Transparent images converted to JPEG are placed on white, or on the color
 given with `--background` (a page's background, for example).
 
-An HDR photo stays HDR as a JPEG, a HEIC, and an AVIF: its gain map is compressed with the
-picture, turned and scaled like it, and written back with its description, so HDR screens
-still show the photo brighter and every other program shows the standard picture. For a JPEG
-that is Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC and an AVIF, the
-gain map as the standard (ISO 21496-1) stores it, which also goes from one of the two formats
-to the other. A HEIC from an older iPhone, which stores its gain map as an auxiliary picture,
-keeps it that way as a HEIC; the two numbers in the photo's EXIF that say how bright the HDR
-rendition goes are kept with it, also when the rest of the metadata is removed. Elsewhere a
-gain map is not kept yet: in JPEG XL output, between JPEG and the other formats, and from an
-older iPhone's HEIC to AVIF. Such a photo is compressed as its standard picture, and the
-report warns that the gain map was removed. A picture that is HDR by its transfer function
-alone (PQ or HLG, such as a 10-bit AVIF) is skipped, because read as a standard picture it
-would come out dark and flat.
+An HDR photo stays HDR as a JPEG, a HEIC, an AVIF, and a JPEG XL: its gain map is compressed
+with the picture, turned and scaled like it, and written back with its description, so HDR
+screens still show the photo brighter and every other program shows the standard picture. For a
+JPEG that is Ultra HDR (Android, Adobe) and the layout iPhones use; for a HEIC and an AVIF, the
+gain map as the standard (ISO 21496-1) stores it, which also goes from one of the two formats to
+the other. A HEIC from an older iPhone, which stores its gain map as an auxiliary picture, keeps
+it that way as a HEIC; the two numbers in the photo's EXIF that say how bright the HDR rendition
+goes are kept with it, also when the rest of the metadata is removed. A JPEG XL keeps the gain
+map box of its container (`jhgm`): as it is when the picture keeps its size, and with the gain
+map encoded again when the picture is scaled down. A gain map is not yet carried from one of
+these layouts to another: between JPEG, JPEG XL, and the other formats, and from an older
+iPhone's HEIC to AVIF. Such a photo is compressed as its standard picture, and the report warns
+that the gain map was removed. A picture that is HDR by its transfer function alone (PQ or HLG,
+such as a 10-bit AVIF) is skipped, because read as a standard picture it would come out dark and
+flat.
 
 JPEGs are progressive; `--jpeg-mode baseline` writes baseline JPEGs for old systems, printers,
 and upload forms that read nothing else. A picture with sharp colored edges (colored text and

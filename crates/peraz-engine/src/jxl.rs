@@ -99,13 +99,94 @@ fn tools() -> Result<&'static JxlTools, String> {
     JxlTools::locate().ok_or_else(|| NEEDS_CJXL.to_owned())
 }
 
+/// The gain map of a JPEG XL file, from the `jhgm` box of its container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JxlGainMap {
+    /// What the box says before the gain map picture: a version, how the gain map is applied
+    /// (ISO 21496-1), and the color description of the HDR rendition. Kept as it is.
+    pub description: Vec<u8>,
+    /// The gain map picture: a JPEG XL codestream of its own.
+    pub codestream: Vec<u8>,
+    /// The main picture's size, upright.
+    pub picture_size: (u32, u32),
+    /// The main picture is stored upright. A picture stored turned is written upright, and
+    /// its gain map then too.
+    pub stored_upright: bool,
+}
+
+impl JxlGainMap {
+    /// Splits the content of a `jhgm` box: a version (one byte), the ISO 21496-1 data (its
+    /// size in two bytes), a color encoding (its size in one byte), a compressed color
+    /// profile (its size in four bytes), and the gain map's codestream in what is left.
+    /// `picture_size` and `stored_upright` describe the main picture.
+    #[must_use]
+    pub fn of_box(content: &[u8], picture_size: (u32, u32), stored_upright: bool) -> Option<Self> {
+        let metadata = usize::from(u16::from_be_bytes([*content.get(1)?, *content.get(2)?]));
+        let color_at = 3 + metadata;
+        let profile_at = color_at + 1 + usize::from(*content.get(color_at)?);
+        let profile: [u8; 4] = content.get(profile_at..profile_at + 4)?.try_into().ok()?;
+        let map_at = (profile_at + 4).checked_add(u32::from_be_bytes(profile) as usize)?;
+        let codestream = content.get(map_at..)?;
+        (!codestream.is_empty()).then(|| Self {
+            description: content[..map_at].to_vec(),
+            codestream: codestream.to_vec(),
+            picture_size,
+            stored_upright,
+        })
+    }
+
+    /// The gain map's codestream for a picture that is now `size`: as it is when the picture
+    /// keeps its size and was stored upright, and else decoded, scaled by the same factor as
+    /// the picture, and encoded again at `quality`.
+    fn codestream_for(&self, size: (u32, u32), quality: u8) -> Result<Vec<u8>, String> {
+        if size == self.picture_size && self.stored_upright {
+            return Ok(self.codestream.clone());
+        }
+        let (tools, djxl) = (tools()?, djxl()?);
+        let workdir = crate::compress::work_folder()?;
+        let result = (|| {
+            let stored = workdir.join("map.jxl");
+            std::fs::write(&stored, &self.codestream)
+                .map_err(|e| format!("cannot write a work file: {e}"))?;
+            let map = run_djxl(djxl, &stored, &workdir)?.image;
+            let scaled = |length: u32, now: u32, was: u32| {
+                let pixels = u64::from(length) * u64::from(now) / u64::from(was.max(1));
+                u32::try_from(pixels).unwrap_or(u32::MAX).max(1)
+            };
+            let wanted = (
+                scaled(map.width(), size.0, self.picture_size.0),
+                scaled(map.height(), size.1, self.picture_size.1),
+            );
+            let map = if wanted == (map.width(), map.height()) {
+                map
+            } else {
+                map.resize_exact(wanted.0, wanted.1, image::imageops::FilterType::Lanczos3)
+            };
+            // A gray gain map stays gray.
+            let input = workdir.join("map.png");
+            map.save_with_format(&input, image::ImageFormat::Png)
+                .map_err(|e| format!("cannot write a work file: {e}"))?;
+            let output = workdir.join("map-out.jxl");
+            let encoded = run_cjxl(&tools.cjxl, &input, &output, &["-q", &quality.to_string()])?;
+            crate::jxl_header::codestream(&encoded)
+                .ok_or_else(|| "cjxl wrote a gain map that cannot be read back".to_owned())
+        })();
+        let _ = std::fs::remove_dir_all(&workdir);
+        result
+    }
+}
+
 /// Encodes a picture at a `cjxl` quality setting (0–100, where 100 is lossless). The color
 /// profile is kept, and `metadata` when given: `cjxl` carries over what the PNG it reads holds.
+/// The gain map of a JPEG XL input is written into the file's container; `map_quality` is the
+/// setting it is encoded at when it has to be encoded again. Returns the file, and whether a
+/// gain map is in it.
 pub fn encode(
     prepared: &Decoded,
     quality: u8,
+    map_quality: u8,
     metadata: Option<&Metadata>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
     let tools = tools()?;
     let workdir = crate::compress::work_folder()?;
     let input = workdir.join("in.png");
@@ -119,7 +200,19 @@ pub fn encode(
         })
         .and_then(|()| run_cjxl(&tools.cjxl, &input, &output, &["-q", &quality.to_string()]));
     let _ = std::fs::remove_dir_all(&workdir);
-    result
+    let file = result?;
+    // An HDR photo stays one: its gain map follows the picture, scaled like it. When that
+    // fails, the standard picture is still written.
+    let size = (prepared.image.width(), prepared.image.height());
+    let with_map = prepared.jxl_gain_map.as_ref().and_then(|map| {
+        let codestream = map.codestream_for(size, map_quality).ok()?;
+        let content = [&map.description[..], &codestream].concat();
+        crate::jxl_header::with_box(&file, *b"jhgm", &content)
+    });
+    Ok(match with_map {
+        Some(with_map) => (with_map, true),
+        None => (file, false),
+    })
 }
 
 /// Recompresses a JPEG losslessly. `orientation` is its EXIF orientation (1–8), which is kept.
@@ -180,8 +273,24 @@ pub fn decode_file(input: &Path) -> Result<Decoded, String> {
     // djxl gives the standard picture; a gain map in the file is not part of it.
     result.map(|mut decoded| {
         decoded.gain_map = crate::jxl_header::has_gain_map(input).unwrap_or(false);
+        if decoded.gain_map {
+            decoded.jxl_gain_map = stored_gain_map(input, &decoded.image);
+        }
         decoded
     })
+}
+
+/// The gain map in a JPEG XL file whose picture was decoded as `image`.
+fn stored_gain_map(input: &Path, image: &DynamicImage) -> Option<JxlGainMap> {
+    let file = std::fs::read(input).ok()?;
+    let codestream = crate::jxl_header::codestream(&file)?;
+    let stored_upright = crate::jxl_header::parse(&codestream)?.orientation == 1;
+    let size = (image.width(), image.height());
+    JxlGainMap::of_box(
+        crate::jxl_header::gain_map_box(&file)?,
+        size,
+        stored_upright,
+    )
 }
 
 /// The JPEG a JPEG XL input was losslessly made from, rebuilt exactly by `djxl`; `None` when the
@@ -313,6 +422,7 @@ fn run_djxl(djxl: &Path, input: &Path, workdir: &Path) -> Result<Decoded, String
         gain_map: false,
         jpeg_gain_map: None,
         heif_gain_map: None,
+        jxl_gain_map: None,
         png_color: crate::image::PngColor::default(),
     })
 }
@@ -476,6 +586,50 @@ mod tests {
 
         assert_eq!(strip_jpeg_metadata(b"not a jpeg", 1), None);
         assert_eq!(strip_jpeg_metadata(&jpeg[..20], 1), None);
+    }
+
+    #[test]
+    fn a_gain_map_box_is_split_into_its_description_and_its_picture() {
+        // A version, the ISO 21496-1 data, a color encoding, a compressed profile, and the
+        // codestream.
+        let description = [
+            &[0][..],
+            &5u16.to_be_bytes(),
+            b"apply",
+            &[3],
+            b"enc",
+            &7u32.to_be_bytes(),
+            b"profile",
+        ]
+        .concat();
+        let content = [&description[..], b"\xFF\x0Athe gain map"].concat();
+        let map = JxlGainMap::of_box(&content, (640, 480), true).unwrap();
+        assert_eq!(map.description, description);
+        assert_eq!(map.codestream, b"\xFF\x0Athe gain map");
+        assert_eq!((map.picture_size, map.stored_upright), ((640, 480), true));
+        // The picture keeps its size: the codestream is written as it is.
+        assert_eq!(map.codestream_for((640, 480), 85).unwrap(), map.codestream);
+        // Without a color encoding and a profile.
+        let short = [
+            &[0][..],
+            &0u16.to_be_bytes(),
+            &[0],
+            &0u32.to_be_bytes(),
+            b"map",
+        ]
+        .concat();
+        let map = JxlGainMap::of_box(&short, (1, 1), false).unwrap();
+        assert_eq!(
+            (map.description.len(), &map.codestream[..]),
+            (8, &b"map"[..])
+        );
+        // Cut off, or without a picture.
+        assert_eq!(
+            JxlGainMap::of_box(&content[..description.len()], (1, 1), true),
+            None
+        );
+        assert_eq!(JxlGainMap::of_box(&content[..12], (1, 1), true), None);
+        assert_eq!(JxlGainMap::of_box(&[], (1, 1), true), None);
     }
 
     #[test]

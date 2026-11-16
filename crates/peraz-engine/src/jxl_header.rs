@@ -19,6 +19,8 @@ pub struct Header {
     pub height: u32,
     pub alpha: Alpha,
     pub animated: bool,
+    /// How the stored picture is turned for display, as EXIF numbers it (1 is upright).
+    pub orientation: u8,
 }
 
 const CODESTREAM: &[u8] = &[0xFF, 0x0A];
@@ -117,6 +119,106 @@ fn container_codestream(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
     Ok(codestream)
 }
 
+/// The boxes of a container that is held whole: each one's type and content.
+fn boxes(file: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut found = Vec::new();
+    let mut offset = CONTAINER.len();
+    while let Some(header) = file.get(offset..offset + 8) {
+        let kind = [header[4], header[5], header[6], header[7]];
+        let (size, start) = match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+            // The box runs to the end of the file.
+            0 => (file.len() - offset, offset + 8),
+            // The size is in the eight bytes after the type.
+            1 => {
+                let Some(large) = file.get(offset + 8..offset + 16) else {
+                    break;
+                };
+                let large = u64::from_be_bytes(large.try_into().unwrap_or_default());
+                (usize::try_from(large).unwrap_or(usize::MAX), offset + 16)
+            }
+            size => (size as usize, offset + 8),
+        };
+        let end = offset.saturating_add(size);
+        let Some(content) = file.get(start..end) else {
+            break;
+        };
+        found.push((kind, content));
+        offset = end;
+    }
+    found
+}
+
+/// The content of the file's gain map box (`jhgm`), when it is a container with one.
+#[must_use]
+pub fn gain_map_box(file: &[u8]) -> Option<&[u8]> {
+    if !file.starts_with(CONTAINER) {
+        return None;
+    }
+    boxes(file)
+        .into_iter()
+        .find(|(kind, _)| kind == b"jhgm")
+        .map(|(_, content)| content)
+}
+
+/// The whole codestream of a file that is held whole: the file itself, or what the `jxlc`
+/// box or the `jxlp` boxes of its container hold.
+#[must_use]
+pub fn codestream(file: &[u8]) -> Option<Vec<u8>> {
+    if file.starts_with(CODESTREAM) {
+        return Some(file.to_vec());
+    }
+    if !file.starts_with(CONTAINER) {
+        return None;
+    }
+    let mut codestream = Vec::new();
+    for (kind, content) in boxes(file) {
+        match &kind {
+            b"jxlc" => codestream.extend_from_slice(content),
+            // Each part starts with its 4-byte index.
+            b"jxlp" => codestream.extend_from_slice(content.get(4..)?),
+            _ => {}
+        }
+    }
+    codestream.starts_with(CODESTREAM).then_some(codestream)
+}
+
+/// The file with one more box after everything it holds. A bare codestream is put into a
+/// container first. `None` when the file is not JPEG XL, or a box would be too large.
+#[must_use]
+pub fn with_box(file: &[u8], kind: [u8; 4], content: &[u8]) -> Option<Vec<u8>> {
+    let boxed = |kind: [u8; 4], content: &[u8]| {
+        let size = u32::try_from(content.len().checked_add(8)?).ok()?;
+        Some([&size.to_be_bytes()[..], &kind, content].concat())
+    };
+    let mut out = if file.starts_with(CONTAINER) {
+        // A last box that runs "to the end of the file" would swallow the new one.
+        let mut offset = CONTAINER.len();
+        while let Some(header) = file.get(offset..offset + 8) {
+            let size = match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+                0 => return None,
+                1 => {
+                    let large = file.get(offset + 8..offset + 16)?.try_into().ok()?;
+                    usize::try_from(u64::from_be_bytes(large)).ok()?
+                }
+                size => size as usize,
+            };
+            offset = offset.checked_add(size.max(8))?;
+        }
+        file.to_vec()
+    } else if file.starts_with(CODESTREAM) {
+        [
+            CONTAINER.to_vec(),
+            boxed(*b"ftyp", b"jxl \0\0\0\0jxl ")?,
+            boxed(*b"jxlc", file)?,
+        ]
+        .concat()
+    } else {
+        return None;
+    };
+    out.extend(boxed(kind, content)?);
+    Some(out)
+}
+
 /// The file is a JPEG recompressed losslessly: its container has a `jbrd` box, from which
 /// `djxl` rebuilds the original JPEG file exactly.
 pub fn has_jpeg_reconstruction(path: &Path) -> std::io::Result<bool> {
@@ -162,6 +264,7 @@ pub fn parse(codestream: &[u8]) -> Option<Header> {
         height,
         alpha: Alpha::Absent,
         animated: false,
+        orientation: 1,
     };
     // ImageMetadata.
     if bits.flag()? {
@@ -169,7 +272,7 @@ pub fn parse(codestream: &[u8]) -> Option<Header> {
         return Some(header);
     }
     if bits.flag()? {
-        let _orientation = bits.read(3)?;
+        header.orientation = u8::try_from(bits.read(3)? + 1).ok()?;
         if bits.flag()? {
             size_header(&mut bits)?; // intrinsic size
         }
@@ -342,6 +445,7 @@ mod tests {
             height,
             alpha,
             animated,
+            orientation: 1,
         };
         assert_eq!(
             parse(OPAQUE_1600X1200),
@@ -368,7 +472,8 @@ mod tests {
                 width: 113,
                 height: 64,
                 alpha: Alpha::Absent,
-                animated: false
+                animated: false,
+                orientation: 1,
             })
         );
         // Explicit 300x7000 (9 and 13 bits), a preview, then 10-bit with a non-alpha channel.
@@ -379,7 +484,7 @@ mod tests {
             .put(3, 0)
             .put(2, 0)
             .put(9, 299);
-        w.put(1, 0).put(1, 1).put(3, 0).put(1, 0); // extra fields, orientation 1, no intrinsic
+        w.put(1, 0).put(1, 1).put(3, 5).put(1, 0); // extra fields, orientation 6, no intrinsic
         w.put(1, 1).put(1, 1).put(2, 0).put(3, 1); // preview: div8, 16, ratio 1
         w.put(1, 0); // no animation
         w.put(1, 0).put(2, 1); // 10-bit integers
@@ -391,7 +496,8 @@ mod tests {
                 width: 300,
                 height: 7000,
                 alpha: Alpha::Unknown,
-                animated: false
+                animated: false,
+                orientation: 6,
             })
         );
     }
@@ -444,6 +550,51 @@ mod tests {
         std::fs::write(&path, b"\x89PNG\r\n\x1A\n").unwrap();
         assert_eq!(sniff(&path).unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_box_is_added_to_a_codestream_and_to_a_container() {
+        let bare = [CODESTREAM, &[1, 2, 3, 4, 5][..]].concat();
+        // A bare codestream gets a container around it.
+        let contained = with_box(&bare, *b"jhgm", b"a gain map").unwrap();
+        assert!(contained.starts_with(CONTAINER));
+        assert_eq!(codestream(&contained), Some(bare.clone()));
+        assert_eq!(gain_map_box(&contained), Some(&b"a gain map"[..]));
+        // A container gets the box after what it holds, in parts or with a large size too.
+        let part = |index: u32, content: &[u8]| [&index.to_be_bytes()[..], content].concat();
+        let large = [
+            &1u32.to_be_bytes()[..],
+            b"Exif",
+            &20u64.to_be_bytes(),
+            b"exif",
+        ]
+        .concat();
+        let boxed = |kind: &[u8; 4], content: &[u8]| {
+            let size = u32::try_from(content.len() + 8).unwrap().to_be_bytes();
+            [&size[..], kind, content].concat()
+        };
+        let parts = [
+            CONTAINER.to_vec(),
+            boxed(b"ftyp", b"jxl \0\0\0\0jxl "),
+            boxed(b"jxlp", &part(0, &bare[..3])),
+            large,
+            boxed(b"jxlp", &part(0x8000_0001, &bare[3..])),
+        ]
+        .concat();
+        assert_eq!(codestream(&parts), Some(bare.clone()));
+        assert_eq!(gain_map_box(&parts), None);
+        let with = with_box(&parts, *b"jhgm", b"another").unwrap();
+        assert_eq!(&with[..parts.len()], &parts[..]);
+        assert_eq!(gain_map_box(&with), Some(&b"another"[..]));
+        assert_eq!(codestream(&with), Some(bare.clone()));
+
+        // A last box that runs to the end of the file leaves no place for another.
+        let open = [parts.clone(), [&0u32.to_be_bytes()[..], b"xml "].concat()].concat();
+        assert_eq!(with_box(&open, *b"jhgm", b"x"), None);
+        // Not JPEG XL.
+        assert_eq!(with_box(b"something else", *b"jhgm", b"x"), None);
+        assert_eq!(codestream(b"something else"), None);
+        assert_eq!(gain_map_box(&bare), None);
     }
 
     fn tempdir() -> std::path::PathBuf {

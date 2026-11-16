@@ -26,6 +26,12 @@ between alpha versions.
   again, and written with its XMP packet. Without `--keep-metadata`, the result's EXIF holds
   the two maker note values that give the brightness and nothing else; with it, the EXIF is
   kept whole as before. As an AVIF, such a photo still loses its gain map, with the warning.
+- HDR photos in JPEG XL stay HDR. A JPEG XL's gain map (the `jhgm` box of its container) is
+  kept when the photo is compressed as a JPEG XL: the box is written as it is when the picture
+  keeps its size and was stored upright, and else the gain map is decoded, scaled with the
+  picture, and encoded again, with the same description (how it is applied, and the HDR
+  rendition's colors). Its bytes count toward `--target-size`. Before, the result was the
+  standard picture alone, with a warning.
 
 ### Fixed
 
