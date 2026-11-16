@@ -48,19 +48,64 @@ pub fn encode_gif(
         .map_err(|_| "GIF frames are at most 65535 pixels wide".to_owned())?;
     let height = u16::try_from(plan.height)
         .map_err(|_| "GIF frames are at most 65535 pixels high".to_owned())?;
+    let file =
+        File::create(output).map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    let mut writer = Writer::new(BufWriter::new(file), width, height, plan)?;
+    #[allow(clippy::cast_precision_loss)]
+    let expected_frames = (expected_seconds * f64::from(plan.fps)).max(1.0);
+    let stream = FrameStream {
+        start_ms: plan.start_ms,
+        duration_ms: plan.duration_ms,
+        fps: plan.fps,
+        width: plan.width,
+        height: plan.height,
+    };
+    stream_frames(tools, input, &stream, cancel, &mut |frame| {
+        writer.push(frame)?;
+        #[allow(clippy::cast_precision_loss)]
+        progress((writer.frames_seen as f64 / expected_frames).min(0.99));
+        Ok(())
+    })?;
+    let written = writer.frames_written + usize::from(writer.pending.is_some());
+    writer.finish()?;
+    progress(1.0);
+    Ok(format!(
+        "imagequant + gif · {} fps · {} frames",
+        plan.fps, written
+    ))
+}
 
+/// The frames FFmpeg is asked for: the selected part of the source, at a fixed rate and size.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameStream {
+    pub start_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Has FFmpeg decode `input` and hands each frame to `on_frame` as RGBA bytes, one frame in
+/// memory at a time. Fails when the selected range holds no frame.
+pub(crate) fn stream_frames(
+    tools: &Toolchain,
+    input: &Path,
+    stream: &FrameStream,
+    cancel: &AtomicBool,
+    on_frame: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), GifError> {
     let mut cmd = command(&tools.ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-v", "error"]);
-    if let Some(start) = plan.start_ms {
+    if let Some(start) = stream.start_ms {
         cmd.args(["-ss", &seconds(start)]);
     }
     cmd.arg("-i").arg(file_url(input)?);
-    if let Some(duration) = plan.duration_ms {
+    if let Some(duration) = stream.duration_ms {
         cmd.args(["-t", &seconds(duration)]);
     }
     let filter = format!(
         "fps={},scale={}:{}:flags=lanczos,format=rgba",
-        plan.fps, plan.width, plan.height
+        stream.fps, stream.width, stream.height
     );
     cmd.args(["-an", "-sn", "-vf", &filter, "-f", "rawvideo", "pipe:1"])
         .stdout(Stdio::piped())
@@ -85,13 +130,9 @@ pub fn encode_gif(
             .ok_or("ffmpeg stdout is unavailable".to_owned())?,
     );
 
-    let file =
-        File::create(output).map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    let mut writer = Writer::new(BufWriter::new(file), width, height, plan)?;
-    let frame_len = plan.width as usize * plan.height as usize * 4;
+    let frame_len = stream.width as usize * stream.height as usize * 4;
     let mut frame = vec![0u8; frame_len];
-    #[allow(clippy::cast_precision_loss)]
-    let expected_frames = (expected_seconds * f64::from(plan.fps)).max(1.0);
+    let mut frames = 0u64;
     let result = loop {
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
@@ -102,12 +143,11 @@ pub fn encode_gif(
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
             Err(e) => break Err(format!("cannot read frames from ffmpeg: {e}").into()),
         }
-        if let Err(e) = writer.push(&frame) {
+        if let Err(e) = on_frame(&frame) {
             let _ = child.kill();
             break Err(e.into());
         }
-        #[allow(clippy::cast_precision_loss)]
-        progress((writer.frames_seen as f64 / expected_frames).min(0.99));
+        frames += 1;
     };
     let status = child
         .wait()
@@ -122,18 +162,12 @@ pub fn encode_gif(
             .unwrap_or("no error message");
         return Err(format!("ffmpeg failed ({status}): {}", last.trim()).into());
     }
-    if writer.frames_seen == 0 {
+    if frames == 0 {
         return Err("the source has no frames in the selected range"
             .to_owned()
             .into());
     }
-    let written = writer.frames_written + usize::from(writer.pending.is_some());
-    writer.finish()?;
-    progress(1.0);
-    Ok(format!(
-        "imagequant + gif · {} fps · {} frames",
-        plan.fps, written
-    ))
+    Ok(())
 }
 
 fn seconds(ms: u64) -> String {

@@ -18,12 +18,29 @@ between alpha versions.
   profile, and a TIFF input stays a TIFF by default, kept only when smaller. Every quality level
   gives the same pixels. A TIFF with more than one page is skipped with a message.
   **Interface:** new `--format` and recipe `format` value `tiff` (also spelled `tif`).
+- Animated PNG: an animated PNG stays an animated PNG by default, kept only when smaller, with
+  every frame, its timing, its loop count, and its transparency. Each frame stores only the
+  rectangle that changed, identical frames are merged, and below `--quality highest` the frames
+  share one palette when it is good enough for the quality level; `highest` is always lossless.
+  `--format apng` (recipe value `apng`) makes an animated PNG from a GIF, an animated WebP, or an
+  animated JPEG XL frame for frame, from a video at `--fps`, and a PNG from a still image. An
+  animated PNG that stays one needs no FFmpeg. **Interface:** new `--format` and recipe `format`
+  value `apng`; the report's `plan.type` is `animated` with `plan.format` `apng`; `peraz watch`
+  picks up `.apng` files.
 - A BMP is compressed without `--format`: it becomes a PNG, kept only when smaller. Before, a BMP
   or TIFF needed an explicit `--format` and was skipped without one.
 - `peraz compress --cancel-on-stdin` cancels the run like the first Ctrl-C when standard input
   sends a line `cancel` or is closed: the current file stops and its partial output is removed,
   the rest is skipped, and the exit code is 130. For programs that cannot send Ctrl-C or SIGTERM,
   such as a Windows app without a console. **Interface:** new flag.
+
+### Changed
+
+- An animated PNG is an animation, not a video: `kind` is `animation` in `peraz probe` and in
+  reports (it was `video`), and by default it stays an animated PNG instead of becoming an MP4;
+  `--format mp4` still makes a video from it. An animated PNG with a single frame is a still
+  image and is compressed as a PNG. **Interface:** the `kind` and the default output of animated
+  PNG inputs changed.
 
 ## [0.5.0] - 2026-11-16
 

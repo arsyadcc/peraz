@@ -66,14 +66,33 @@ pub fn probe(tools: &Toolchain, path: &Path) -> Result<MediaInfo, EngineError> {
         tool: "ffprobe",
         message: e.to_string(),
     })?;
-    // ffprobe reports no length for an APNG; its frames carry their timing.
-    if info.container == "apng"
-        && info.duration_seconds.is_none()
-        && let Some((seconds, frames)) = frame_timing(tools, &url)
-    {
-        info.duration_seconds = Some(seconds);
-        if let Some(video) = info.video.as_mut() {
-            video.frame_count.get_or_insert(frames);
+    if info.container == "apng" {
+        // ffprobe reports no length for an APNG; its frames carry their timing.
+        if info.duration_seconds.is_none()
+            && let Some((seconds, frames)) = frame_timing(tools, &url)
+        {
+            info.duration_seconds = Some(seconds);
+            if let Some(video) = info.video.as_mut() {
+                video.frame_count.get_or_insert(frames);
+            }
+        }
+        // An animated PNG is an animation, and with a single frame a still picture.
+        let frames = crate::apng::png_animation(path)
+            .ok()
+            .flatten()
+            .map(|animation| u64::from(animation.frames))
+            .or(info.video.as_ref().and_then(|v| v.frame_count));
+        if frames.is_some_and(|frames| frames <= 1) {
+            info.kind = MediaKind::Image;
+            info.duration_seconds = None;
+            info.bit_rate = None;
+            if let Some(video) = info.video.as_mut() {
+                video.frame_count = Some(1);
+                video.frame_rate = None;
+                video.bit_rate = None;
+            }
+        } else if info.video.is_some() {
+            info.kind = MediaKind::Animation;
         }
     }
     Ok(info)
@@ -348,9 +367,9 @@ impl RawStream {
 }
 
 /// Parses ffprobe's stringly-typed numbers; `N/A` and garbage become `None`.
-/// Probes one file without FFmpeg. Works for PDFs, EPUBs, and the still images Peraz decodes
-/// itself (JPEG, PNG, WebP, BMP, TIFF); `Ok(None)` means the file needs FFmpeg (videos,
-/// animations, GIFs, HEIC, AVIF, and anything unrecognized).
+/// Probes one file without FFmpeg. Works for PDFs, EPUBs, the still images Peraz decodes
+/// itself (JPEG, PNG, WebP, BMP, TIFF), and animated PNGs; `Ok(None)` means the file needs
+/// FFmpeg (videos, other animations, GIFs, HEIC, AVIF, and anything unrecognized).
 pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineError> {
     let input_error = |source| EngineError::Input {
         path: path.to_owned(),
@@ -362,6 +381,11 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
     }
     if let Some(info) = jpeg_xl_info(path, size)? {
         return Ok(Some(info));
+    }
+    if let Some(animation) = crate::apng::png_animation(path).map_err(input_error)?
+        && animation.frames > 1
+    {
+        return Ok(Some(apng_info(animation, size)));
     }
     let Some((codec, container)) = sniff_still_image(path).map_err(input_error)? else {
         return Ok(None);
@@ -402,6 +426,34 @@ pub fn probe_without_ffmpeg(path: &Path) -> Result<Option<MediaInfo>, EngineErro
         }),
         audio: Vec::new(),
     }))
+}
+
+/// An animated PNG, read from its header: Peraz decodes it itself.
+fn apng_info(animation: crate::apng::PngAnimation, size_bytes: u64) -> MediaInfo {
+    MediaInfo {
+        kind: MediaKind::Animation,
+        container: "apng".to_owned(),
+        size_bytes,
+        duration_seconds: None,
+        bit_rate: None,
+        video: Some(VideoTrack {
+            codec: "apng".to_owned(),
+            width: animation.width,
+            height: animation.height,
+            rotation: 0,
+            frame_rate: None,
+            frame_count: Some(u64::from(animation.frames)),
+            pixel_format: None,
+            color: ColorInfo::default(),
+            alpha: if animation.alpha {
+                Alpha::Present
+            } else {
+                Alpha::Absent
+            },
+            bit_rate: None,
+        }),
+        audio: Vec::new(),
+    }
 }
 
 /// The size of `path`, which must be a regular file.
@@ -476,9 +528,9 @@ fn document_info(kind: MediaKind, size_bytes: u64) -> MediaInfo {
 }
 
 /// Recognizes still JPEG, PNG, WebP, BMP, and TIFF images from their bytes, as FFmpeg's codec
-/// and demuxer names. Animated PNG and WebP files are left to FFmpeg.
+/// and demuxer names. Animated PNGs with more than one frame are read before this, and animated
+/// WebP files are left to FFmpeg.
 fn sniff_still_image(path: &Path) -> std::io::Result<Option<(&'static str, &'static str)>> {
-    use std::io::{Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path)?;
     let mut head = [0u8; 32];
     let filled = read_up_to(&mut file, &mut head)?;
@@ -486,28 +538,7 @@ fn sniff_still_image(path: &Path) -> std::io::Result<Option<(&'static str, &'sta
     let found = if head.starts_with(b"\xFF\xD8\xFF") {
         Some(("mjpeg", "jpeg_pipe"))
     } else if head.starts_with(b"\x89PNG\r\n\x1A\n") {
-        // An animated PNG has an `acTL` chunk before its first `IDAT`.
-        file.seek(SeekFrom::Start(8))?;
-        let mut animated = false;
-        loop {
-            let mut chunk = [0u8; 8];
-            if read_up_to(&mut file, &mut chunk)? < chunk.len() {
-                break;
-            }
-            match &chunk[4..] {
-                b"acTL" => {
-                    animated = true;
-                    break;
-                }
-                b"IDAT" | b"IEND" => break,
-                _ => {
-                    let length = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    // Skip the data and its CRC.
-                    file.seek(SeekFrom::Current(i64::from(length) + 4))?;
-                }
-            }
-        }
-        (!animated).then_some(("png", "png_pipe"))
+        Some(("png", "png_pipe"))
     } else if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
         // Extended WebP: flags after the `VP8X` chunk header, bit 1 marks an animation.
         let animated =

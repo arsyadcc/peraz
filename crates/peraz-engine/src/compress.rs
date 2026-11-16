@@ -14,7 +14,8 @@ use peraz_core::units::format_bytes;
 use peraz_core::{
     Clip, ExistingOutput, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo, MediaKind,
     Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, TrimMethod, VideoOutput,
-    plan_animated, plan_animated_jxl, plan_document, plan_gif, plan_image, plan_trim, plan_video,
+    plan_animated, plan_animated_jxl, plan_apng, plan_document, plan_gif, plan_image, plan_trim,
+    plan_video, wants_apng,
 };
 
 use crate::batch::{Batch, Lane};
@@ -36,8 +37,9 @@ pub type Progress<'a> = &'a mut dyn FnMut(f64);
 /// Setting `cancel` (e.g. from a Ctrl-C handler) stops FFmpeg, removes the partial file, and
 /// returns [`Outcome::Cancelled`].
 ///
-/// Without `tools` (no FFmpeg), only PDFs, EPUBs, and still JPEG, PNG, WebP, BMP, TIFF, and JPEG XL
-/// images can be compressed; other files fail with a message saying they need FFmpeg.
+/// Without `tools` (no FFmpeg), only PDFs, EPUBs, still JPEG, PNG, WebP, BMP, TIFF, and JPEG XL
+/// images, and animated PNGs can be compressed; other files fail with a message saying they need
+/// FFmpeg.
 pub fn compress(
     tools: Option<&Toolchain>,
     caps: &Capabilities,
@@ -177,6 +179,23 @@ fn run(
     };
 
     match info.kind {
+        // An FFmpeg that cannot read animated WebP shows it as a still picture; its frames can
+        // still become an animated PNG.
+        MediaKind::Image
+            if job.recipe.video.output == VideoOutput::Apng
+                && matches!(
+                    crate::apng::sniff(&job.input),
+                    Ok(Some(crate::apng::Source::Webp))
+                ) =>
+        {
+            let animation = MediaInfo {
+                kind: MediaKind::Animation,
+                ..info.clone()
+            };
+            return make_apng(
+                batch, tools, job, &animation, &job.input, progress, cancel, report,
+            );
+        }
         MediaKind::Image => return make_image(batch, tools, job, info, progress, cancel, report),
         MediaKind::Pdf | MediaKind::Epub => {
             return make_document(batch, job, info, progress, cancel, report);
@@ -194,6 +213,11 @@ fn run(
             return outcome;
         }
         _ => {}
+    }
+    if wants_apng(info, &job.recipe) {
+        return make_apng(
+            batch, tools, job, info, &job.input, progress, cancel, report,
+        );
     }
     // Everything below runs FFmpeg.
     let Some(tools) = tools else {
@@ -294,6 +318,14 @@ fn make_jxl_animation(
         }
         progress(1.0);
         return finish(&partial, &output, info.size_bytes, false);
+    }
+    // An animated PNG is made from the frames djxl decodes, without FFmpeg.
+    if job.recipe.video.output == VideoOutput::Apng {
+        let frames = match crate::jxl::decode_animation(&job.input, workdir) {
+            Ok(frames) => frames,
+            Err(message) => return failed(message),
+        };
+        return make_apng(batch, tools, job, info, &frames, progress, cancel, report);
     }
     let Some(tools) = tools else {
         return failed(NEEDS_FFMPEG.to_owned());
@@ -661,6 +693,177 @@ fn make_animated(
     }
     // A different format is the point of the conversion: keep it even when larger.
     finish(&partial, &output, info.size_bytes, true)
+}
+
+/// An animated PNG from `media` (the input, or frames decoded from it): every frame of an
+/// animation Peraz decodes itself, with its timing, or frames FFmpeg takes from a video.
+#[allow(clippy::too_many_arguments)]
+fn make_apng(
+    batch: &Batch,
+    tools: Option<&Toolchain>,
+    job: &Job,
+    info: &MediaInfo,
+    media: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+    report: &mut Report,
+) -> Outcome {
+    let failed = |message: String| Outcome::Failed { message };
+    let mut plan = match plan_apng(info, &job.recipe) {
+        Ok(plan) => plan,
+        Err(e) => return failed(e.to_string()),
+    };
+    let is_apng = info.video.as_ref().is_some_and(|v| v.codec == "apng");
+    // An animated PNG named `.apng` keeps that name.
+    if is_apng
+        && job
+            .input
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("apng"))
+    {
+        plan.extension = "apng";
+    }
+    report.plan = Some(Plan::Animated(plan.clone()));
+    let output = match choose_output(batch, job, plan.extension) {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    let encoded = match crate::apng::sniff(media) {
+        Ok(Some(source)) => {
+            encode_apng_from_animation(media, source, &mut plan, job, progress, cancel)
+        }
+        Ok(None) => match tools {
+            Some(tools) => encode_apng_from_video(tools, media, &plan, info, job, progress, cancel),
+            None => Err(crate::apng::ApngError::Failed(NEEDS_FFMPEG.to_owned())),
+        },
+        Err(e) => Err(crate::apng::ApngError::Failed(format!(
+            "cannot read {}: {e}",
+            media.display()
+        ))),
+    };
+    report.plan = Some(Plan::Animated(plan));
+    let encoded = match encoded {
+        Ok(encoded) => encoded,
+        Err(crate::apng::ApngError::Cancelled) => return Outcome::Cancelled,
+        Err(crate::apng::ApngError::Failed(message)) => return failed(message),
+    };
+    report.encoder = Some(encoded.encoder);
+    let partial = partial_path(&output);
+    if let Err(e) = std::fs::write(&partial, &encoded.bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return failed(format!("cannot write {}: {e}", output.display()));
+    }
+    progress(1.0);
+    // An animated PNG stays one only when smaller; from another format it was asked for.
+    finish(&partial, &output, info.size_bytes, !is_apng)
+}
+
+/// Share of the progress for reading the frames of an animated PNG; writing takes the rest.
+const APNG_READ_SHARE: f64 = 0.5;
+
+/// Every frame of an animation, at the plan's size, within the selected part.
+fn encode_apng_from_animation(
+    media: &Path,
+    source: crate::apng::Source,
+    plan: &mut peraz_core::AnimatedPlan,
+    job: &Job,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<crate::apng::Encoded, crate::apng::ApngError> {
+    let frames = crate::apng::decode(media, source)?;
+    let (plays, icc) = (frames.plays, frames.icc.clone());
+    let resize = (frames.width, frames.height) != (plan.width, plan.height);
+    let mut encoder = crate::apng::Encoder::new(plan.width, plan.height);
+    #[allow(clippy::cast_precision_loss)]
+    let (start, end) = (
+        plan.start_ms.map_or(0.0, |ms| ms as f64),
+        plan.duration_ms
+            .map_or(f64::INFINITY, |ms| (plan.start_ms.unwrap_or(0) + ms) as f64),
+    );
+    let mut at = 0.0;
+    for frame in frames {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(crate::apng::ApngError::Cancelled);
+        }
+        let (pixels, delay) = frame?;
+        let shown_at = at;
+        at += delay.milliseconds();
+        // The selected part holds the frames that start inside it.
+        if shown_at < start {
+            continue;
+        }
+        if shown_at >= end {
+            break;
+        }
+        let pixels = if resize {
+            image::imageops::resize(
+                &pixels,
+                plan.width,
+                plan.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+        } else {
+            pixels
+        };
+        encoder.push(pixels.as_raw(), delay)?;
+        // The frame count is not known ahead: approach the share without reaching it.
+        #[allow(clippy::cast_precision_loss)]
+        let seen = encoder.frames_seen as f64;
+        progress(APNG_READ_SHARE * seen / (seen + 10.0));
+    }
+    plan.fps = encoder.average_fps();
+    progress(APNG_READ_SHARE);
+    encoder.finish(
+        plays,
+        peraz_core::plan::apng_palette_quality(job.recipe.quality),
+        icc.as_deref(),
+        cancel,
+    )
+}
+
+/// Frames FFmpeg takes from a video at the plan's frame rate and size.
+fn encode_apng_from_video(
+    tools: &Toolchain,
+    media: &Path,
+    plan: &peraz_core::AnimatedPlan,
+    info: &MediaInfo,
+    job: &Job,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<crate::apng::Encoded, crate::apng::ApngError> {
+    let stream = crate::gif::FrameStream {
+        start_ms: plan.start_ms,
+        duration_ms: plan.duration_ms,
+        fps: plan.fps,
+        width: plan.width,
+        height: plan.height,
+    };
+    let expected = job
+        .recipe
+        .clip
+        .seconds(info.duration_seconds)
+        .unwrap_or(0.0)
+        * f64::from(plan.fps);
+    let delay = crate::apng::Delay::of_frame_rate(plan.fps);
+    let mut encoder = crate::apng::Encoder::new(plan.width, plan.height);
+    let streamed = crate::gif::stream_frames(tools, media, &stream, cancel, &mut |frame| {
+        encoder.push(frame, delay)?;
+        #[allow(clippy::cast_precision_loss)]
+        progress((encoder.frames_seen as f64 / expected.max(1.0)).min(1.0) * APNG_READ_SHARE);
+        Ok(())
+    });
+    match streamed {
+        Ok(()) => {}
+        Err(GifError::Cancelled) => return Err(crate::apng::ApngError::Cancelled),
+        Err(GifError::Failed(message)) => return Err(message.into()),
+    }
+    // Loops forever, like the GIFs and animated WebPs made from videos.
+    encoder.finish(
+        0,
+        peraz_core::plan::apng_palette_quality(job.recipe.quality),
+        None,
+        cancel,
+    )
 }
 
 /// Share of the progress for encoding a video whose quality is measured afterwards.

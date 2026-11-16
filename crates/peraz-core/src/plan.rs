@@ -657,8 +657,9 @@ pub enum ImageDecoder {
     Djxl,
 }
 
-/// Image codecs (FFmpeg names) decoded in process.
-const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "webp", "bmp", "tiff"];
+/// Image codecs (FFmpeg names) decoded in process. `apng` here is an animated PNG with a single
+/// frame, which is a PNG.
+const NATIVE_IMAGES: &[&str] = &["mjpeg", "png", "apng", "webp", "bmp", "tiff"];
 /// Image codecs decoded through FFmpeg: HEIC/HEIF (HEVC) and AVIF (AV1) stills, and GIFs with
 /// a single frame (animated GIFs take the GIF pipeline).
 const FFMPEG_IMAGES: &[&str] = &["hevc", "av1", "gif"];
@@ -667,7 +668,7 @@ const FFMPEG_IMAGES: &[&str] = &["hevc", "av1", "gif"];
 fn source_format(codec: &str) -> Option<ImageFormat> {
     match codec {
         "mjpeg" => Some(ImageFormat::Jpeg),
-        "png" => Some(ImageFormat::Png),
+        "png" | "apng" => Some(ImageFormat::Png),
         "webp" => Some(ImageFormat::Webp),
         "av1" => Some(ImageFormat::Avif),
         "jpegxl" => Some(ImageFormat::Jxl),
@@ -898,13 +899,16 @@ pub fn plan_animated_jxl(info: &MediaInfo, recipe: &Recipe) -> Result<ImagePlan,
     })
 }
 
-/// An animated WebP or AVIF made by FFmpeg from a video or a GIF.
+/// An animated WebP or AVIF made by FFmpeg from a video or an animation, or an animated PNG
+/// made by Peraz itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnimatedPlan {
-    /// `webp` or `avif`.
+    /// `webp`, `avif`, or `apng`.
     pub format: VideoOutput,
-    /// FFmpeg encoder name.
+    /// FFmpeg encoder name, or `apng` for Peraz's own animated PNG encoder.
     pub encoder: &'static str,
+    /// Frames per second. An animated PNG made from an animation keeps every frame with its own
+    /// timing instead; this is then the source's average, rounded.
     pub fps: u32,
     pub width: u32,
     pub height: u32,
@@ -913,8 +917,81 @@ pub struct AnimatedPlan {
     /// Transparent areas are placed on white because the output format here has no alpha.
     pub flatten_alpha: bool,
     pub extension: &'static str,
-    /// FFmpeg arguments between the input and the output.
+    /// FFmpeg arguments between the input and the output (none for an animated PNG).
     pub args: Vec<String>,
+}
+
+/// Whether a file becomes an animated PNG: when the recipe asks for one, and by default when it
+/// is one.
+pub fn wants_apng(info: &MediaInfo, recipe: &Recipe) -> bool {
+    let is_apng = info.video.as_ref().is_some_and(|v| v.codec == "apng");
+    match (info.kind, recipe.video.output) {
+        (MediaKind::Video | MediaKind::Animation, VideoOutput::Apng) => true,
+        (MediaKind::Animation, VideoOutput::Keep) => is_apng,
+        _ => false,
+    }
+}
+
+/// The palette quality range (0–100, pngquant-style) for an animated PNG at a quality level:
+/// the frames share one palette of at most 256 colors when it reaches the minimum, and stay
+/// true-color (lossless) otherwise. `None` at the highest level, which is always lossless.
+pub fn apng_palette_quality(quality: Quality) -> Option<(u8, u8)> {
+    [
+        None,
+        Some((75, 95)),
+        Some((65, 85)),
+        Some((50, 75)),
+        Some((30, 60)),
+    ][quality as usize]
+}
+
+/// Plans an animated PNG from an animation (every frame kept, with its timing) or from a video
+/// (frames taken at `fps`).
+pub fn plan_apng(info: &MediaInfo, recipe: &Recipe) -> Result<AnimatedPlan, PlanError> {
+    let (Some(picture), true) = (&info.video, wants_apng(info, recipe)) else {
+        return Err(PlanError::NotAnimation { kind: info.kind });
+    };
+    let level = recipe.quality as usize;
+    let from_video = info.kind == MediaKind::Video;
+    // Lossless frames grow fast with size and frame rate: a video gets the defaults of an
+    // animated WebP unless the user set a bounding box. An animation keeps its size.
+    let default_width =
+        from_video && recipe.video.max_width.is_none() && recipe.video.max_height.is_none();
+    let max_width = recipe
+        .video
+        .max_width
+        .or(default_width.then_some([1080, 960, 720, 640, 480][level]));
+    let (width, height) = fit_within(picture.display_size(), max_width, recipe.video.max_height)
+        .unwrap_or_else(|| picture.display_size());
+    let source_fps = picture.frame_rate.map(Rational::as_f64);
+    let wanted = if from_video {
+        recipe
+            .gif
+            .fps
+            .unwrap_or([30, 24, 20, 15, 12][level])
+            .clamp(1, 50)
+    } else {
+        u32::MAX
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped to 1..=50
+    let fps = match source_fps {
+        Some(source) if f64::from(wanted) > source => source.round().clamp(1.0, 50.0) as u32,
+        _ => wanted.min(50),
+    };
+    let is_apng = picture.codec == "apng";
+    Ok(AnimatedPlan {
+        format: VideoOutput::Apng,
+        encoder: "apng",
+        fps,
+        width,
+        height,
+        start_ms: recipe.clip.start_ms,
+        duration_ms: recipe.clip.duration_ms,
+        flatten_alpha: false,
+        // An animated PNG is a PNG file; one made from another format says so in its name.
+        extension: if is_apng { "png" } else { "apng" },
+        args: Vec::new(),
+    })
 }
 
 /// Plans an animated WebP or AVIF from a video or a GIF.
@@ -1880,6 +1957,75 @@ mod tests {
         gif.video.output = VideoOutput::Gif;
         info.video.as_mut().unwrap().codec = "apng".into();
         assert!(plan_gif(&info, &gif).unwrap().converts_format);
+    }
+
+    #[test]
+    fn animated_pngs_stay_animated_pngs_and_others_convert_on_request() {
+        let mut apng = video_info(480, 270, vec![]);
+        apng.kind = MediaKind::Animation;
+        apng.video.as_mut().unwrap().codec = "apng".into();
+        apng.video.as_mut().unwrap().frame_rate = Some(Rational { num: 15, den: 1 });
+        let mut recipe = Recipe::default();
+        recipe.gif.fps = Some(5);
+        recipe.clip.start_ms = Some(500);
+        let plan = plan_apng(&apng, &recipe).unwrap();
+        assert_eq!(
+            (plan.format, plan.encoder, plan.extension),
+            (VideoOutput::Apng, "apng", "png")
+        );
+        // An animation keeps its frames and its size; `fps` reports the source's rate.
+        assert_eq!((plan.width, plan.height, plan.fps), (480, 270, 15));
+        assert_eq!(plan.start_ms, Some(500));
+        assert_eq!(plan.args, Vec::<String>::new());
+        recipe.video.max_width = Some(240);
+        let plan = plan_apng(&apng, &recipe).unwrap();
+        assert_eq!((plan.width, plan.height), (240, 134));
+
+        // Other outputs are not this plan's business.
+        for output in [VideoOutput::Gif, VideoOutput::Mp4, VideoOutput::Webp] {
+            let mut other = Recipe::default();
+            other.video.output = output;
+            assert!(!wants_apng(&apng, &other), "{output}");
+            assert!(plan_apng(&apng, &other).is_err());
+        }
+
+        // A GIF or a video becomes one only on request.
+        let mut gif = apng.clone();
+        gif.video.as_mut().unwrap().codec = "gif".into();
+        assert!(!wants_apng(&gif, &Recipe::default()));
+        let mut asked = Recipe::default();
+        asked.video.output = VideoOutput::Apng;
+        assert_eq!(plan_apng(&gif, &asked).unwrap().extension, "apng");
+        let video = video_info(1920, 1080, vec![]);
+        assert!(!wants_apng(&video, &Recipe::default()));
+        let plan = plan_apng(&video, &asked).unwrap();
+        // A video gets a size and frame rate that keep the file reasonable.
+        assert_eq!((plan.width, plan.height, plan.fps), (720, 404, 20));
+        asked.gif.fps = Some(8);
+        asked.video.max_height = Some(540);
+        let plan = plan_apng(&video, &asked).unwrap();
+        assert_eq!((plan.width, plan.height, plan.fps), (960, 540, 8));
+        // A still picture is never an animated PNG.
+        assert!(!wants_apng(
+            &image_info("png", "png_pipe", Alpha::Absent),
+            &asked
+        ));
+
+        assert_eq!(apng_palette_quality(Quality::Highest), None);
+        assert_eq!(apng_palette_quality(Quality::Balanced), Some((65, 85)));
+    }
+
+    #[test]
+    fn a_single_frame_animated_png_is_a_png() {
+        let plan = plan_image(
+            &image_info("apng", "apng", Alpha::Present),
+            &Recipe::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (plan.decoder, plan.extension, plan.converts_format),
+            (ImageDecoder::Native, "png", false)
+        );
     }
 
     #[test]

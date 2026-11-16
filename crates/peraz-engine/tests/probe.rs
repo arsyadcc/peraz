@@ -276,13 +276,38 @@ fn without_ffmpeg_leaves_other_files_to_ffmpeg() {
     let ihdr_end = 8 + 4 + 4 + 13 + 4;
     let mut actl = vec![0, 0, 0, 8];
     actl.extend_from_slice(b"acTL");
-    actl.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    actl.extend_from_slice(&[0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]);
     png.splice(ihdr_end..ihdr_end, actl);
+    // Peraz reads animated PNGs itself.
+    let animated = dir.join("animated.png");
+    std::fs::write(&animated, &png).unwrap();
+    let info = probe_without_ffmpeg(&animated).unwrap().unwrap();
+    assert_eq!(
+        (info.kind, info.container.as_str()),
+        (MediaKind::Animation, "apng")
+    );
+    let video = info.video.unwrap();
+    assert_eq!(
+        (
+            video.codec.as_str(),
+            video.width,
+            video.height,
+            video.frame_count
+        ),
+        ("apng", 8, 8, Some(3))
+    );
+    // With a single frame it is a still PNG.
+    let mut single = png.clone();
+    single[ihdr_end + 8 + 3] = 1;
+    let still = dir.join("single-frame.png");
+    std::fs::write(&still, &single).unwrap();
+    let info = probe_without_ffmpeg(&still).unwrap().unwrap();
+    assert_eq!(info.kind, MediaKind::Image);
+    assert_eq!(info.video.unwrap().codec, "png");
     // An animated WebP: a `VP8X` chunk with the animation flag.
     let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02".to_vec();
     webp.resize(64, 0);
-    let files: [(&str, &[u8]); 4] = [
-        ("animated.png", &png),
+    let files: [(&str, &[u8]); 3] = [
         ("animated.webp", &webp),
         ("still.gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;"),
         ("notes.txt", b"plain text, not media"),

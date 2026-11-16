@@ -31,8 +31,9 @@ tar.workspace = true
 lzma-rs.workspace = true
 
 [dev-dependencies]
-# Makes test images, so the tests without FFmpeg need no fixtures.
+# Make test images, so the tests without FFmpeg need no fixtures.
 image.workspace = true
+png.workspace = true
 
 [features]
 # SIMD JPEG and AVIF encoding for release builds (needs `nasm` on x86/x86_64 build machines).

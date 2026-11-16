@@ -156,11 +156,12 @@ peraz doctor                             # which FFmpeg is used and what it can 
 | --- | --- | --- |
 | Video | Anything your FFmpeg can read (MOV, MP4, MKV, WebM, …) | MP4 (H.264, HEVC) |
 | Images | JPEG, PNG, WebP, AVIF, HEIC/HEIF, JPEG XL, TIFF, BMP | JPEG, PNG, WebP, AVIF, JPEG XL, TIFF |
-| Animation | GIF, animated JPEG XL, video | GIF, animated WebP, animated AVIF, animated JPEG XL, MP4 |
+| Animation | GIF, animated PNG, animated WebP, animated JPEG XL, video | GIF, animated PNG, animated WebP, animated AVIF, animated JPEG XL, MP4 |
 | Documents | PDF, EPUB | Same format, smaller pictures inside |
 
 A TIFF stays a TIFF, compressed losslessly at its own bit depth; a BMP becomes a PNG. TIFFs with
-several pages, encrypted PDFs, and DRM-protected EPUBs are skipped.
+several pages, encrypted PDFs, and DRM-protected EPUBs are skipped. An animated WebP becomes an
+animated PNG with any FFmpeg; its other conversions need an FFmpeg that reads animated WebP.
 
 ## Usage
 
@@ -187,6 +188,8 @@ peraz --format gif --start 12 --duration 4 clip.mp4  # video → GIF (480 px, 12
 peraz -q small reaction.gif                # smaller GIF, same timing
 peraz --format webp clip.mp4               # animated WebP (or avif: smallest)
 peraz --format mp4 reaction.gif            # GIF → MP4, often 70-95% smaller
+peraz sticker.png                          # an animated PNG stays one: same frames and timing
+peraz --format apng reaction.gif           # GIF or animated WebP → animated PNG
 peraz report.pdf book.epub                 # recompress the pictures inside
 peraz --json --out-dir out/ media/*        # machine-readable report
 peraz --jobs 1 *.mov                       # one at a time, with live progress
@@ -250,6 +253,13 @@ GIF size depends on the quality level (480 px wide and 12 fps for `balanced`); `
 `--fps`, `--start`, `--duration` controls); WebP keeps transparency, AVIF places it on white.
 `--format mp4` turns a GIF into an H.264 video.
 
+An animated PNG stays an animated PNG by default, with every frame, its timing, its loop count,
+and its transparency: each frame stores only the rectangle that changed, identical frames are
+merged, and below `-q highest` the frames share one palette when that is good enough for the
+quality level (`-q highest` is always lossless). `--format apng` makes one from a GIF or an
+animated WebP, frame for frame, or from a video at `--fps`. No FFmpeg is needed for an animated
+PNG that stays one.
+
 An animated JPEG XL stays animated JPEG XL by default: `djxl` decodes its frames and `cjxl`
 encodes them again at the quality level, kept only when smaller (no FFmpeg needed). The same
 `--format gif`, `webp`, `avif`, and `mp4` convert it. `cjxl` cannot scale an animation, so
@@ -303,7 +313,7 @@ A recipe is a named set of settings, written in TOML with the same keys as the f
 version = 1                      # recipe format version
 description = "Pictures for our website"
 quality = "balanced"             # highest, high, balanced, small, smallest
-format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, mp4
+format = "webp"                  # keep, jpeg, png, webp, avif, jxl, tiff, gif, apng, mp4
 max_width = 2000                 # pixels; never scales up
 max_height = 2000
 codec = "h264"                   # h264, hevc
@@ -312,7 +322,7 @@ no_audio = false
 target_size = "25MB"             # SI units; videos only
 target_vmaf = 93                 # videos: smallest file with this VMAF score
 target_ssimulacra2 = 80          # pictures: smallest file with this SSIMULACRA2 score
-fps = 12                         # GIF and animated WebP/AVIF
+fps = 12                         # GIF, animated WebP/AVIF, and animated PNG from a video
 measure_quality = false          # score every result, also without a target
 ```
 
@@ -371,8 +381,8 @@ environment variable, and exit code; the [recipe format](docs/recipes.md) has it
 - The bundled build is FFmpeg under the GPL with x264, x265, SVT-AV1, dav1d, libwebp, and libvmaf,
   plus libjxl's `cjxl` and `djxl`, made by [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh). Its sources are published with it, in the
   [`ffmpeg-*` releases](https://github.com/arsyadcc/peraz/releases?q=ffmpeg-).
-- Without FFmpeg, Peraz still compresses JPEG, PNG, WebP, BMP, TIFF, and JPEG XL images, PDFs, and
-  EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
+- Without FFmpeg, Peraz still compresses JPEG, PNG, animated PNG, WebP, BMP, TIFF, and JPEG XL
+  images, PDFs, and EPUBs; videos, GIFs, HEIC, and AVIF need it ([details](docs/cli.md#without-ffmpeg)).
 
 ## Building from source
 

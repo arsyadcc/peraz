@@ -5,6 +5,7 @@
 //! process: never linked, so a crash or hang in FFmpeg cannot take Peraz down and a job is
 //! cancelled by stopping the process.
 
+pub mod apng;
 pub mod batch;
 pub mod compress;
 pub mod epub;

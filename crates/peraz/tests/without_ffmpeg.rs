@@ -116,6 +116,81 @@ fn tiff_and_bmp_compress_without_ffmpeg_or_a_format() {
     }
 }
 
+/// Writes an animated PNG of three whole, barely compressed frames.
+fn write_animated_png(path: &Path) {
+    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut encoder = png::Encoder::new(file, 64, 64);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fastest);
+    encoder.set_animated(3, 0).unwrap();
+    let mut writer = encoder.write_header().unwrap();
+    for step in 0..3u32 {
+        let frame = image::RgbImage::from_fn(64, 64, |x, y| {
+            if (step * 16..step * 16 + 16).contains(&x) {
+                image::Rgb([250, 40, 40])
+            } else {
+                image::Rgb([byte(x * 3), byte(y * 3), 90])
+            }
+        });
+        writer.set_frame_delay(1, 10).unwrap();
+        writer.write_image_data(frame.as_raw()).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+#[test]
+fn an_animated_png_stays_one_without_ffmpeg() {
+    let dir = setup("apng");
+    write_animated_png(&dir.0.join("moving.png"));
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--json",
+            "-q",
+            "highest",
+            "--out-dir",
+            "out",
+            "moving.png",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &json["results"][0];
+    assert_eq!(result["kind"], "animation", "{json}");
+    assert_eq!(result["outcome"]["status"], "compressed", "{json}");
+    assert_eq!(result["plan"]["type"], "animated", "{json}");
+    assert_eq!(result["plan"]["format"], "apng", "{json}");
+    assert!(dir.0.join("out/moving-1.png").is_file());
+    // `--format apng` is the same request; another animated format needs FFmpeg.
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "apng",
+            "--out-dir",
+            "out",
+            "moving.png",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let output = peraz(
+        &dir.0,
+        &[
+            "compress",
+            "--format",
+            "gif",
+            "--out-dir",
+            "out",
+            "moving.png",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(ENVIRONMENT));
+    assert!(stderr(&output).contains("moving.png needs FFmpeg"));
+}
+
 #[test]
 fn a_file_that_needs_ffmpeg_stops_the_run_before_any_work() {
     let dir = setup("needs");
