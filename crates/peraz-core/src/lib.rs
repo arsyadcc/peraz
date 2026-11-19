@@ -22,8 +22,8 @@ pub use recipe::{
     VideoCodec, VideoOutput, VideoRecipe,
 };
 pub use report::{
-    DocumentStats, ExistingOutput, Job, KeepReason, Metric, Outcome, OutputTarget, Plan, Report,
-    Score, SkipReason,
+    DocumentStats, ExistingOutput, FailReason, Job, KeepReason, Metric, Outcome, OutputTarget,
+    Plan, Report, Score, SkipReason,
 };
 
 /// Peraz version, taken from the workspace manifest.

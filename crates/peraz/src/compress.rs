@@ -652,7 +652,7 @@ fn print_check(check: &Check, reports: &[Report]) {
         );
     }
     for report in reports {
-        if let Outcome::Failed { message } = &report.outcome {
+        if let Outcome::Failed { message, .. } = &report.outcome {
             eprintln!("{}: error: {message}", report.input.display());
         }
     }
@@ -968,7 +968,7 @@ fn print_outcome(report: &Report) {
             );
         }
         Outcome::Skipped { message, .. } => println!("{input}\n  skipped: {message}"),
-        Outcome::Failed { message } => eprintln!("{input}: error: {message}"),
+        Outcome::Failed { message, .. } => eprintln!("{input}: error: {message}"),
         Outcome::Cancelled => eprintln!("{input}: cancelled"),
     }
 }

@@ -106,8 +106,9 @@ pub enum Outcome {
     KeptOriginal(KeepReason),
     /// Nothing was done, on purpose: `reason` says which rule applied, `message` the details.
     Skipped { reason: SkipReason, message: String },
-    /// Something went wrong; nothing was written.
-    Failed { message: String },
+    /// Something went wrong; nothing was written. `reason` says what kind of problem it was,
+    /// `message` the details.
+    Failed { reason: FailReason, message: String },
     /// Stopped by the user (Ctrl-C or a termination signal); nothing was written.
     Cancelled,
 }
@@ -124,6 +125,57 @@ pub enum SkipReason {
     OutputExists,
     /// The file is protected (an encrypted PDF, an EPUB with DRM) and is never changed.
     Protected,
+}
+
+/// What kind of problem made an input fail. Programs show their own text for each; the
+/// message holds the details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailReason {
+    /// The input could not be opened or read: it is gone, or not readable by this user.
+    CannotRead,
+    /// The input is damaged, incomplete, or not a media file Peraz can read.
+    CannotDecode,
+    /// The input needs FFmpeg, which was not found.
+    NeedsFfmpeg,
+    /// The result would replace an existing file, and replacing was not asked for.
+    OutputExists,
+    /// The result could not be written where it should go (permissions, a missing or
+    /// read-only folder).
+    CannotWrite,
+    /// The disk is full.
+    NoSpace,
+    /// The size asked for cannot be reached.
+    TargetUnreachable,
+    /// Reading the input worked; making the result did not.
+    EncodeFailed,
+    /// Anything else.
+    Other,
+}
+
+impl FailReason {
+    /// Every reason, for documentation checks.
+    pub const ALL: [Self; 9] = [
+        Self::CannotRead,
+        Self::CannotDecode,
+        Self::NeedsFfmpeg,
+        Self::OutputExists,
+        Self::CannotWrite,
+        Self::NoSpace,
+        Self::TargetUnreachable,
+        Self::EncodeFailed,
+        Self::Other,
+    ];
+}
+
+impl Outcome {
+    /// A failure of the kind `reason`.
+    pub fn failed(reason: FailReason, message: impl Into<String>) -> Self {
+        Self::Failed {
+            reason,
+            message: message.into(),
+        }
+    }
 }
 
 /// The plan that was executed for one input.

@@ -28,8 +28,8 @@ pub fn compress_epub(
     let failed = |message: String| DocumentError::Failed(message);
     let file = std::fs::File::open(input)
         .map_err(|e| failed(format!("cannot read {}: {e}", input.display())))?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|e| failed(format!("not a valid EPUB archive: {e}")))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| DocumentError::Damaged(format!("not a valid EPUB archive: {e}")))?;
 
     if archive.by_name("META-INF/rights.xml").is_ok() {
         return Err(DocumentError::Protected(
@@ -72,7 +72,7 @@ pub fn compress_epub(
     for index in 0..archive.len() {
         let entry = archive
             .by_index_raw(index)
-            .map_err(|e| failed(format!("damaged EPUB archive: {e}")))?;
+            .map_err(|e| DocumentError::Damaged(format!("damaged EPUB archive: {e}")))?;
         let name = entry
             .name()
             .map_err(|e| failed(e.to_string()))?

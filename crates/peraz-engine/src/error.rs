@@ -51,4 +51,17 @@ impl EngineError {
     pub fn is_environment(&self) -> bool {
         matches!(self, Self::ToolNotFound { .. } | Self::Spawn { .. })
     }
+
+    /// What kind of failure this is, for a file that fails because of it.
+    pub fn fail_reason(&self) -> peraz_core::FailReason {
+        use peraz_core::FailReason;
+        match self {
+            Self::Input { .. } => FailReason::CannotRead,
+            Self::NotMedia { .. } => FailReason::CannotDecode,
+            Self::ToolNotFound { .. } => FailReason::NeedsFfmpeg,
+            Self::Spawn { .. } | Self::ToolFailed { .. } | Self::BadOutput { .. } => {
+                FailReason::Other
+            }
+        }
+    }
 }

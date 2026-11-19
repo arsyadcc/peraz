@@ -258,9 +258,10 @@ pub(crate) fn encode_to_vmaf(
     report: &mut Report,
 ) -> Outcome {
     let Some(mut target) = plan.score_target.clone() else {
-        return Outcome::Failed {
-            message: "internal error: no score target".to_owned(),
-        };
+        return Outcome::failed(
+            peraz_core::FailReason::Other,
+            "internal error: no score target",
+        );
     };
     let workdir = match make_workdir() {
         Ok(dir) => dir,
@@ -293,7 +294,7 @@ pub(crate) fn encode_to_vmaf(
     let (crf, scores, probes) = match searched {
         Ok(found) => found,
         Err(EncodeError::Cancelled) => return Outcome::Cancelled,
-        Err(EncodeError::Failed(message)) => return Outcome::Failed { message },
+        Err(EncodeError::Failed(message)) => return crate::compress::encode_failed(message),
     };
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -335,7 +336,7 @@ pub(crate) fn encode_to_vmaf(
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,
-            EncodeError::Failed(message) => Outcome::Failed { message },
+            EncodeError::Failed(message) => crate::compress::encode_failed(message),
         };
     }
     finish(

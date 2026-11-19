@@ -27,6 +27,8 @@ use crate::image::{encode_jpeg_plain, quantize};
 pub enum DocumentError {
     /// Encrypted, DRM-protected, or signed: Peraz never touches those.
     Protected(String),
+    /// The file is damaged or not a valid document.
+    Damaged(String),
     Failed(String),
 }
 
@@ -44,7 +46,7 @@ pub fn compress_pdf(
     plan: &DocumentPlan,
 ) -> Result<(Vec<u8>, DocumentStats, Vec<String>), DocumentError> {
     let mut doc = Document::load(input)
-        .map_err(|e| DocumentError::Failed(format!("cannot read the PDF: {e}")))?;
+        .map_err(|e| DocumentError::Damaged(format!("cannot read the PDF: {e}")))?;
     // A PDF that opens without a password is decrypted on loading; one that is still encrypted
     // here needs a password.
     if doc.is_encrypted() {

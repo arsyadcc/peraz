@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use peraz_core::{
-    Alpha, ImageDecoder, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Metric, Outcome,
-    OutputTarget, Plan, Quality, Recipe, VideoOutput,
+    Alpha, FailReason, ImageDecoder, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind,
+    Metric, Outcome, OutputTarget, Plan, Quality, Recipe, VideoOutput,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
@@ -1404,7 +1404,11 @@ fn hdr_video_stays_hdr_and_refuses_h264() {
         &mut no_progress,
         &NOT_CANCELLED,
     );
-    let Outcome::Failed { message } = report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::Other,
+        message,
+    } = report.outcome
+    else {
         panic!("{:?}", report.outcome)
     };
     assert!(message.contains("--codec hevc"), "{message}");
@@ -1576,7 +1580,11 @@ fn cut_off_files_fail_and_free_their_output_name() {
         let mut cut = job(input.clone(), PathBuf::new(), Quality::Balanced);
         cut.output = OutputTarget::Folder(env.out.join("results"));
         std::fs::create_dir_all(env.out.join("results")).unwrap();
-        let Outcome::Failed { message } = run_job(&env, &cut) else {
+        let Outcome::Failed {
+            reason: FailReason::CannotDecode,
+            message,
+        } = run_job(&env, &cut)
+        else {
             panic!("{} was compressed", input.display())
         };
         assert!(message.contains("is incomplete"), "{message}");
@@ -1607,7 +1615,11 @@ fn cut_off_files_fail_and_free_their_output_name() {
             .outcome,
         );
     }
-    let Outcome::Failed { message } = &outcomes[0] else {
+    let Outcome::Failed {
+        reason: FailReason::CannotDecode,
+        message,
+    } = &outcomes[0]
+    else {
         panic!("{:?}", outcomes[0])
     };
     assert!(message.contains("cannot decode"), "{message}");
@@ -1665,7 +1677,10 @@ fn compresses_images_without_ffmpeg_and_refuses_the_rest() {
     let unknown = job(notes, dir.join("notes-1.txt"), Quality::Balanced);
     let report = compress(None, &caps, &unknown, &mut no_progress, &NOT_CANCELLED);
     match report.outcome {
-        Outcome::Failed { message } => assert!(message.contains("needs FFmpeg"), "{message}"),
+        Outcome::Failed {
+            reason: FailReason::NeedsFfmpeg,
+            message,
+        } => assert!(message.contains("needs FFmpeg"), "{message}"),
         other => panic!("{other:?}"),
     }
     std::fs::remove_dir_all(&dir).unwrap();

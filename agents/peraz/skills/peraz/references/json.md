@@ -29,7 +29,8 @@ A report (also one JSON line per file from `peraz watch --json`):
 | `outcome.status` | `compressed`, `kept_original`, `skipped`, `failed`, `cancelled`. |
 | `outcome.output`, `outcome.output_bytes` | `compressed` only: the file written and its size. |
 | `outcome.reason` | `kept_original` only: `not_smaller` (with `outcome.compressed_bytes`) or `already_within_target` (with `outcome.target_bytes`). |
-| `outcome.message` | `skipped` and `failed` only: why. `skipped` also has `outcome.reason`: `unsupported`, `already_compressed`, `output_exists`, or `protected`. |
+| `outcome.message` | `skipped` and `failed` only: why, as text. `skipped` also has `outcome.reason`: `unsupported`, `already_compressed`, `output_exists`, or `protected`. |
+| `outcome.reason` (failed) | `cannot_read`, `cannot_decode` (damaged, cut off, or not media), `needs_ffmpeg`, `output_exists` (exists without `--force`), `cannot_write`, `no_space`, `target_unreachable` (`--target-size` too small), `encode_failed`, or `other`. More may be added: treat an unknown one as `other`. |
 | `encoder` | What encoded it, as text, e.g. `libx265, HDR kept`. |
 | `warnings` | Text for people: what the result lost (an HDR gain map, metadata that did not fit). Usually empty. |
 | `document` | PDF and EPUB only: `images`, `recompressed`, `kept`, `skipped` (pictures inside). |

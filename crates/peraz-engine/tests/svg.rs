@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use peraz_core::{
-    ExistingOutput, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Outcome, OutputTarget,
-    Plan, Quality, Recipe, Report,
+    ExistingOutput, FailReason, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Outcome,
+    OutputTarget, Plan, Quality, Recipe, Report,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::Capabilities;
@@ -410,7 +410,11 @@ fn files_that_are_not_minified_say_why() {
         OutputTarget::File(dir.0.join("broken-1.svg")),
         Recipe::default(),
     );
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::CannotDecode,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("not valid XML"), "{message}");

@@ -7,8 +7,8 @@ use std::sync::atomic::AtomicBool;
 
 use image::{DynamicImage, ImageEncoder as _, RgbaImage};
 use peraz_core::{
-    Alpha, ExistingOutput, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind, Metric, Outcome,
-    OutputTarget, Plan, Quality, Recipe, Report,
+    Alpha, ExistingOutput, FailReason, ImageEncoding, ImageFormat, Job, KeepReason, MediaKind,
+    Metric, Outcome, OutputTarget, Plan, Quality, Recipe, Report,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::{Capabilities, Toolchain};
@@ -343,7 +343,11 @@ fn an_ffmpeg_without_the_encoder_says_so() {
         &mut |_| {},
         &NOT_CANCELLED,
     );
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::EncodeFailed,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("libx265"), "{message}");
@@ -355,7 +359,11 @@ fn an_ffmpeg_without_the_encoder_says_so() {
         &mut |_| {},
         &NOT_CANCELLED,
     );
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::NeedsFfmpeg,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("needs FFmpeg"), "{message}");

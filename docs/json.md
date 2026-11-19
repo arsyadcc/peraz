@@ -13,9 +13,10 @@ Every document starts with `schema_version`, currently **1**. Within one schema 
   marked *One of*. Any such change comes with a new `schema_version`.
 
 Two lists are the exception, because they grow as Peraz learns formats and reasons: the
-`format` of a recipe (`settings.format`) and the `outcome.reason` of a skipped file. A release
-can add a value to them without a new schema version, and the changelog says so; treat a value
-you do not know as "some other format" or "skipped for another reason".
+`format` of a recipe (`settings.format`) and the `outcome.reason` of a skipped or failed file.
+A release can add a value to them without a new schema version, and the changelog says so;
+treat a value you do not know as "some other format", "skipped for another reason", or `other`
+(failed).
 
 Two parts are informational and may change in any release, without a new schema version:
 
@@ -131,12 +132,13 @@ What happened to one input, in `compress` results and `watch` lines.
 | `outcome.status` | string | One of `compressed`, `kept_original`, `skipped`, `failed`, `cancelled`. |
 | `outcome.output` | string | `compressed` only: the file written. |
 | `outcome.output_bytes` | integer | `compressed` only: its size. |
-| `outcome.reason` | string | `kept_original` and `skipped` only. One of `not_smaller`, `already_within_target`, `unsupported`, `already_compressed`, `output_exists`, `protected`. The first two belong to `kept_original`. For `skipped`: `unsupported` means Peraz cannot compress this file, or not into the format asked for; `already_compressed`, that Peraz made the file and it has not changed since; `output_exists`, that `peraz watch` found the result already there; `protected`, a PDF that needs a password or is signed, or an EPUB with DRM. |
+| `outcome.reason` | string | `kept_original`, `skipped`, and `failed` only. One of `not_smaller`, `already_within_target`, `unsupported`, `already_compressed`, `output_exists`, `protected`, `cannot_read`, `cannot_decode`, `needs_ffmpeg`, `cannot_write`, `no_space`, `target_unreachable`, `encode_failed`, `other`. The first two belong to `kept_original`. For `skipped`: `unsupported` means Peraz cannot compress this file, or not into the format asked for; `already_compressed`, that Peraz made the file and it has not changed since; `output_exists`, that `peraz watch` found the result already there; `protected`, a PDF that needs a password or is signed, or an EPUB with DRM. For `failed`, see [failure reasons](#failure-reasons). |
 | `outcome.compressed_bytes` | integer | `not_smaller` only: the size of the discarded result. |
 | `outcome.target_bytes` | integer | `already_within_target` only: the `--target-size`. |
 | `outcome.message` | string | `skipped` and `failed` only: why, as text. |
 | `plan` | object or null | How the file was compressed; null when no plan was made. Informational, except `plan.type`. |
 | `plan.type` | string | One of `video`, `image`, `gif`, `animated`, `document`, `trim`. |
+| `plan.hdr` | string or null | `image` plans only: `kept` or `converted` for a picture that is HDR by its transfer function (PQ or HLG), else null. Informational, like the rest of `plan`. |
 | `encoder` | string or null | What did the encoding, as text, e.g. `libx265, HDR kept`. |
 | `document` | object or null | PDF and EPUB only: what happened to the pictures inside. |
 | `document.images` | integer | Pictures found. |
@@ -153,6 +155,24 @@ What happened to one input, in `compress` results and `watch` lines.
 
 `outcome.status` decides the exit code: any `cancelled` makes it 130, otherwise any `failed`
 makes it 1.
+
+### Failure reasons
+
+A `failed` outcome has a `reason`, so that a program can say why in its own words, and a
+`message` with the details for logs and bug reports. A release may add a reason (see
+[Versioning](#versioning)); treat one you do not know as `other`.
+
+| `reason` | When |
+| --- | --- |
+| `cannot_read` | The input could not be opened or read: it is gone, or this user may not read it. |
+| `cannot_decode` | The input is damaged, incomplete (cut off while copying), or not a media file Peraz can read. |
+| `needs_ffmpeg` | The input, or the format asked for, needs FFmpeg, which was not found. |
+| `output_exists` | The result would replace an existing file, and `--force` was not given; or every numbered name is taken, or two inputs would write the same file. |
+| `cannot_write` | The result could not be written where it should go: no permission, or the output folder does not exist or is read-only. |
+| `no_space` | The disk filled up. |
+| `target_unreachable` | `--target-size` cannot be reached, even at the lowest setting (and, unless `--keep-dimensions`, scaled down). |
+| `encode_failed` | The input was read, but making the result failed: the encoder reported an error, or has no support for what was asked. |
+| `other` | Anything else, such as options that cannot be combined for this file. |
 
 ## `peraz probe --json`
 

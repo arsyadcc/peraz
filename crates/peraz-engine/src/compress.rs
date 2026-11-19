@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use peraz_core::plan::fit_within;
 use peraz_core::units::format_bytes;
 use peraz_core::{
-    Clip, ExistingOutput, HdrHandling, ImageDecoder, ImageEncoding, Job, KeepReason, MediaInfo,
-    MediaKind, Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget, SkipReason,
-    TrimMethod, VideoOutput, plan_animated, plan_animated_jxl, plan_animated_webp, plan_apng,
-    plan_document, plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp, wants_apng,
+    Clip, ExistingOutput, FailReason, HdrHandling, ImageDecoder, ImageEncoding, Job, KeepReason,
+    MediaInfo, MediaKind, Outcome, Pass, Plan, PlanError, RateControl, Report, SizeTarget,
+    SkipReason, TrimMethod, VideoOutput, plan_animated, plan_animated_jxl, plan_animated_webp,
+    plan_apng, plan_document, plan_gif, plan_image, plan_trim, plan_video, wants_animated_webp,
+    wants_apng,
 };
 
 use crate::batch::{Batch, Lane};
@@ -27,6 +28,36 @@ use crate::probe::{probe, probe_without_ffmpeg};
 /// Why a file cannot be compressed when FFmpeg is missing.
 const NEEDS_FFMPEG: &str = "this file needs FFmpeg, which was not found. Install FFmpeg, or \
                             point Peraz to it with --ffmpeg or PERAZ_FFMPEG";
+
+/// A failure for want of FFmpeg.
+fn needs_ffmpeg() -> Outcome {
+    Outcome::failed(FailReason::NeedsFfmpeg, NEEDS_FFMPEG)
+}
+
+/// A failure while making the result, after the input was read. A disk that filled up
+/// says so in the encoder's message (the system's text for `ENOSPC`).
+pub(crate) fn encode_failed(message: String) -> Outcome {
+    let reason = if message.contains("No space left on device") {
+        FailReason::NoSpace
+    } else {
+        FailReason::EncodeFailed
+    };
+    Outcome::failed(reason, message)
+}
+
+/// A failure to write the result at `path`.
+pub(crate) fn write_failed(path: &Path, error: &std::io::Error) -> Outcome {
+    let reason = match error.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => FailReason::NoSpace,
+        _ => FailReason::CannotWrite,
+    };
+    Outcome::failed(reason, format!("cannot write {}: {error}", path.display()))
+}
+
+/// A failure the plan found, before anything was encoded.
+fn plan_failed(error: &PlanError) -> Outcome {
+    Outcome::failed(error.fail_reason(), error.to_string())
+}
 
 /// Progress callback: receives the fraction done, from 0.0 to 1.0.
 pub type Progress<'a> = &'a mut dyn FnMut(f64);
@@ -102,9 +133,7 @@ pub fn compress_observed(
         input: job.input.clone(),
         kind: None,
         input_bytes: None,
-        outcome: Outcome::Failed {
-            message: String::new(),
-        },
+        outcome: Outcome::failed(FailReason::Other, String::new()),
         plan: None,
         encoder: None,
         document: None,
@@ -142,9 +171,9 @@ pub fn compress_observed(
                     &mut report,
                 )
             }
-            Err(message) => {
+            Err(outcome) => {
                 observer.started(None);
-                Outcome::Failed { message }
+                outcome
             }
         }
     };
@@ -171,14 +200,13 @@ fn run(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
     report.kind = Some(info.kind);
     report.input_bytes = Some(info.size_bytes);
     // Decoders fill a cut-off JPEG or GIF with gray or drop frames instead of failing.
     if matches!(info.kind, MediaKind::Image | MediaKind::Animation)
         && let Some(problem) = crate::image::incomplete(&job.input)
     {
-        return failed(problem);
+        return Outcome::failed(FailReason::CannotDecode, problem);
     }
 
     // Still images and documents are in-process work; everything else runs FFmpeg encodes.
@@ -240,7 +268,7 @@ fn run(
     }
     // Everything below runs FFmpeg.
     let Some(tools) = tools else {
-        return failed(NEEDS_FFMPEG.to_owned());
+        return needs_ffmpeg();
     };
     make_moving(
         batch, tools, caps, job, info, &job.input, progress, cancel, report,
@@ -310,14 +338,14 @@ fn make_jxl_animation(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
+    let decode_failed = |message: String| Outcome::failed(FailReason::CannotDecode, message);
     if job.recipe.video.output == VideoOutput::Keep {
         let plan = match plan_animated_jxl(info, &job.recipe) {
             Ok(plan) => plan,
-            Err(e) => return failed(e.to_string()),
+            Err(e) => return plan_failed(&e),
         };
         let ImageEncoding::Jxl { quality, .. } = plan.encoding else {
-            return failed("internal error: not a JPEG XL plan".to_owned());
+            return Outcome::failed(FailReason::Other, "internal error: not a JPEG XL plan");
         };
         report.plan = Some(Plan::Image(plan));
         report.encoder = Some(format!("cjxl q{quality}"));
@@ -327,7 +355,7 @@ fn make_jxl_animation(
         };
         let frames = match crate::jxl::decode_animation(&job.input, workdir) {
             Ok(frames) => frames,
-            Err(message) => return failed(message),
+            Err(message) => return decode_failed(message),
         };
         progress(0.3);
         if cancel.load(Ordering::Relaxed) {
@@ -335,7 +363,7 @@ fn make_jxl_animation(
         }
         let bytes = match crate::jxl::encode_animation(&frames, quality, workdir) {
             Ok(bytes) => bytes,
-            Err(message) => return failed(message),
+            Err(message) => return encode_failed(message),
         };
         if cancel.load(Ordering::Relaxed) {
             return Outcome::Cancelled;
@@ -343,7 +371,7 @@ fn make_jxl_animation(
         let partial = partial_path(&output);
         if let Err(e) = std::fs::write(&partial, bytes) {
             let _ = std::fs::remove_file(&partial);
-            return failed(format!("cannot write {}: {e}", partial.display()));
+            return write_failed(&output, &e);
         }
         progress(1.0);
         return finish(&partial, &output, info.size_bytes, false);
@@ -352,23 +380,28 @@ fn make_jxl_animation(
     if job.recipe.video.output == VideoOutput::Apng {
         let frames = match crate::jxl::decode_animation(&job.input, workdir) {
             Ok(frames) => frames,
-            Err(message) => return failed(message),
+            Err(message) => return decode_failed(message),
         };
         return make_apng(batch, tools, job, info, &frames, progress, cancel, report);
     }
     let Some(tools) = tools else {
-        return failed(NEEDS_FFMPEG.to_owned());
+        return needs_ffmpeg();
     };
     let frames = match crate::jxl::decode_animation(&job.input, workdir) {
         Ok(frames) => frames,
-        Err(message) => return failed(message),
+        Err(message) => return decode_failed(message),
     };
     if cancel.load(Ordering::Relaxed) {
         return Outcome::Cancelled;
     }
     let mut decoded = match probe(tools, &frames) {
         Ok(decoded) => decoded,
-        Err(e) => return failed(format!("cannot read the frames djxl decoded: {e}")),
+        Err(e) => {
+            return Outcome::failed(
+                FailReason::Other,
+                format!("cannot read the frames djxl decoded: {e}"),
+            );
+        }
     };
     // The frames stand in for the input: an animation, compared with the input's size.
     decoded.kind = MediaKind::Animation;
@@ -379,15 +412,15 @@ fn make_jxl_animation(
 }
 
 /// Probes with FFmpeg, or without it for the files Peraz reads itself.
-fn probe_input(tools: Option<&Toolchain>, input: &Path) -> Result<MediaInfo, String> {
+fn probe_input(tools: Option<&Toolchain>, input: &Path) -> Result<MediaInfo, Outcome> {
     let probed = match tools {
         Some(tools) => probe(tools, input).map(Some),
         None => probe_without_ffmpeg(input),
     };
     match probed {
         Ok(Some(info)) => Ok(info),
-        Ok(None) => Err(NEEDS_FFMPEG.to_owned()),
-        Err(e) => Err(e.to_string()),
+        Ok(None) => Err(needs_ffmpeg()),
+        Err(e) => Err(Outcome::failed(e.fail_reason(), e.to_string())),
     }
 }
 
@@ -402,7 +435,6 @@ fn make_image(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
     let mut plan = match plan_image(info, &job.recipe) {
         Ok(plan) => plan,
         Err(
@@ -415,13 +447,13 @@ fn make_image(
                 message: e.to_string(),
             };
         }
-        Err(e) => return failed(e.to_string()),
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Image(plan.clone()));
     // SVGs and icon files are rewritten whole; a TIFF with several pages is skipped, and a
     // HEIC without its encoder fails.
     let early = make_without_pixels(batch, job, info, &plan, progress, report)
-        .or_else(|| missing_heic_encoder(&plan, tools, caps).map(failed));
+        .or_else(|| missing_heic_encoder(&plan, tools, caps));
     if let Some(outcome) = early {
         return outcome;
     }
@@ -452,14 +484,20 @@ fn make_image(
         _ => None,
     };
     let gain_map = decoded.as_ref().is_ok_and(|d| d.gain_map);
-    let encoded =
-        decoded.and_then(|d| encode_to_plan(tools, d, &mut plan, cancel, report, &mut reference));
+    let encoded = decoded.and_then(|d| {
+        encode_to_plan(tools, d, &mut plan, cancel, report, &mut reference)
+            .map_err(|(reason, message)| Outcome::failed(reason, message))
+    });
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
     let mut encoded = match encoded {
         Ok(encoded) => encoded,
-        Err(message) => return failed(message),
+        Err(Outcome::Failed {
+            reason: FailReason::EncodeFailed,
+            message,
+        }) => return encode_failed(message),
+        Err(outcome) => return outcome,
     };
     // The JPEG's own data holds the very same pixels.
     let jpeg = lossless.and_then(|_| rebuilt_jpeg.or_else(|| std::fs::read(&job.input).ok()));
@@ -477,7 +515,7 @@ fn make_image(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &encoded.bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", output.display()));
+        return write_failed(&output, &e);
     }
     let outcome = finish(&partial, &output, info.size_bytes, plan.converts_format);
     if matches!(outcome, Outcome::Compressed { .. }) {
@@ -538,10 +576,12 @@ fn encode_to_plan(
     cancel: &AtomicBool,
     report: &mut Report,
     reference: &mut Option<crate::image::Decoded>,
-) -> Result<crate::image::EncodedImage, String> {
+) -> Result<crate::image::EncodedImage, (FailReason, String)> {
+    let encoding = |message: String| (FailReason::EncodeFailed, message);
     if let Some(target) = plan.target_ssimulacra2 {
         let (encoded, score) =
-            crate::score::encode_image_to_ssimulacra2(tools, decoded, plan, target, cancel)?;
+            crate::score::encode_image_to_ssimulacra2(tools, decoded, plan, target, cancel)
+                .map_err(encoding)?;
         report.score = score.map(|score| peraz_core::Score {
             metric: peraz_core::Metric::Ssimulacra2,
             target: Some(target),
@@ -552,9 +592,10 @@ fn encode_to_plan(
         return Ok(encoded);
     }
     let Some(wanted) = plan.target else {
-        return encode_image(tools, decoded, plan);
+        return encode_image(tools, decoded, plan).map_err(encoding);
     };
-    let fitted = crate::fit::encode_image_to_size(tools, decoded, plan, cancel)?;
+    let fitted =
+        crate::fit::encode_image_to_size(tools, decoded, plan, cancel).map_err(encoding)?;
     report.plan = Some(Plan::Image(plan.clone()));
     // A measured result is scored against the picture at the size it ended up with.
     if reference.is_some() {
@@ -565,7 +606,7 @@ fn encode_to_plan(
             format_bytes(wanted.target_bytes),
             format_bytes(fitted.smallest),
         );
-        match plan.target.and_then(|found| found.scaled_to) {
+        let message = match plan.target.and_then(|found| found.scaled_to) {
             _ if fitted.lossless => format!(
                 "cannot fit under {target}: this format is lossless and the file is \
                  {smallest}, so the size is not reachable without lossy encoding; choose \
@@ -580,7 +621,8 @@ fn encode_to_plan(
                  {width}×{height}; raise the target"
             ),
             None => format!("could not fit under {target}: the smallest was {smallest}"),
-        }
+        };
+        (FailReason::TargetUnreachable, message)
     })
 }
 
@@ -614,18 +656,24 @@ fn missing_heic_encoder(
     plan: &peraz_core::ImagePlan,
     tools: Option<&Toolchain>,
     caps: &Capabilities,
-) -> Option<String> {
+) -> Option<Outcome> {
     if !matches!(plan.encoding, ImageEncoding::Heic { .. }) {
         return None;
     }
     let Some(tools) = tools else {
-        return Some(format!("HEIC output needs FFmpeg: {NEEDS_FFMPEG}"));
+        return Some(Outcome::failed(
+            FailReason::NeedsFfmpeg,
+            format!("HEIC output needs FFmpeg: {NEEDS_FFMPEG}"),
+        ));
     };
     (!caps.has_encoder(crate::heic::ENCODER)).then(|| {
-        format!(
-            "HEIC output needs FFmpeg with libx265, and {} has none; run `peraz ffmpeg \
+        Outcome::failed(
+            FailReason::EncodeFailed,
+            format!(
+                "HEIC output needs FFmpeg with libx265, and {} has none; run `peraz ffmpeg \
              install` for a build that has it, or choose another --format",
-            tools.ffmpeg.display()
+                tools.ffmpeg.display()
+            ),
         )
     })
 }
@@ -675,7 +723,6 @@ fn make_svg(
     report: &mut Report,
 ) -> Outcome {
     use crate::svg::SvgError;
-    let failed = |message: String| Outcome::Failed { message };
     let output = match choose_output(batch, job, extension) {
         Ok(output) => output,
         Err(outcome) => return outcome,
@@ -691,13 +738,16 @@ fn make_svg(
             };
         }
         Err(SvgError::Invalid(message)) => {
-            return failed(format!("{}: {message}", job.input.display()));
+            return Outcome::failed(
+                FailReason::CannotDecode,
+                format!("{}: {message}", job.input.display()),
+            );
         }
     };
     let bytes = if gzip {
         match crate::svg::gzip(&text) {
             Ok(bytes) => bytes,
-            Err(message) => return failed(message),
+            Err(message) => return encode_failed(message),
         }
     } else {
         text.into_bytes()
@@ -713,7 +763,7 @@ fn make_svg(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", output.display()));
+        return write_failed(&output, &e);
     }
     progress(1.0);
     finish(&partial, &output, info.size_bytes, false)
@@ -729,18 +779,27 @@ fn make_icon(
     progress: Progress,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
     let output = match choose_output(batch, job, extension) {
         Ok(output) => output,
         Err(outcome) => return outcome,
     };
     let bytes = match std::fs::read(&job.input) {
         Ok(bytes) => bytes,
-        Err(e) => return failed(format!("cannot read {}: {e}", job.input.display())),
+        Err(e) => {
+            return Outcome::failed(
+                FailReason::CannotRead,
+                format!("cannot read {}: {e}", job.input.display()),
+            );
+        }
     };
     let (bytes, stats) = match crate::icon::compress(&bytes, palette_quality) {
         Ok(done) => done,
-        Err(message) => return failed(format!("{}: {message}", job.input.display())),
+        Err(message) => {
+            return Outcome::failed(
+                FailReason::CannotDecode,
+                format!("{}: {message}", job.input.display()),
+            );
+        }
     };
     report.encoder = Some(format!(
         "{} · {} of {} pictures recompressed",
@@ -755,7 +814,7 @@ fn make_icon(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", output.display()));
+        return write_failed(&output, &e);
     }
     progress(1.0);
     finish(&partial, &output, info.size_bytes, false)
@@ -804,16 +863,21 @@ fn decode_image(
     tools: Option<&Toolchain>,
     input: &Path,
     decoder: ImageDecoder,
-) -> (Result<crate::image::Decoded, String>, Option<Vec<u8>>) {
-    match decoder {
+) -> (Result<crate::image::Decoded, Outcome>, Option<Vec<u8>>) {
+    let (picture, jpeg) = match decoder {
         ImageDecoder::Native => (decode_native(input), None),
-        ImageDecoder::Text => (
-            Err("internal error: an SVG has no pixels to decode".to_owned()),
-            None,
-        ),
+        ImageDecoder::Text => {
+            return (
+                Err(Outcome::failed(
+                    FailReason::Other,
+                    "internal error: an SVG has no pixels to decode",
+                )),
+                None,
+            );
+        }
         ImageDecoder::Ffmpeg => match tools {
             Some(tools) => (crate::heif::decode(tools, input), None),
-            None => (Err(NEEDS_FFMPEG.to_owned()), None),
+            None => return (Err(needs_ffmpeg()), None),
         },
         ImageDecoder::Djxl => match crate::jxl::reconstruct_jpeg(input) {
             Ok(Some(jpeg)) => (
@@ -825,7 +889,11 @@ fn decode_image(
             Ok(None) => (crate::jxl::decode_file(input), None),
             Err(message) => (Err(message), None),
         },
-    }
+    };
+    (
+        picture.map_err(|message| Outcome::failed(FailReason::CannotDecode, message)),
+        jpeg,
+    )
 }
 
 fn make_document(
@@ -838,11 +906,7 @@ fn make_document(
 ) -> Outcome {
     let plan = match plan_document(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e) => {
-            return Outcome::Failed {
-                message: e.to_string(),
-            };
-        }
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Document(plan.clone()));
     let extension = if info.kind == MediaKind::Pdf {
@@ -867,7 +931,10 @@ fn make_document(
                 message: format!("{why}; Peraz never changes protected files"),
             };
         }
-        Err(crate::pdf::DocumentError::Failed(message)) => return Outcome::Failed { message },
+        Err(crate::pdf::DocumentError::Damaged(message)) => {
+            return Outcome::failed(FailReason::CannotDecode, message);
+        }
+        Err(crate::pdf::DocumentError::Failed(message)) => return encode_failed(message),
     };
     report.encoder = Some(format!(
         "{} of {} pictures recompressed",
@@ -881,9 +948,7 @@ fn make_document(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);
-        return Outcome::Failed {
-            message: format!("cannot write {}: {e}", output.display()),
-        };
+        return write_failed(&output, &e);
     }
     progress(1.0);
     finish(&partial, &output, info.size_bytes, false)
@@ -902,11 +967,7 @@ fn make_gif(
 ) -> Outcome {
     let plan = match plan_gif(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e) => {
-            return Outcome::Failed {
-                message: e.to_string(),
-            };
-        }
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Gif(plan.clone()));
     let output = match choose_output(batch, job, "gif") {
@@ -939,7 +1000,7 @@ fn make_gif(
         (false, Some(tools)) => {
             encode_gif(tools, media, &partial, &plan, expected, progress, cancel)
         }
-        (false, None) => Err(GifError::Failed(NEEDS_FFMPEG.to_owned())),
+        (false, None) => return needs_ffmpeg(),
     };
     match made {
         Ok(encoder) => report.encoder = Some(encoder),
@@ -947,7 +1008,7 @@ fn make_gif(
             let _ = std::fs::remove_file(&partial);
             return match error {
                 GifError::Cancelled => Outcome::Cancelled,
-                GifError::Failed(message) => Outcome::Failed { message },
+                GifError::Failed(message) => encode_failed(message),
             };
         }
     }
@@ -968,11 +1029,7 @@ fn make_animated(
 ) -> Outcome {
     let plan = match plan_animated(info, &job.recipe, |name| caps.has_encoder(name)) {
         Ok(plan) => plan,
-        Err(e) => {
-            return Outcome::Failed {
-                message: e.to_string(),
-            };
-        }
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Animated(plan.clone()));
     report.encoder = Some(format!("{} · {} fps", plan.encoder, plan.fps));
@@ -1002,7 +1059,7 @@ fn make_animated(
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,
-            EncodeError::Failed(message) => Outcome::Failed { message },
+            EncodeError::Failed(message) => encode_failed(message),
         };
     }
     // A different format is the point of the conversion: keep it even when larger.
@@ -1022,10 +1079,9 @@ fn make_apng(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
     let mut plan = match plan_apng(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => return plan_failed(&e),
     };
     let is_apng = info.video.as_ref().is_some_and(|v| v.codec == "apng");
     // An animated PNG named `.apng` keeps that name.
@@ -1048,24 +1104,26 @@ fn make_apng(
         }
         Ok(None) => match tools {
             Some(tools) => encode_apng_from_video(tools, media, &plan, info, job, progress, cancel),
-            None => Err(crate::apng::ApngError::Failed(NEEDS_FFMPEG.to_owned())),
+            None => return needs_ffmpeg(),
         },
-        Err(e) => Err(crate::apng::ApngError::Failed(format!(
-            "cannot read {}: {e}",
-            media.display()
-        ))),
+        Err(e) => {
+            return Outcome::failed(
+                FailReason::CannotRead,
+                format!("cannot read {}: {e}", media.display()),
+            );
+        }
     };
     report.plan = Some(Plan::Animated(plan));
     let encoded = match encoded {
         Ok(encoded) => encoded,
         Err(crate::apng::ApngError::Cancelled) => return Outcome::Cancelled,
-        Err(crate::apng::ApngError::Failed(message)) => return failed(message),
+        Err(crate::apng::ApngError::Failed(message)) => return encode_failed(message),
     };
     report.encoder = Some(encoded.encoder);
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &encoded.bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", output.display()));
+        return write_failed(&output, &e);
     }
     progress(1.0);
     // An animated PNG stays one only when smaller; from another format it was asked for.
@@ -1175,10 +1233,9 @@ fn make_webp_animation(
     report: &mut Report,
 ) -> Outcome {
     use crate::apng::ApngError;
-    let failed = |message: String| Outcome::Failed { message };
     let as_outcome = |error: ApngError| match error {
         ApngError::Cancelled => Outcome::Cancelled,
-        ApngError::Failed(message) => Outcome::Failed { message },
+        ApngError::Failed(message) => Outcome::failed(FailReason::CannotDecode, message),
     };
     if wants_apng(info, &job.recipe) {
         return make_apng(
@@ -1187,7 +1244,7 @@ fn make_webp_animation(
     }
     if !wants_animated_webp(info, &job.recipe) {
         let Some(tools) = tools else {
-            return failed(NEEDS_FFMPEG.to_owned());
+            return needs_ffmpeg();
         };
         let workdir = match make_workdir() {
             Ok(dir) => dir,
@@ -1196,7 +1253,10 @@ fn make_webp_animation(
         let outcome = match webp_frames_for_ffmpeg(&job.input, info, &workdir, cancel) {
             Err(error) => as_outcome(error),
             Ok(frames) => match probe(tools, &frames) {
-                Err(e) => failed(format!("cannot read the decoded frames: {e}")),
+                Err(e) => Outcome::failed(
+                    FailReason::Other,
+                    format!("cannot read the decoded frames: {e}"),
+                ),
                 Ok(mut decoded) => {
                     // The frames stand in for the input: an animation, compared with the
                     // input's size.
@@ -1213,7 +1273,7 @@ fn make_webp_animation(
     }
     let mut plan = match plan_animated_webp(info, &job.recipe) {
         Ok(plan) => plan,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Animated(plan.clone()));
     let output = match choose_output(batch, job, plan.extension) {
@@ -1239,7 +1299,7 @@ fn make_webp_animation(
     report.encoder = Some(format!("libwebp q{quality} · {} frames", animation.len()));
     let bytes = match animation.encode(quality, plays) {
         Ok(bytes) => bytes,
-        Err(message) => return failed(message),
+        Err(message) => return encode_failed(message),
     };
     if cancel.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
@@ -1247,7 +1307,7 @@ fn make_webp_animation(
     let partial = partial_path(&output);
     if let Err(e) = std::fs::write(&partial, &bytes) {
         let _ = std::fs::remove_file(&partial);
-        return failed(format!("cannot write {}: {e}", output.display()));
+        return write_failed(&output, &e);
     }
     progress(1.0);
     // An animated WebP stays one only when smaller.
@@ -1399,10 +1459,9 @@ fn encode_video(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Outcome {
-    let failed = |message: String| Outcome::Failed { message };
     let plan = match plan_video(info, &job.recipe, |name| caps.has_encoder(name)) {
         Ok(plan) => plan,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Video(plan.clone()));
     report.encoder = Some(plan.encoder_label());
@@ -1441,7 +1500,7 @@ fn encode_video(
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,
-            EncodeError::Failed(message) => failed(message),
+            EncodeError::Failed(message) => encode_failed(message),
         };
     }
     finish(
@@ -1492,11 +1551,7 @@ fn make_trim(
         caps.has_encoder(name)
     }) {
         Ok(plan) => plan,
-        Err(e) => {
-            return Outcome::Failed {
-                message: e.to_string(),
-            };
-        }
+        Err(e) => return plan_failed(&e),
     };
     report.plan = Some(Plan::Trim(plan.clone()));
     report.encoder = Some(match (&plan.method, &plan.video) {
@@ -1530,7 +1585,7 @@ fn make_trim(
         let _ = std::fs::remove_file(&partial);
         return match error {
             EncodeError::Cancelled => Outcome::Cancelled,
-            EncodeError::Failed(message) => Outcome::Failed { message },
+            EncodeError::Failed(message) => encode_failed(message),
         };
     }
     // A clip is what was asked for, even in the rare case it is not smaller.
@@ -1590,8 +1645,14 @@ pub(crate) fn make_workdir() -> Result<PathBuf, Outcome> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    std::fs::create_dir_all(&workdir).map_err(|e| Outcome::Failed {
-        message: format!("cannot create a work folder: {e}"),
+    std::fs::create_dir_all(&workdir).map_err(|e| {
+        let reason = match e.kind() {
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+                FailReason::NoSpace
+            }
+            _ => FailReason::Other,
+        };
+        Outcome::failed(reason, format!("cannot create a work folder: {e}"))
     })?;
     Ok(workdir)
 }
@@ -1693,7 +1754,7 @@ fn keep_jpeg_data(
 /// [`make_workdir`] for code that reports errors as text.
 pub(crate) fn work_folder() -> Result<PathBuf, String> {
     make_workdir().map_err(|outcome| match outcome {
-        Outcome::Failed { message } => message,
+        Outcome::Failed { message, .. } => message,
         _ => "cannot create a work folder".to_owned(),
     })
 }
@@ -1715,9 +1776,7 @@ fn encode_to_target(
     report: &mut Report,
 ) -> Outcome {
     let Some(mut target) = plan.target.clone() else {
-        return Outcome::Failed {
-            message: "internal error: no size target".to_owned(),
-        };
+        return Outcome::failed(FailReason::Other, "internal error: no size target");
     };
     if info.size_bytes <= target.target_bytes {
         return Outcome::KeptOriginal(KeepReason::AlreadyWithinTarget {
@@ -1765,7 +1824,7 @@ fn run_target_passes(
     let seek = clip_args(job.recipe.clip);
     let as_outcome = |error: EncodeError| match error {
         EncodeError::Cancelled => Outcome::Cancelled,
-        EncodeError::Failed(message) => Outcome::Failed { message },
+        EncodeError::Failed(message) => encode_failed(message),
     };
     let log = "peraz-pass".to_owned();
     let mut bit_rate = target.video_bit_rate;
@@ -1810,9 +1869,10 @@ fn run_target_passes(
         let size = match std::fs::metadata(&partial) {
             Ok(m) => m.len(),
             Err(e) => {
-                return Outcome::Failed {
-                    message: format!("cannot read the encoded file: {e}"),
-                };
+                return Outcome::failed(
+                    FailReason::Other,
+                    format!("cannot read the encoded file: {e}"),
+                );
             }
         };
         if size <= target.target_bytes {
@@ -1842,14 +1902,15 @@ fn run_target_passes(
         }
     }
     let _ = std::fs::remove_file(&partial);
-    Outcome::Failed {
-        message: format!(
+    Outcome::failed(
+        FailReason::TargetUnreachable,
+        format!(
             "could not fit under {} after {} attempts (smallest was {}); try a lower --max-width or --no-audio",
             format_bytes(target.target_bytes),
             target.attempts,
             format_bytes(smallest.unwrap_or(0))
         ),
-    }
+    )
 }
 
 /// Keeps the encoded file only when it is smaller than the input ("never worse"), unless the
@@ -1858,9 +1919,10 @@ pub(crate) fn finish(partial: &Path, output: &Path, input_bytes: u64, converted:
     let output_bytes = match std::fs::metadata(partial) {
         Ok(m) => m.len(),
         Err(e) => {
-            return Outcome::Failed {
-                message: format!("cannot read the encoded file: {e}"),
-            };
+            return Outcome::failed(
+                FailReason::Other,
+                format!("cannot read the encoded file: {e}"),
+            );
         }
     };
     if output_bytes >= input_bytes && !converted {
@@ -1871,9 +1933,7 @@ pub(crate) fn finish(partial: &Path, output: &Path, input_bytes: u64, converted:
     }
     if let Err(e) = std::fs::rename(partial, output) {
         let _ = std::fs::remove_file(partial);
-        return Outcome::Failed {
-            message: format!("cannot write {}: {e}", output.display()),
-        };
+        return write_failed(output, &e);
     }
     Outcome::Compressed {
         output: output.to_owned(),
@@ -1918,29 +1978,31 @@ fn choose_output(batch: &Batch, job: &Job, extension: &str) -> Result<PathBuf, O
             return Ok(candidate);
         }
     }
-    Err(Outcome::Failed {
-        message: format!(
+    Err(Outcome::failed(
+        FailReason::OutputExists,
+        format!(
             "every name up to {} is taken; move some results away or use --output",
             job.output
                 .resolve(&job.input, extension, MAX_OUTPUT_NUMBER)
                 .display()
         ),
-    })
+    ))
 }
 
 fn check_output_folder(output: &Path) -> Result<(), Outcome> {
     if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty())
         && !dir.is_dir()
     {
-        return Err(Outcome::Failed {
-            message: format!("output folder {} does not exist", dir.display()),
-        });
+        return Err(Outcome::failed(
+            FailReason::CannotWrite,
+            format!("output folder {} does not exist", dir.display()),
+        ));
     }
     Ok(())
 }
 
 fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outcome> {
-    let fail = |message: String| Outcome::Failed { message };
+    let fail = |message: String| Outcome::failed(FailReason::OutputExists, message);
     let same_file = match (
         std::fs::canonicalize(&job.input),
         std::fs::canonicalize(output),
@@ -1949,8 +2011,9 @@ fn check_output_path(batch: &Batch, job: &Job, output: &Path) -> Result<(), Outc
         _ => false,
     };
     if same_file {
-        return Err(fail(
-            "the output path is the input file; choose a different output".to_owned(),
+        return Err(Outcome::failed(
+            FailReason::Other,
+            "the output path is the input file; choose a different output",
         ));
     }
     if !batch.claim(output, &job.input) {
@@ -2119,6 +2182,35 @@ fn parse_progress(line: &str, duration_seconds: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reason(outcome: &Outcome) -> FailReason {
+        match outcome {
+            Outcome::Failed { reason, .. } => *reason,
+            other => panic!("not a failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_full_disk_is_told_apart_from_other_write_failures() {
+        let path = Path::new("out.jpg");
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert_eq!(reason(&write_failed(path, &full)), FailReason::NoSpace);
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            reason(&write_failed(path, &denied)),
+            FailReason::CannotWrite
+        );
+        // An encoder that ran out of room says so in its own words.
+        let ffmpeg = "ffmpeg: Error writing trailer of out.mp4: No space left on device";
+        assert_eq!(
+            reason(&encode_failed(ffmpeg.to_owned())),
+            FailReason::NoSpace
+        );
+        assert_eq!(
+            reason(&encode_failed("ffmpeg: Invalid argument".to_owned())),
+            FailReason::EncodeFailed
+        );
+    }
 
     #[test]
     fn progress_lines() {

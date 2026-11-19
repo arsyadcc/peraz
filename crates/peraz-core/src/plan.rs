@@ -160,6 +160,29 @@ pub enum PlanError {
     IconConversion { format: ImageFormat },
 }
 
+impl PlanError {
+    /// What kind of failure this is, for a file that fails because of it.
+    #[must_use]
+    pub fn fail_reason(&self) -> crate::report::FailReason {
+        use crate::report::FailReason;
+        match self {
+            Self::TargetTooSmall { .. } => FailReason::TargetUnreachable,
+            Self::NoEncoder { .. } | Self::NoAnimationEncoder { .. } => FailReason::EncodeFailed,
+            Self::UnsupportedImage { .. }
+            | Self::NotVideo { .. }
+            | Self::NotImage { .. }
+            | Self::NotDocument { .. }
+            | Self::NotAnimation { .. }
+            | Self::HdrNeedsHevc
+            | Self::UnknownDuration
+            | Self::ScoreNeedsSoftware
+            | Self::AnimatedJxlResize
+            | Self::SvgConversion { .. }
+            | Self::IconConversion { .. } => FailReason::Other,
+        }
+    }
+}
+
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

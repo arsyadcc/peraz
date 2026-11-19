@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use peraz_core::{
-    ExistingOutput, ImageEncoding, ImageFormat, Job, KeepReason, Outcome, OutputTarget, Plan,
-    Recipe, Report,
+    ExistingOutput, FailReason, ImageEncoding, ImageFormat, Job, KeepReason, Outcome, OutputTarget,
+    Plan, Recipe, Report,
 };
 use peraz_engine::compress::compress;
 use peraz_engine::ffmpeg::Capabilities;
@@ -164,7 +164,11 @@ fn keeping_the_dimensions_fails_instead_of_scaling() {
     let mut recipe = fit(ImageFormat::Jpeg, 6_000);
     recipe.image.keep_dimensions = true;
     let report = run(&input, &output, recipe);
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::TargetUnreachable,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(
@@ -182,7 +186,11 @@ fn keeping_the_dimensions_fails_instead_of_scaling() {
 
     // A target nothing can reach fails too, and says how far it got.
     let report = run(&input, &output, fit(ImageFormat::Jpeg, 40));
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::TargetUnreachable,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(message.contains("could not fit under 40 B"), "{message}");
@@ -230,7 +238,11 @@ fn a_picture_within_the_target_is_compressed_as_usual() {
     // that the size needs a lossy format.
     let tiff = dir.0.join("out.tiff");
     let report = run(&input, &tiff, fit(ImageFormat::Tiff, 6_000));
-    let Outcome::Failed { message } = &report.outcome else {
+    let Outcome::Failed {
+        reason: FailReason::TargetUnreachable,
+        message,
+    } = &report.outcome
+    else {
         panic!("unexpected outcome: {:?}", report.outcome)
     };
     assert!(

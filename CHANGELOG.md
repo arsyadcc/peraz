@@ -54,6 +54,13 @@ between alpha versions.
   in browsers, and an Ultra HDR JPEG becomes an HDR AVIF. A JPEG whose own data is kept
   losslessly in a JPEG XL takes its gain map along, and gets it back as a JPEG. PNG, WebP,
   and TIFF still give the standard picture with the warning. The README has a table.
+- A failed file says why in a form programs can rely on. In `compress --json` (and `watch
+  --json`), a `failed` outcome now has a `reason` next to its `message`: `cannot_read`,
+  `cannot_decode`, `needs_ffmpeg`, `output_exists`, `cannot_write`, `no_space`,
+  `target_unreachable`, `encode_failed`, or `other`. The message stays as it was, for people
+  and bug reports. **Interface:** new field, with the same `schema_version`; like the reasons
+  of a skipped file, the list may grow, and a reason a program does not know means `other`.
+  `docs/json.md` explains each one, and also lists `plan.hdr`.
 
 ### Fixed
 

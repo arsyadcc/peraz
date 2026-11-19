@@ -16,7 +16,7 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Field path → description, per `## ` section of `docs/json.md`.
+/// Field path → description, per `## ` or `### ` section of `docs/json.md`.
 type Docs = BTreeMap<String, BTreeMap<String, String>>;
 
 fn docs() -> Option<Docs> {
@@ -24,7 +24,10 @@ fn docs() -> Option<Docs> {
     let mut docs = Docs::new();
     let mut current = String::new();
     for line in text.lines() {
-        if let Some(title) = line.strip_prefix("## ") {
+        if let Some(title) = line
+            .strip_prefix("## ")
+            .or_else(|| line.strip_prefix("### "))
+        {
             title.clone_into(&mut current);
             continue;
         }
@@ -264,6 +267,53 @@ fn check_compress_runs(docs: &Docs, out: &str, config: &Path) {
         let (json, _) = run(&all, config);
         check(docs, &json, COMPRESS, &[("results[].", "Report")]);
     }
+    check_failure_reasons(out, config);
+}
+
+/// A failed file says why with a `reason`: one for each kind of problem a program can tell
+/// apart, with the details in `message`.
+fn check_failure_reasons(out: &str, config: &Path) {
+    let damaged = Path::new(out).join("damaged.jpg");
+    std::fs::write(&damaged, b"this is not a picture").unwrap();
+    let existing = Path::new(out).join("taken.jpg");
+    std::fs::write(&existing, b"").unwrap();
+    let cases: [(&[&str], &str); 4] = [
+        (&["--out-dir", out, "fixtures/missing.png"], "cannot_read"),
+        (
+            &["--out-dir", out, damaged.to_str().unwrap()],
+            "cannot_decode",
+        ),
+        (
+            &[
+                "--output",
+                existing.to_str().unwrap(),
+                "fixtures/image-photo.jpg",
+            ],
+            "output_exists",
+        ),
+        (
+            &[
+                "--out-dir",
+                out,
+                "--target-size",
+                "40B",
+                "--format",
+                "jpeg",
+                "fixtures/image-photo.jpg",
+            ],
+            "target_unreachable",
+        ),
+    ];
+    for (args, reason) in cases {
+        let mut all = vec!["compress", "--json"];
+        all.extend_from_slice(args);
+        let (json, code) = run(&all, config);
+        let outcome = &json["results"][0]["outcome"];
+        assert_eq!(outcome["status"], "failed", "{args:?}: {outcome}");
+        assert_eq!(outcome["reason"], reason, "{args:?}: {outcome}");
+        assert!(outcome["message"].as_str().is_some_and(|m| !m.is_empty()));
+        assert_eq!(code, 1, "{args:?}");
+    }
 }
 
 const EVENTS: &str = "`peraz compress --events`";
@@ -391,9 +441,7 @@ fn documented_values_are_complete() {
             reason: peraz_core::SkipReason::AlreadyCompressed,
             message: String::new(),
         },
-        Outcome::Failed {
-            message: String::new(),
-        },
+        Outcome::failed(peraz_core::FailReason::Other, ""),
         Outcome::Cancelled,
     ]
     .map(to_json);
@@ -416,8 +464,10 @@ fn documented_values_are_complete() {
         peraz_core::SkipReason::Protected,
     ]
     .map(to_json);
+    let failures = peraz_core::FailReason::ALL.map(to_json);
     let mut all_reasons = names(&reasons, "reason");
     all_reasons.extend(names(&skips, "reason"));
+    all_reasons.extend(names(&failures, ""));
     assert_eq!(all_reasons, listed("Report", "outcome.reason"));
 
     let kinds = [
@@ -471,6 +521,26 @@ fn documented_values_are_complete() {
 }
 
 /// `toolchain.source` names every place Peraz finds FFmpeg.
+#[test]
+fn every_failure_reason_is_explained() {
+    let Some(docs) = docs() else {
+        eprintln!("skipped: docs/json.md not found");
+        return;
+    };
+    // One row per reason, in a table of its own (whose header row names the column).
+    let reasons: BTreeSet<String> = peraz_core::FailReason::ALL
+        .map(to_json)
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    let explained: BTreeSet<String> = docs["Failure reasons"]
+        .keys()
+        .filter(|key| *key != "reason")
+        .cloned()
+        .collect();
+    assert_eq!(reasons, explained);
+}
+
 #[test]
 fn documented_tool_sources_are_complete() {
     use peraz_engine::ffmpeg::ToolSource;
