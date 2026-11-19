@@ -11,6 +11,8 @@ between alpha versions.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
 ### Added
 
 - HDR photos in AVIF stay HDR. An AVIF's gain map (an ISO 21496-1 `tmap` item) is kept when
@@ -507,7 +509,8 @@ The first public alpha.
 - Release builds for macOS, Linux, and Windows, shell and PowerShell installers, and a Homebrew
   tap that installs FFmpeg too.
 
-[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/arsyadcc/peraz/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/arsyadcc/peraz/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/arsyadcc/peraz/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/arsyadcc/peraz/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/arsyadcc/peraz/compare/v0.4.0...v0.5.0
